@@ -14,7 +14,8 @@ let r = run(jitter(16.67, 0.6)); check("steady 60 fps stays high", r.final === "
 r = run(jitter(33.34, 0.6)); check("Low Power Mode 30 fps stays high", r.final === "high", JSON.stringify(r));
 r = run(jitter(8.34, 0.3)); check("ProMotion 120 fps stays high", r.final === "high", JSON.stringify(r));
 r = run((i) => (i % 3 === 0 ? 16.67 : 33.34)); check("40 fps on a 60 Hz display downgrades", r.final !== "high", JSON.stringify(r));
-r = run(jitter(45, 8)); check("~20 fps from the first frame downgrades to low", r.final === "low", JSON.stringify(r));
+check("caustics are given up first", r.tiers[0] === "high-", JSON.stringify(r.tiers));
+r = run(jitter(45, 8), 20); check("~20 fps from the first frame walks down to the lowest tier", r.final === "low-", JSON.stringify(r));
 r = run((i) => (i < 400 ? 16.67 : 30), 14); check("drop from 60 to 33 fps mid-session downgrades", r.final !== "high", JSON.stringify(r));
 console.log(failures ? `\n${failures} FAILED` : "\nALL QUALITY CHECKS PASSED");
 process.exit(failures ? 1 : 0);

@@ -1,9 +1,10 @@
 // GPU caustic transport for the softbody jelly.
 // Vendored from threejs-awesome-graphics-agent-skills
 // skills/threejs-procedural-materials/examples/softbody-jelly/gpu-caustic-field.js
-// (MIT, Copyright (c) 2026 Scott Sun). Only change: update() takes an
+// (MIT, Copyright (c) 2026 Scott Sun). Changes: update() takes an
 // `allowTransport` flag so lower quality tiers can rate-limit the compute passes
-// while the receiver atlas still follows every camera move.
+// while the receiver atlas still follows every camera move, and
+// sampleIrradiance() accepts the receiver position node (tilting tray).
 import * as THREE from "three/webgpu";
 import {
   attribute,
@@ -713,9 +714,11 @@ export class GPUCausticField {
     this.camera = camera;
   }
 
-  sampleIrradiance() {
+  // `world` is the receiver position in the frame the field was traced in;
+  // the app passes the tray-local position because the tray can be tilted.
+  sampleIrradiance(world = positionWorld) {
     return sampleCausticIrradiance({
-      world: positionWorld,
+      world,
       center: this.centerNode,
       matrix: this.lookupMatrixNode,
       light: texture(this.outputTarget.texture),

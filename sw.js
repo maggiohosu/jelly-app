@@ -1,7 +1,7 @@
 // Offline cache for 말랑젤리. Bump VERSION on every deploy so phones pick up
 // the new files (the new worker installs in the background and takes over on
 // the next launch).
-const VERSION = "v1";
+const VERSION = "v3";
 const CACHE = `mallang-jelly-${VERSION}`;
 const PRECACHE = [
   "./",
@@ -14,19 +14,22 @@ const PRECACHE = [
   "./vendor/three/three.core.min.js",
   "./vendor/three/three.webgpu.min.js",
   "./vendor/three/three.tsl.min.js",
-  "./vendor/three/addons/controls/OrbitControls.js",
+  "./vendor/three/addons/tsl/display/BloomNode.js",
+  "./vendor/three/addons/math/ConvexHull.js",
   "./src/app/main.js",
   "./src/app/audio.js",
-  "./src/app/sensors.js",
   "./src/app/quality.js",
+  "./src/app/ui.js",
   "./src/render/stage.js",
   "./src/render/jelly-view.js",
+  "./src/render/gems.js",
   "./src/render/input.js",
   "./src/render/gpu-caustic-field.js",
   "./src/workers/sim-worker.js",
   "./src/workers/optics-worker.js",
   "./src/core/cage.js",
   "./src/core/softbody.js",
+  "./src/core/world.js",
   "./src/core/optics.js",
 ];
 

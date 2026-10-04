@@ -4,7 +4,7 @@
 
 Source: https://github.com/scottstts/Threejs-Awesome-Graphics-Agent-Skills (commit d1cb23d)
 
-Used in: `src/core/*` (ported), `src/render/gpu-caustic-field.js` (vendored with a patch), `src/render/stage.js` and `src/render/jelly-view.js` (scene and material parameters), `tests/original/*` (unmodified copies for golden tests).
+Used in: `src/core/*` (ported), `src/render/gpu-caustic-field.js` (vendored with patches), `src/render/stage.js` and `src/render/jelly-view.js` (scene and material parameters), `src/render/gems.js` (TSL port of the raytraced-diamond technique), `tests/original/*` (unmodified copies for golden tests).
 
 ```
 MIT License

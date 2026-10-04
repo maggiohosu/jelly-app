@@ -17,8 +17,12 @@ export function inverse3(m) {
     (d * h - e * g) * s, (b * g - a * h) * s, (a * e - b * d) * s];
 }
 
-export function makeFlowerCage() {
-  const latticeRadius = 6, layers = 5;
+// Default options reproduce the original flower exactly (golden tests). The app
+// also builds a smaller two-jelly flower and a round "piece" blob from it.
+export const FLOWER_DEFAULTS = Object.freeze({ latticeRadius: 6, layers: 5, radius: .032, base: .010, height: .042, dome: .0024, lobe5: .19, lobe10: .018, scale: 1 });
+
+export function makeFlowerCage(options = {}) {
+  const { latticeRadius, layers, radius: R, base: Y0, height: H, dome: D, lobe5: L5, lobe10: L10, scale } = { ...FLOWER_DEFAULTS, ...options };
   const planar = [], index = new Map(), ringOrder = new Map(), xyz = [], triangles = [], tets = [];
   const key = (q, r) => q + "," + r;
 
@@ -54,12 +58,12 @@ export function makeFlowerCage() {
   for (let layer = 0; layer <= layers; layer++) {
     const t = layer / layers, rounding = .88 + .12 * Math.pow(Math.sin(Math.PI * t), .6);
     for (const [q, r] of planar) {
-      if (q === 0 && r === 0) { xyz.push(0, .010 + t * .042, 0); continue; }
+      if (q === 0 && r === 0) { xyz.push(0, Y0 + t * H, 0); continue; }
       const [ring, ordinal] = ringOrder.get(key(q, r));
       const u = ring / latticeRadius, angle = ordinal / (6 * ring) * Math.PI * 2;
-      const lobes = 1 + .19 * Math.cos(5 * angle) + .018 * Math.cos(10 * angle);
-      const radius = .032 * u * lobes * rounding;
-      xyz.push(radius * Math.cos(angle), .010 + t * .042 + .0024 * (1 - 2 * t) * Math.pow(u, 4), radius * Math.sin(angle));
+      const lobes = 1 + L5 * Math.cos(5 * angle) + L10 * Math.cos(10 * angle);
+      const radius = R * u * lobes * rounding;
+      xyz.push(radius * Math.cos(angle), Y0 + t * H + D * (1 - 2 * t) * Math.pow(u, 4), radius * Math.sin(angle));
     }
   }
 
@@ -69,6 +73,7 @@ export function makeFlowerCage() {
     const A = a + perLayer, B = b + perLayer, C = c + perLayer;
     tets.push([a, b, c, C], [a, b, B, C], [a, A, B, C]);
   }
+  if (scale !== 1) for (let i = 0; i < xyz.length; i++) xyz[i] *= scale;
   const pos = new Float64Array(xyz), faceMap = new Map();
   let totalVolume = 0;
   for (const tet of tets) {
@@ -79,7 +84,7 @@ export function makeFlowerCage() {
       pos[b + 2] - pos[a + 2], pos[c + 2] - pos[a + 2], pos[d + 2] - pos[a + 2],
     );
     if (det < 0) { [tet[1], tet[2]] = [tet[2], tet[1]]; det = -det; }
-    if (det < 1e-13) throw new Error("Invalid tetrahedralisation.");
+    if (det < 1e-13 * scale * scale * scale) throw new Error("Invalid tetrahedralisation.");
     totalVolume += det / 6;
     const [ta, tb, tc, td] = tet;
     for (const f of [[ta, tc, tb], [ta, tb, td], [ta, td, tc], [tb, tc, td]]) {
@@ -95,6 +100,57 @@ export function makeFlowerCage() {
   }
   if ([...edgeCounts.values()].some((v) => v !== 2)) throw new Error("The optical surface must be watertight.");
   return { pos, tets, boundary, totalVolume };
+}
+
+// Point location in the undeformed cage: a uniform grid of tetrahedra plus each
+// tet's inverse edge matrix, so barycentric coordinates are one 3x3 multiply.
+export function makeTetLocator(cage, cell = 0.004) {
+  const pos = cage.pos, tets = cage.tets, n = tets.length;
+  let minX = Infinity, minY = Infinity, minZ = Infinity, maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+  for (let i = 0; i < pos.length; i += 3) {
+    minX = Math.min(minX, pos[i]); maxX = Math.max(maxX, pos[i]);
+    minY = Math.min(minY, pos[i + 1]); maxY = Math.max(maxY, pos[i + 1]);
+    minZ = Math.min(minZ, pos[i + 2]); maxZ = Math.max(maxZ, pos[i + 2]);
+  }
+  const nx = Math.max(1, Math.ceil((maxX - minX) / cell)), ny = Math.max(1, Math.ceil((maxY - minY) / cell)), nz = Math.max(1, Math.ceil((maxZ - minZ) / cell));
+  const inv = new Float64Array(n * 9), cells = Array.from({ length: nx * ny * nz }, () => []);
+  for (let e = 0; e < n; e++) {
+    const [a, b, c, d] = tets[e].map((v) => v * 3);
+    const m = inverse3([pos[b] - pos[a], pos[c] - pos[a], pos[d] - pos[a], pos[b + 1] - pos[a + 1], pos[c + 1] - pos[a + 1], pos[d + 1] - pos[a + 1], pos[b + 2] - pos[a + 2], pos[c + 2] - pos[a + 2], pos[d + 2] - pos[a + 2]]);
+    inv.set(m, e * 9);
+    let lx = Infinity, ly = Infinity, lz = Infinity, hx = -Infinity, hy = -Infinity, hz = -Infinity;
+    for (const q of [a, b, c, d]) { lx = Math.min(lx, pos[q]); hx = Math.max(hx, pos[q]); ly = Math.min(ly, pos[q + 1]); hy = Math.max(hy, pos[q + 1]); lz = Math.min(lz, pos[q + 2]); hz = Math.max(hz, pos[q + 2]); }
+    const i0 = Math.max(0, Math.floor((lx - minX) / cell)), i1 = Math.min(nx - 1, Math.floor((hx - minX) / cell));
+    const j0 = Math.max(0, Math.floor((ly - minY) / cell)), j1 = Math.min(ny - 1, Math.floor((hy - minY) / cell));
+    const k0 = Math.max(0, Math.floor((lz - minZ) / cell)), k1 = Math.min(nz - 1, Math.floor((hz - minZ) / cell));
+    for (let i = i0; i <= i1; i++) for (let j = j0; j <= j1; j++) for (let k = k0; k <= k1; k++) cells[(i * ny + j) * nz + k].push(e);
+  }
+  const offsets = new Int32Array(cells.length + 1);
+  for (let i = 0; i < cells.length; i++) offsets[i + 1] = offsets[i] + cells[i].length;
+  const list = new Int32Array(offsets[cells.length]);
+  for (let i = 0; i < cells.length; i++) list.set(cells[i], offsets[i]);
+  const ids = new Int32Array(n * 4);
+  for (let e = 0; e < n; e++) for (let v = 0; v < 4; v++) ids[e * 4 + v] = tets[e][v];
+  const bary = new Float64Array(4);
+  return {
+    bounds: [minX, minY, minZ, maxX, maxY, maxZ], ids, bary,
+    // Returns the tet index containing (x,y,z) (barycentrics in .bary) or -1.
+    locate(x, y, z, eps = 1e-9) {
+      const i = Math.floor((x - minX) / cell), j = Math.floor((y - minY) / cell), k = Math.floor((z - minZ) / cell);
+      if (i < 0 || j < 0 || k < 0 || i >= nx || j >= ny || k >= nz) return -1;
+      const c = (i * ny + j) * nz + k;
+      for (let q = offsets[c]; q < offsets[c + 1]; q++) {
+        const e = list[q], o = e * 9, a = ids[e * 4] * 3;
+        const dx = x - pos[a], dy = y - pos[a + 1], dz = z - pos[a + 2];
+        const l1 = inv[o] * dx + inv[o + 1] * dy + inv[o + 2] * dz;
+        const l2 = inv[o + 3] * dx + inv[o + 4] * dy + inv[o + 5] * dz;
+        const l3 = inv[o + 6] * dx + inv[o + 7] * dy + inv[o + 8] * dz;
+        const l0 = 1 - l1 - l2 - l3;
+        if (l0 >= -eps && l1 >= -eps && l2 >= -eps && l3 >= -eps) { bary[0] = l0; bary[1] = l1; bary[2] = l2; bary[3] = l3; return e; }
+      }
+      return -1;
+    },
+  };
 }
 
 // Two Loop-subdivision passes expressed as weighted stencils over cage nodes,

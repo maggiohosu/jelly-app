@@ -224,3 +224,77 @@ export class ReceiverOptics {
     }
   }
 }
+
+// Several bodies on one receiver: one shadow/contact field fitted to the union
+// footprint, view thickness per body against that body's own BVH. Same
+// per-triangle and per-ray arithmetic as ReceiverOptics.
+export class SceneOptics {
+  constructor(size = 192) {
+    this.field = new ReceiverOptics(new Float32Array(9), new Float32Array(9), new Uint32Array([0, 1, 2]), size);
+    this.bodies = new Map(); // id → { positions, normals, indices, bvh, thickness }
+  }
+
+  // positions/normals are copied in; topology (indices) fixes the BVH layout.
+  setBody(id, indices, positions, normals) {
+    let b = this.bodies.get(id);
+    if (!b) {
+      const p = Float32Array.from(positions), n = Float32Array.from(normals);
+      b = { positions: p, normals: n, indices, bvh: new SurfaceBVH(p, indices), thickness: new Float32Array(p.length / 3).fill(.03) };
+      this.bodies.set(id, b);
+      return b;
+    }
+    b.positions.set(positions); b.normals.set(normals);
+    return b;
+  }
+
+  keepOnly(ids) {
+    for (const id of [...this.bodies.keys()]) if (!ids.has(id)) this.bodies.delete(id);
+  }
+
+  update(camX, camY, camZ) {
+    const F = this.field;
+    F.shadow.fill(0); F.contact.fill(0);
+    const D0 = LIGHT_DIRECTION[0], D1 = LIGHT_DIRECTION[1], D2 = LIGHT_DIRECTION[2];
+    let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+    for (const b of this.bodies.values()) {
+      const p = b.positions;
+      for (let i = 0; i < p.length; i += 3) {
+        const x = p[i], y = p[i + 1], z = p[i + 2];
+        const sx = x - y * D0 / D1, sz = z - y * D2 / D1;
+        minX = Math.min(minX, x, sx); maxX = Math.max(maxX, x, sx);
+        minZ = Math.min(minZ, z, sz); maxZ = Math.max(maxZ, z, sz);
+      }
+    }
+    if (minX === Infinity) return;
+    const required = Math.max(maxX - minX, maxZ - minZ) + .030 * 2;
+    F.span = clamp(required, F.minSpan, F.maxSpan);
+    F.origin[0] = (minX + maxX) / 2 - F.span / 2; F.origin[1] = (minZ + maxZ) / 2 - F.span / 2;
+    for (const b of this.bodies.values()) {
+      const p = b.positions, ix = b.indices;
+      for (let t = 0; t < ix.length; t += 3) {
+        const a = ix[t] * 3, c1 = ix[t + 1] * 3, c2 = ix[t + 2] * 3;
+        F.rasterTriangle(
+          p[a] - p[a + 1] * D0 / D1, p[a + 2] - p[a + 1] * D2 / D1,
+          p[c1] - p[c1 + 1] * D0 / D1, p[c1 + 2] - p[c1 + 1] * D2 / D1,
+          p[c2] - p[c2 + 1] * D0 / D1, p[c2 + 2] - p[c2 + 1] * D2 / D1,
+          F.shadow, 1);
+        const height = (p[a + 1] + p[c1 + 1] + p[c2 + 1]) / 3;
+        if (height < .016) F.rasterTriangle(p[a], p[a + 2], p[c1], p[c1 + 2], p[c2], p[c2 + 2], F.contact, Math.exp(-height / .0028));
+      }
+    }
+    F.blur(F.shadow); F.blur(F.contact);
+    const bytes = F.shadowBytes;
+    for (let i = 0; i < F.size * F.size; i++) {
+      bytes[i * 4] = Math.round(F.shadow[i] * 255);
+      bytes[i * 4 + 1] = Math.round(F.contact[i] * 255);
+      bytes[i * 4 + 2] = 0; bytes[i * 4 + 3] = 255;
+    }
+    F.clearTextureBorder(bytes);
+    // View thickness per body (reuse ReceiverOptics' routine on each body's arrays).
+    for (const b of this.bodies.values()) {
+      b.bvh.refit();
+      F.p = b.positions; F.n = b.normals; F.bvh = b.bvh; F.thickness = b.thickness;
+      F.updateViewThickness(camX, camY, camZ);
+    }
+  }
+}

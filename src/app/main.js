@@ -1,12 +1,14 @@
 // 말랑젤리 — app orchestration.
-// Threads: main (render + input), sim worker (240 Hz XPBD), optics worker
-// (receiver shadow + view thickness). See README for the data flow.
+// Threads: main (render, input, audio), sim worker (240 Hz XPBD jelly, paint
+// field, gems), optics worker (receiver shadow + view thickness).
 import { createStage, TRAY_RADIUS } from "../render/stage.js";
-import { createJellyView, LOOKS } from "../render/jelly-view.js";
+import { createJellyView } from "../render/jelly-view.js";
 import { createInput } from "../render/input.js";
+import { createGemLibrary, GemLayer, GEM_SHAPES } from "../render/gems.js";
+import { PAINTS } from "../core/world.js";
 import { JellyAudio } from "./audio.js";
-import { MotionSensors } from "./sensors.js";
 import { QualityGovernor } from "./quality.js";
+import { buildUI, loadSettings, physicsParams } from "./ui.js";
 
 const $ = (id) => document.getElementById(id);
 const params = new URLSearchParams(location.search);
@@ -28,10 +30,6 @@ function fatal(message) {
   if (message) $("fatal-message").textContent = message;
 }
 
-function spawnWorker(path) {
-  return new Worker(new URL(path, import.meta.url), { type: "module" });
-}
-
 function once(worker, type) {
   return new Promise((resolve, reject) => {
     const handler = ({ data }) => {
@@ -39,7 +37,6 @@ function once(worker, type) {
       else if (data.type === "error") { worker.removeEventListener("message", handler); reject(new Error(data.message)); }
     };
     worker.addEventListener("message", handler);
-    worker.addEventListener("error", (event) => reject(event.error || new Error(event.message || "worker failed")), { once: true });
   });
 }
 
@@ -56,18 +53,19 @@ async function boot() {
     fatal();
     return;
   }
-  const { renderer, scene, camera, controls, isWebGPU } = stage;
+  const { renderer, camera, isWebGPU, tray } = stage;
+  const settings = loadSettings();
 
   // ---- workers ----
-  const sim = spawnWorker("../workers/sim-worker.js");
-  const optics = spawnWorker("../workers/optics-worker.js");
-  let init;
+  const sim = new Worker(new URL("../workers/sim-worker.js", import.meta.url), { type: "module" });
+  const optics = new Worker(new URL("../workers/optics-worker.js", import.meta.url), { type: "module" });
+  let ready;
   try {
-    const ready = once(sim, "ready");
-    sim.postMessage({ type: "init", wallRadius: TRAY_RADIUS, lift: 0 });
-    init = await ready;
+    const simReady = once(sim, "ready");
+    sim.postMessage({ type: "init", wallRadius: TRAY_RADIUS, base: settings.base });
+    ready = await simReady;
     const opticsReady = once(optics, "ready");
-    optics.postMessage({ type: "init", positions: init.positions, normals: init.normals, indices: init.indices });
+    optics.postMessage({ type: "init", size: 192 });
     await opticsReady;
   } catch (error) {
     console.error(error);
@@ -75,30 +73,24 @@ async function boot() {
     return;
   }
 
-  const view = createJellyView(stage, init, { caustics: params.get("caustics") !== "0" });
+  const view = createJellyView(stage, ready, { caustics: params.get("caustics") !== "0" });
+  const gemLibrary = createGemLibrary({ quality: "high" });
+  const gemLayer = new GemLayer(tray, gemLibrary);
+  gemLayer.setGlowScale(settings.glow);
   const audio = new JellyAudio();
+  audio.setVolumes({ master: settings.master, piano: settings.piano, gems: settings.gems, boing: settings.boing });
+  audio.tempo = settings.tempo;
+  audio.onNote((note) => { view.pulse(0.12 + 0.3 * note.velocity); needsRender = true; });
 
-  // GPU errors: a validation error (e.g. a limit an older GPU lacks) only
-  // affects the caustic passes, so drop those. A lost device (memory pressure,
-  // driver reset) leaves a frozen canvas: reload once, and if it happens again
-  // within a minute fall back to the WebGL2 lite renderer.
+  // GPU errors only affect the caustic passes: drop those. A lost device leaves
+  // a frozen canvas: reload once; twice within a minute → WebGL2 lite mode.
   renderer.onError = (error) => {
     console.warn("GPU error:", error.message);
-    if (view.hasCaustics) {
-      view.disableCaustics();
-      updateStatus();
-      toast("이 기기에서는 무지갯빛 굴절광을 끄고 계속할게요");
-      needsRender = true;
-    }
+    if (view.hasCaustics) { view.disableCaustics(); updateStatus(); toast("이 기기에서는 무지갯빛 굴절광을 끄고 계속할게요"); needsRender = true; }
   };
   renderer.onDeviceLost = (info) => {
     console.warn("GPU device lost:", info.message);
-    // iOS may reclaim the GPU while the app is in the background; that is not
-    // a reason to degrade, just restart when the user comes back.
-    if (document.hidden) {
-      document.addEventListener("visibilitychange", () => location.reload(), { once: true });
-      return;
-    }
+    if (document.hidden) { document.addEventListener("visibilitychange", () => location.reload(), { once: true }); return; }
     let history = [];
     try { history = JSON.parse(sessionStorage.getItem("jelly-device-lost") || "[]"); } catch { /* private mode */ }
     const now = Date.now();
@@ -109,78 +101,78 @@ async function boot() {
     location.replace(url.href);
   };
 
-  const badge = $("badge");
-  if (!isWebGPU) { badge.hidden = false; badge.textContent = "라이트 모드"; }
+  if (!isWebGPU) { $("badge").hidden = false; $("badge").textContent = "라이트 모드"; }
 
-  // ---- state shared with the loop ----
+  // ---- shared state ----
   const pendingEvents = [];
-  const positionPool = [];
+  const freeBuffers = [];
   const opticsPool = [];
-  let simBusy = false, pendingDt = 0, rawTarget = null;
-  let opticsBusy = false, opticsClock = 1, opticsDirty = true;
-  let causticClock = 1;
+  let topologySent = false;
+  let simBusy = false, pendingDt = 0;
+  let opticsBusy = false, opticsClock = 1, opticsDirty = true, causticClock = 1;
   let started = false, needsRender = true, running = false, frameId = 0;
   let lastTime = 0, lastAnimatedTime = 0;
-  let awake = true, lastGrab = null, lastGrabStretch = 0;
-  let tiltEnabled = true, soundEnabled = true;
-  const cameraPosition = [0, 0, 0];
+  let asleep = false, grabbing = false, grabHeight = 0, lastStretch = 0;
+  let lastGravity = null, lastGravitySent = 0;
+  let soundOn = true;
+  const eventLog = [];
 
   const governor = new QualityGovernor({
-    onTier: (tier) => {
-      applyResolution();
-      updateStatus();
-      if (started && governor.auto) toast(`화질을 '${tier.label}'(으)로 맞췄어요`);
-    },
-    onPhysicsRate: (hz) => {
-      pendingEvents.push({ type: "rate", hz });
-      updateStatus();
-      toast("기기 부하가 커서 물리 계산을 절전 모드로 바꿨어요");
-    },
+    onTier: (tier) => { applyTier(tier); if (started && governor.auto) toast(`화질을 '${tier.label}'(으)로 맞췄어요`); },
+    onPhysicsRate: (hz) => { pendingEvents.push({ type: "rate", hz }); updateStatus(); toast("기기 부하가 커서 물리 계산을 절전 모드로 바꿨어요"); },
   });
-
+  function applyTier(tier) {
+    view.setCaustics(tier.caustics);
+    stage.setBloom(tier.bloom);
+    gemLibrary.setQuality(tier.gems);
+    applyResolution();
+    updateStatus();
+  }
   function applyResolution() {
     const width = Math.max(1, canvas.clientWidth), height = Math.max(1, canvas.clientHeight);
-    const dpr = Math.min(window.devicePixelRatio || 1, governor.tier.maxDpr);
-    stage.resize(width, height, dpr);
-    needsRender = true;
-    opticsDirty = true;
+    stage.resize(width, height, Math.min(window.devicePixelRatio || 1, governor.tier.maxDpr));
+    needsRender = true; opticsDirty = true;
   }
   window.addEventListener("resize", applyResolution);
   screen.orientation?.addEventListener?.("change", applyResolution);
-  applyResolution();
 
   function updateStatus() {
-    const backend = isWebGPU ? (view.hasCaustics ? "WebGPU · 코스틱 켜짐" : "WebGPU · 코스틱 꺼짐") : "WebGL2 라이트 모드 (코스틱 없음)";
-    $("status-line").textContent = `${backend} · 화질 ${governor.tier.label}${governor.auto ? "(자동)" : ""} · 물리 ${governor.physicsHz}Hz`;
+    const t = governor.tier;
+    const backend = isWebGPU ? "WebGPU" : "WebGL2 라이트 모드";
+    const fx = [view.causticsOn ? "코스틱" : null, stage.bloomOn ? "후광" : null].filter(Boolean).join("·") || "효과 최소";
+    $("status-line").textContent = `${backend} · ${fx} · 화질 ${t.label}${governor.auto ? "(자동)" : ""} · 물리 ${governor.physicsHz}Hz`;
   }
-  updateStatus();
 
   // ---- sim worker ----
   sim.onmessage = ({ data }) => {
-    if (data.type === "error") { console.error(data.message); return; }
+    if (data.type === "error") { console.error(data.message); simBusy = false; return; }
     if (data.type !== "frame") return;
     simBusy = false;
-    if (data.positions) {
-      view.applyFrame(data);
-      positionPool.push({ positions: data.positions, normals: data.normals });
-      needsRender = true;
-      opticsDirty = true;
-    } else {
-      view.applyFrame(data);
-      if (data.returned) positionPool.push(data.returned);
-    }
-    awake = !data.sleeping;
+    view.sync(data, (buffer) => freeBuffers.push(buffer));
+    gemLayer.update(data.gems || EMPTY, data.gemCount);
+    if (data.gems) freeBuffers.push(data.gems.buffer);
+    asleep = data.asleep;
+    if (data.positions || data.dye || data.gemCount) { needsRender = true; opticsDirty = opticsDirty || Boolean(data.positions); }
+    grabbing = Boolean(data.grab);
     if (data.grab) {
-      lastGrab = data.grab;
-      const p = data.grab.point, t = data.grab.target;
-      lastGrabStretch = Math.hypot(p[0] - t[0], p[1] - t[1], p[2] - t[2]);
+      grabHeight = data.grab.target[1];
+      lastStretch = Math.hypot(data.grab.point[0] - data.grab.target[0], data.grab.point[1] - data.grab.target[1], data.grab.point[2] - data.grab.target[2]);
     }
     if (data.stepMs) governor.physics(data.stepMs, performance.now());
-    if (data.resetHappened) toast("젤리가 너무 늘어나서 처음 모양으로 돌아왔어요");
-    const pitch = LOOKS[view.flavour].pitch;
-    if (data.impact > 0.22) audio.boing((data.impact - 0.18) / 0.6, pitch, "drop");
-    else if (data.wallImpact > 0.12) audio.boing((data.wallImpact - 0.1) / 0.4 * 0.7, pitch * 0.9, "bump");
+    for (const e of data.events) {
+      if (eventLog.push(e.type) > 200) eventLog.shift();
+      switch (e.type) {
+        case "release": if (e.stretch > 0.006) audio.boing(e.stretch / 0.03, 1.08, "snap"); break;
+        case "clink": audio.clink(e.strength, e.seed); break;
+        case "gemFull": toast("보석이 가득 찼어요"); break;
+        case "gemIn": case "gemScatter": audio.clink(0.45, (e.gem || e.count || 1) * 13); break;
+        case "recovered": toast("젤리가 너무 늘어나서 처음 모양으로 돌아왔어요"); break;
+      }
+    }
+    if (data.impact > 0.22) audio.boing((data.impact - 0.18) / 0.6, 1, "drop");
+    else if (data.wallImpact > 0.12) audio.boing((data.wallImpact - 0.1) / 0.4 * 0.7, 0.9, "bump");
   };
+  const EMPTY = new Float32Array(0);
 
   // ---- optics worker ----
   optics.onmessage = ({ data }) => {
@@ -188,70 +180,119 @@ async function boot() {
     if (data.type !== "field") return;
     opticsBusy = false;
     view.applyField(data);
-    opticsPool.push({ positions: data.positions, normals: data.normals, shadowBytes: data.shadowBytes, thickness: data.thickness });
+    for (const buffer of data.returned) opticsPool.push(buffer);
+    opticsPool.push(data.shadowBytes.buffer);
     needsRender = true;
   };
-
+  function takeOpticsBuffer(bytes, Type) {
+    const i = opticsPool.findIndex((b) => b.byteLength === bytes);
+    return i >= 0 ? new Type(opticsPool.splice(i, 1)[0]) : null;
+  }
   function sendOptics() {
-    const buffers = opticsPool.pop() || {
-      positions: new Float32Array(view.positionAttribute.array.length),
-      normals: new Float32Array(view.normalAttribute.array.length),
-    };
-    buffers.positions.set(view.positionAttribute.array);
-    buffers.normals.set(view.normalAttribute.array);
-    camera.updateMatrixWorld();
-    cameraPosition[0] = camera.position.x; cameraPosition[1] = camera.position.y; cameraPosition[2] = camera.position.z;
-    const transfer = [buffers.positions.buffer, buffers.normals.buffer];
-    if (buffers.shadowBytes) transfer.push(buffers.shadowBytes.buffer, buffers.thickness.buffer);
-    optics.postMessage({ type: "update", camera: cameraPosition, ...buffers }, transfer);
+    const position = view.geometry.attributes.position.array, normal = view.geometry.attributes.normal.array;
+    const positions = takeOpticsBuffer(position.byteLength, Float32Array) || new Float32Array(position.length);
+    const normals = takeOpticsBuffer(normal.byteLength, Float32Array) || new Float32Array(normal.length);
+    positions.set(position); normals.set(normal);
+    const body = { id: 0, positions, normals };
+    if (!topologySent) { body.indices = view.geometry.index.array; topologySent = true; }
+    const shadowBytes = takeOpticsBuffer(192 * 192 * 4, Uint8Array) || undefined;
+    const transfer = [positions.buffer, normals.buffer];
+    if (shadowBytes) transfer.push(shadowBytes.buffer);
+    const tc = stage.syncTrayCamera();
+    optics.postMessage({ type: "update", camera: [tc.position.x, tc.position.y, tc.position.z], bodies: [body], keep: [0], shadowBytes }, transfer);
     opticsBusy = true;
     opticsDirty = false;
   }
 
   // ---- input ----
-  createInput({
-    canvas, camera, controls, view,
+  const input = createInput({
+    canvas, stage, view,
     isEnabled: () => started,
-    onGrabStart: (hit) => { pendingEvents.push({ type: "grabStart", ...hit }); rawTarget = hit.point; },
-    onGrabMove: (point) => { rawTarget = point; },
-    onGrabEnd: () => {
-      pendingEvents.push({ type: "grabEnd" });
-      rawTarget = null;
-      if (lastGrabStretch > 0.006) audio.boing(lastGrabStretch / 0.03, LOOKS[view.flavour].pitch * 1.08, "snap");
-      lastGrabStretch = 0; lastGrab = null;
+    onGrabStart: (hit) => { pendingEvents.push({ type: "grabStart", a: hit.a, b: hit.b, c: hit.c, bary: hit.bary, point: hit.point }); grabbing = true; },
+    onGrabMove: (point) => pendingEvents.push({ type: "target", point }),
+    onGrabEnd: () => { pendingEvents.push({ type: "grabEnd" }); grabbing = false; },
+    onTap: () => {},
+    onTilt: (dir, angle) => {
+      if (!dir || angle <= 0) { stage.tilt.goalAngle = 0; return; }
+      stage.tilt.goalAxis.set(0, 1, 0).cross(dir).normalize();
+      stage.tilt.goalAngle = angle;
+      needsRender = true;
     },
     onInteract: dismissHint,
   });
 
-  // ---- sensors ----
-  const sensors = new MotionSensors({
-    onGravity: (vector, friction) => pendingEvents.push({ type: "gravity", vector, friction }),
-    onShake: (v) => { pendingEvents.push({ type: "impulse", v }); dismissHint(); },
-  });
+  // ---- pipette: a droplet falls from the tip and colours the jelly on impact ----
+  function releaseDrop(paint, hit) {
+    const p = PAINTS[paint];
+    view.dropPaint(hit.point, hit.normal, p.hex, () => {
+      pendingEvents.push({ type: "drop", point: hit.point, paint });
+      audio.drip(0.7, p.sigma ? 1 : 1.25);
+      needsRender = true;
+    });
+    needsRender = true;
+    dismissHint();
+  }
+  function pickAt(x, y) { return view.pick(x, y, canvas.getBoundingClientRect()); }
+  function topHit() {
+    // the jelly's top seen from the camera
+    const v = view.state.center.clone(); v.y = view.geometry.boundingBox.max.y * 0.98;
+    tray.localToWorld(v); v.project(camera);
+    const r = canvas.getBoundingClientRect();
+    return pickAt(r.left + (v.x + 1) / 2 * r.width, r.top + (1 - v.y) / 2 * r.height);
+  }
 
   // ---- UI ----
-  for (const chip of document.querySelectorAll("[data-flavour]")) {
-    chip.addEventListener("click", () => {
-      view.setFlavour(chip.dataset.flavour);
-      for (const other of document.querySelectorAll("[data-flavour]")) {
-        other.classList.toggle("active", other === chip);
-        other.setAttribute("aria-checked", String(other === chip));
-      }
-      causticClock = 1; opticsDirty = true; needsRender = true;
-    });
-  }
-  $("nudge").addEventListener("click", () => { pendingEvents.push({ type: "nudge" }); dismissHint(); });
-  $("reset").addEventListener("click", () => pendingEvents.push({ type: "reset", lift: 0.02 }));
-  $("tilt").addEventListener("click", () => setTilt(!tiltEnabled, true));
-  $("sound").addEventListener("click", () => {
-    soundEnabled = !soundEnabled;
-    audio.setEnabled(soundEnabled);
-    if (soundEnabled) audio.unlock();
-    $("sound").classList.toggle("on", soundEnabled);
-    $("sound").setAttribute("aria-pressed", String(soundEnabled));
-    $("sound").textContent = soundEnabled ? "🔊" : "🔇";
+  const sendParams = () => pendingEvents.push({ type: "params", params: physicsParams(settings) });
+  sendParams();
+  buildUI({
+    settings,
+    onSetting: (key, value) => {
+      if (key === "softness" || key === "wobble" || key === "slippery") sendParams();
+      else if (key === "glow") { gemLayer.setGlowScale(value); stage.setBloomStrength(Math.max(0.2, value)); needsRender = true; }
+      else if (key === "tempo") audio.tempo = value;
+      else if (["piano", "gems", "boing", "master"].includes(key)) audio.setVolumes({ [key]: value });
+    },
+    onPaintDrop: (paint, x, y, holding) => {
+      const hit = pickAt(x, y);
+      if (!hit) { if (!holding) toast("젤리 위에서 놓아 주세요"); return false; }
+      releaseDrop(paint, hit);
+      return true;
+    },
+    onPaintTap: (paint) => { const hit = topHit(); if (hit) releaseDrop(paint, hit); },
+    onGemDrop: (shape, color, x, y) => {
+      const hit = pickAt(x, y);
+      if (!hit) { toast("젤리 위에 놓아 주세요"); return; }
+      pendingEvents.push({ type: "gemAdd", a: hit.a, b: hit.b, c: hit.c, bary: hit.bary, shape, color, radius: gemRadius(shape) });
+      dismissHint();
+    },
+    onGemTap: (shape, color) => pendingEvents.push({ type: "gemScatter", count: 1, shape, color, radius: gemRadius(shape) }),
+    onScatter: (color) => pendingEvents.push({ type: "gemScatter", count: 6, shape: -1, color, radius: gemRadius(-1), shapes: GEM_SHAPES.length }),
+    onBase: (base) => { pendingEvents.push({ type: "base", base }); needsRender = true; },
   });
-  $("info-button").addEventListener("click", () => { $("sheet").hidden = false; });
+  function gemRadius(shape) {
+    const shapes = gemLibrary.shapes;
+    const r = shape >= 0 ? shapes[shape].radius : shapes.reduce((m, s) => Math.max(m, s.radius), 0);
+    return Math.max(0.0025, Math.min(0.0045, r * 0.85));
+  }
+
+  $("gems").addEventListener("click", () => {
+    const drawer = $("gem-drawer"), open = drawer.hidden;
+    drawer.hidden = !open;
+    $("gems").setAttribute("aria-pressed", String(open));
+    $("gems").classList.toggle("on", open);
+    if (open) dismissHint();
+  });
+  $("nudge").addEventListener("click", () => { pendingEvents.push({ type: "nudge" }); dismissHint(); });
+  $("reset").addEventListener("click", () => { pendingEvents.push({ type: "reset", base: settings.base }); });
+  $("sound").addEventListener("click", () => {
+    soundOn = !soundOn;
+    audio.setEnabled(soundOn);
+    if (soundOn) audio.unlock();
+    $("sound").classList.toggle("on", soundOn);
+    $("sound").setAttribute("aria-pressed", String(soundOn));
+    $("sound").textContent = soundOn ? "🔊" : "🔇";
+  });
+  $("settings-button").addEventListener("click", () => { $("sheet").hidden = false; });
   $("sheet-close").addEventListener("click", () => { $("sheet").hidden = true; });
   $("sheet").addEventListener("click", (event) => { if (event.target === $("sheet")) $("sheet").hidden = true; });
   for (const button of document.querySelectorAll("[data-quality]")) {
@@ -259,22 +300,6 @@ async function boot() {
       governor.setManual(button.dataset.quality);
       for (const other of document.querySelectorAll("[data-quality]")) other.classList.toggle("active", other === button);
     });
-  }
-
-  function setTilt(on, fromUser = false) {
-    tiltEnabled = on;
-    $("tilt").classList.toggle("on", on);
-    $("tilt").setAttribute("aria-pressed", String(on));
-    if (on) {
-      if (fromUser) {
-        sensors.requestPermission().then((result) => {
-          if (result === "granted") sensors.start();
-          else { setTilt(false); toast("모션 권한이 없어요 · 설정 › 앱 › Safari › 모션 및 방향 접근"); }
-        });
-      } else sensors.start();
-    } else {
-      sensors.stop();
-    }
   }
 
   let hintTimer = 0;
@@ -286,30 +311,31 @@ async function boot() {
     setTimeout(() => { hint.hidden = true; }, 450);
   }
 
-  // ---- start (user gesture: permissions + audio unlock) ----
+  // ---- start (user gesture: audio unlock) ----
   const startButton = $("start-button");
   startButton.addEventListener("click", () => {
     if (started) return;
     audio.unlock();                          // must stay synchronous in the gesture
-    const permission = sensors.available ? sensors.requestPermission() : Promise.resolve("unsupported");
     started = true;
     $("start").classList.add("leaving");
     setTimeout(() => { $("start").hidden = true; }, 460);
     $("toolbar").hidden = false;
     $("hint").hidden = false;
-    hintTimer = setTimeout(dismissHint, 6000);
-    pendingEvents.push({ type: "reset", lift: 0.025 }); // little drop-in
-    permission.then((result) => {
-      if (result === "granted") setTilt(true);
-      else {
-        setTilt(false);
-        $("hint-tilt").hidden = true;
-        if (result === "denied") toast("기울기 센서 없이 시작해요 (📱 버튼으로 다시 시도)");
-      }
-      // Desktop browsers expose the API but never fire it: hide the toggle.
-      setTimeout(() => { if (tiltEnabled && !sensors.receivedOrientation) { setTilt(false); $("tilt").hidden = true; $("hint-tilt").hidden = true; } }, 1500);
-    });
+    hintTimer = setTimeout(dismissHint, 8000);
   });
+
+  // ---- tray tilt → gravity in tray coordinates ----
+  function syncGravity(now) {
+    const g = stage.trayGravity();
+    const angle = stage.tilt.angle * 180 / Math.PI;
+    const changed = (g === null) !== (lastGravity === null) || (g && lastGravity && Math.hypot(g[0] - lastGravity[0], g[1] - lastGravity[1], g[2] - lastGravity[2]) > 0.05);
+    if (!changed || (now - lastGravitySent < 33 && g !== null)) return;
+    lastGravity = g; lastGravitySent = now;
+    const blend = Math.min(1, Math.max(0, (angle - 1.5) / 8));
+    const base = physicsParams(settings).friction;
+    const friction = g ? { staticFriction: (0.65 + (0.12 - 0.65) * blend) * base, dynamicFriction: (0.42 + (0.08 - 0.42) * blend) * base } : null;
+    pendingEvents.push({ type: "gravity", vector: g, friction });
+  }
 
   // ---- frame loop ----
   function frame(now) {
@@ -318,86 +344,76 @@ async function boot() {
     lastTime = now;
     const tier = governor.tier;
 
-    const cameraMoved = controls.update();
-    if (cameraMoved) { needsRender = true; opticsDirty = true; }
+    const cameraMoved = stage.rig.update();
+    const tilting = stage.updateTilt();
+    if (cameraMoved || tilting) { needsRender = true; opticsDirty = true; }
+    if (tilting || stage.tilt.goalAngle !== stage.tilt.angle) syncGravity(now);
+    if (view.updateDrops(dt)) needsRender = true;
 
-    // Physics: one tick in flight at a time; time keeps accumulating meanwhile.
+    // Physics: one tick in flight; wall time keeps accumulating meanwhile.
     pendingDt += dt;
-    if (!simBusy && (awake || pendingEvents.length || rawTarget)) {
-      const buffers = positionPool.pop() || null;
-      const message = { type: "tick", dt: pendingDt, rawTarget, buffers, events: pendingEvents.splice(0) };
-      sim.postMessage(message, buffers ? [buffers.positions.buffer, buffers.normals.buffer] : []);
+    if (!simBusy && (!asleep || pendingEvents.length || grabbing)) {
+      const free = freeBuffers.splice(0, 24);
+      sim.postMessage({ type: "tick", dt: pendingDt, events: pendingEvents.splice(0), free }, free);
       simBusy = true;
       pendingDt = 0;
-    } else if (!awake && !simBusy) {
-      pendingDt = 0;
-    }
+    } else if (asleep && !simBusy) pendingDt = 0;
 
-    // Receiver shadow + view thickness at the tier rate, only when something changed.
     opticsClock += dt;
-    if (!opticsBusy && opticsDirty && opticsClock >= 1 / tier.opticsHz) {
-      opticsClock = 0;
-      sendOptics();
-    }
+    if (!opticsBusy && opticsDirty && opticsClock >= 1 / tier.opticsHz) { opticsClock = 0; sendOptics(); }
 
-    // Frame pacing is sampled while something is animating, whether or not
-    // this particular rAF had a new physics frame to draw.
-    const animating = awake || cameraMoved || rawTarget !== null;
+    // Music follows how much the jelly moves (and how high the finger pulls).
+    const activity = Math.min(1, view.state.energy / 0.05 + (grabbing ? 0.25 + lastStretch * 25 : 0));
+    const register = grabbing ? Math.min(1, Math.max(0, grabHeight / 0.11)) : 0.45;
+    audio.setActivity(started ? activity : 0, register);
+
+    if (view.updateGlow(dt, settings.glow)) needsRender = true;
+
+    const animating = !asleep || cameraMoved || tilting || grabbing;
     if (animating) {
       if (lastAnimatedTime) governor.sample(now - lastAnimatedTime, now);
       lastAnimatedTime = now;
-    } else {
-      lastAnimatedTime = 0;
-    }
+    } else lastAnimatedTime = 0;
 
     if (!needsRender) return;
     needsRender = false;
-
+    stage.syncTrayCamera();
     causticClock += dt;
-    const allowTransport = causticClock >= 1 / tier.causticHz;
+    const allowTransport = tier.causticHz > 0 && causticClock >= 1 / tier.causticHz;
     if (allowTransport) causticClock = 0;
     view.updateCaustics(renderer, allowTransport);
-    renderer.render(scene, camera);
+    stage.render();
   }
 
-  function startLoop() {
-    if (running) return;
-    running = true;
-    lastTime = 0; lastAnimatedTime = 0;
-    frameId = requestAnimationFrame(frame);
-  }
-  function stopLoop() {
-    running = false;
-    cancelAnimationFrame(frameId);
-  }
+  function startLoop() { if (running) return; running = true; lastTime = 0; lastAnimatedTime = 0; frameId = requestAnimationFrame(frame); }
+  function stopLoop() { running = false; cancelAnimationFrame(frameId); }
 
-  // Background: stop everything (battery, thermal) and resume cleanly.
   document.addEventListener("visibilitychange", () => {
     if (document.hidden) {
       stopLoop();
+      input.cancel();
       pendingEvents.push({ type: "pause", paused: true });
       if (!simBusy) { sim.postMessage({ type: "tick", dt: 0, events: pendingEvents.splice(0) }); simBusy = true; }
-      if (tiltEnabled) sensors.stop();
       audio.suspend();
     } else {
       pendingEvents.push({ type: "pause", paused: false });
-      if (tiltEnabled && started) sensors.start();
       audio.resume();
       needsRender = true;
       startLoop();
     }
   });
 
-  try {
-    await renderer.compileAsync(scene, camera);
-  } catch (error) {
-    console.warn("compileAsync failed", error);
-  }
+  applyTier(governor.tier);
+  // Prime one physics frame so the jelly exists before the first render.
+  sim.postMessage({ type: "tick", dt: 0, events: pendingEvents.splice(0) });
+  simBusy = true;
+  await new Promise((resolve) => { const check = () => (simBusy ? setTimeout(check, 16) : resolve()); check(); });
+  try { await renderer.compileAsync(stage.scene, camera); } catch (error) { console.warn("compileAsync failed", error); }
   sendOptics();
   startLoop();
   startButton.disabled = false;
   startButton.textContent = "시작하기";
-  window.__jelly = { stage, view, governor, sim, optics, pendingEvents, get awake() { return awake; } };
+  window.__jelly = { stage, view, governor, sim, optics, pendingEvents, gemLayer, audio, eventLog, get asleep() { return asleep; } };
 }
 
 boot().catch((error) => {

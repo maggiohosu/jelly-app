@@ -1,36 +1,36 @@
-// Optics worker: refractive receiver shadow/contact field and view thickness.
-//   init   {positions, normals, indices}  (rest shape; fixes the BVH topology)
-//   update {positions, normals, camera:[x,y,z], shadowBytes?, thickness?}
-import { ReceiverOptics } from "../core/optics.js";
+// Optics worker: refractive receiver shadow/contact for every body on the tray
+// plus per-body view thickness.
+//   init   {size}
+//   update {camera:[x,y,z], bodies:[{id, indices?, positions, normals}], keep:[ids], shadowBytes?}
+import { SceneOptics } from "../core/optics.js";
 
 let optics = null;
+const topology = new Map(); // id → indices (sent once per body)
 
 self.onmessage = ({ data }) => {
   try {
     if (data.type === "init") {
-      optics = new ReceiverOptics(data.positions.slice(), data.normals.slice(), data.indices);
-      self.postMessage({ type: "ready", size: optics.size });
+      optics = new SceneOptics(data.size || 192);
+      self.postMessage({ type: "ready", size: optics.field.size });
     } else if (data.type === "update") {
       const started = performance.now();
-      optics.p.set(data.positions);
-      optics.n.set(data.normals);
-      optics.updateReceiver();
-      optics.updateViewThickness(data.camera[0], data.camera[1], data.camera[2]);
-      let shadowBytes = data.shadowBytes, thickness = data.thickness;
-      if (!shadowBytes || shadowBytes.length !== optics.shadowBytes.length) shadowBytes = new Uint8Array(optics.shadowBytes.length);
-      if (!thickness || thickness.length !== optics.thickness.length) thickness = new Float32Array(optics.thickness.length);
-      shadowBytes.set(optics.shadowBytes);
-      thickness.set(optics.thickness);
-      self.postMessage({
-        type: "field",
-        shadowBytes,
-        thickness,
-        origin: optics.origin.slice(),
-        span: optics.span,
-        ms: performance.now() - started,
-        positions: data.positions,
-        normals: data.normals,
-      }, [shadowBytes.buffer, thickness.buffer, data.positions.buffer, data.normals.buffer]);
+      const keep = new Set(data.keep);
+      optics.keepOnly(keep);
+      for (const id of [...topology.keys()]) if (!keep.has(id)) topology.delete(id);
+      for (const b of data.bodies) {
+        if (b.indices) topology.set(b.id, b.indices);
+        const indices = topology.get(b.id);
+        if (indices) optics.setBody(b.id, indices, b.positions, b.normals);
+      }
+      optics.update(data.camera[0], data.camera[1], data.camera[2]);
+      const F = optics.field;
+      let shadowBytes = data.shadowBytes;
+      if (!shadowBytes || shadowBytes.length !== F.shadowBytes.length) shadowBytes = new Uint8Array(F.shadowBytes.length);
+      shadowBytes.set(F.shadowBytes);
+      const thickness = [], transfer = [shadowBytes.buffer];
+      for (const [id, b] of optics.bodies) { const t = b.thickness.slice(); thickness.push({ id, thickness: t }); transfer.push(t.buffer); }
+      const returned = data.bodies.map((b) => b.positions.buffer).concat(data.bodies.map((b) => b.normals.buffer));
+      self.postMessage({ type: "field", shadowBytes, thickness, origin: F.origin.slice(), span: F.span, ms: performance.now() - started, returned }, transfer.concat(returned));
     }
   } catch (error) {
     self.postMessage({ type: "error", message: String(error && error.stack || error) });

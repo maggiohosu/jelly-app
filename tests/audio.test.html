@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Audio engine tests</title>
+  <link rel="icon" href="data:,">
+  <style>
+    :root { color-scheme: light dark; --bg: #fff; --fg: #111; }
+    @media (prefers-color-scheme: dark) { :root { --bg: #111; --fg: #eee; } }
+    body { background: var(--bg); color: var(--fg); font: 13px/1.45 ui-monospace, Menlo, monospace; margin: 16px; }
+    pre { white-space: pre-wrap; word-break: break-word; }
+    button { font: inherit; padding: 6px 12px; }
+  </style>
+</head>
+<body>
+  <h1>JellyAudio offline tests</h1>
+  <p>Renders the engine into OfflineAudioContexts and checks levels, timing, tuning and voice limits.
+     Run headless with <code>node tests/audio.test.mjs</code>.
+     <button id="listen" disabled>▶ play main render</button></p>
+  <pre id="log"></pre>
+  <script type="module" src="./audio-test.js"></script>
+</body>
+</html>

@@ -11,6 +11,7 @@
 //   - per-mode floor friction override
 //   - directional impulse for shake gestures
 //   - impact reporting for sound
+//   - grab weights from a shell hit, point evaluation inside a tet (gems)
 
 import { determinant, inverse3, makeFlowerCage, makeSurfaceStencils, evaluateSurface, computeVertexNormals, computeBounds } from "./cage.js";
 
@@ -224,9 +225,18 @@ export class SoftBody {
     }
   }
 
+  // One fixed step = beginStep → iterate × iterations → endStep (the original
+  // loop, unchanged in arithmetic; split so callers can add constraints between
+  // iterations).
   step(h) {
+    if (!this.beginStep(h)) return;
+    for (let iteration = 0; iteration < this.params.iterations; iteration++) this.iterate(h, iteration);
+    this.endStep(h);
+  }
+
+  beginStep(h) {
     if (this.grab) this.wake();
-    if (this.sleeping) return;
+    if (this.sleeping) return false;
     const P = this.params;
     const x = this.x, v = this.velocity, old = this.previous, n = this.nodeCount;
     old.set(x); this.contact.fill(0);
@@ -244,29 +254,37 @@ export class SoftBody {
     }
     this.lambdaD.fill(0); this.lambdaH.fill(0); this.lambdaB.fill(0);
     if (this.grab) this.grab.lambda.fill(0);
+    if (this.wallRadius > 0) this.wallContact.fill(0);
+    return true;
+  }
+
+  iterate(h, iteration) {
+    const P = this.params, x = this.x, n = this.nodeCount;
     const E = this.elementCount, R = this.wallRadius;
-    if (R > 0) this.wallContact.fill(0);
-    for (let iteration = 0; iteration < P.iterations; iteration++) {
-      const reverse = (iteration & 1) !== 0;
-      for (let k = 0; k < E; k++) {
-        const e = reverse ? E - 1 - k : k;
-        this.solveElastic(e, h); this.solveBarrier(e);
-      }
-      this.solveGrab(h);
-      for (let i = 0; i < n; i++) {
-        const j = i * 3;
-        if (x[j + 1] < P.floor) {
-          this.contact[i] += P.floor - x[j + 1]; x[j + 1] = P.floor;
-        }
-      }
-      if (R > 0) {
-        const R2 = R * R;
-        for (let i = 0; i < n; i++) {
-          const j = i * 3, px = x[j], pz = x[j + 2], r2 = px * px + pz * pz;
-          if (r2 > R2) { const s = R / Math.sqrt(r2); x[j] = px * s; x[j + 2] = pz * s; this.wallContact[i] = 1; }
-        }
+    const reverse = (iteration & 1) !== 0;
+    for (let k = 0; k < E; k++) {
+      const e = reverse ? E - 1 - k : k;
+      this.solveElastic(e, h); this.solveBarrier(e);
+    }
+    this.solveGrab(h);
+    for (let i = 0; i < n; i++) {
+      const j = i * 3;
+      if (x[j + 1] < P.floor) {
+        this.contact[i] += P.floor - x[j + 1]; x[j + 1] = P.floor;
       }
     }
+    if (R > 0) {
+      const R2 = R * R;
+      for (let i = 0; i < n; i++) {
+        const j = i * 3, px = x[j], pz = x[j + 2], r2 = px * px + pz * pz;
+        if (r2 > R2) { const s = R / Math.sqrt(r2); x[j] = px * s; x[j + 2] = pz * s; this.wallContact[i] = 1; }
+      }
+    }
+  }
+
+  endStep(h) {
+    const P = this.params;
+    const x = this.x, v = this.velocity, old = this.previous, n = this.nodeCount, R = this.wallRadius;
     const staticFriction = this.frictionOverride ? this.frictionOverride.staticFriction : P.staticFriction;
     const dynamicFriction = this.frictionOverride ? this.frictionOverride.dynamicFriction : P.dynamicFriction;
     let impact = this.impact, wallImpact = this.wallImpact;
@@ -299,6 +317,14 @@ export class SoftBody {
       v.fill(0); this.internalRms = this.rigidRms = 0;
       old.set(x);
     }
+  }
+
+  // Current position of a material point given by tet + barycentrics.
+  pointInTet(e, bary, out) {
+    const x = this.x, ids = this.ids, b4 = e * 4;
+    out[0] = 0; out[1] = 0; out[2] = 0;
+    for (let v = 0; v < 4; v++) { const j = ids[b4 + v] * 3, w = bary[v]; out[0] += x[j] * w; out[1] += x[j + 1] * w; out[2] += x[j + 2] * w; }
+    return out;
   }
 
   wake() {

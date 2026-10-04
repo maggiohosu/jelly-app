@@ -2,10 +2,15 @@
 // chosen from measured frame pacing (main thread) and physics load (worker).
 // Physics stays at the original 240 Hz on every tier; it only drops to 160 Hz
 // as an emergency when the worker cannot keep up (120 Hz sags the body).
+// Degrade order chosen by the user: caustics first, then bloom, then
+// resolution. Jelly physics (240 Hz) and gem sparkle stay to the very end.
 export const TIERS = [
-  { id: "high", label: "높음", maxDpr: 2.0, opticsHz: 24, causticHz: 60 },
-  { id: "mid", label: "중간", maxDpr: 1.6, opticsHz: 15, causticHz: 30 },
-  { id: "low", label: "낮음", maxDpr: 1.25, opticsHz: 10, causticHz: 15 },
+  { id: "high", label: "높음", maxDpr: 2.0, opticsHz: 20, caustics: true, causticHz: 60, bloom: true, gems: "high" },
+  { id: "high-", label: "높음", maxDpr: 2.0, opticsHz: 15, caustics: true, causticHz: 15, bloom: true, gems: "high" },
+  { id: "mid", label: "중간", maxDpr: 2.0, opticsHz: 15, caustics: false, causticHz: 0, bloom: true, gems: "high" },
+  { id: "mid-", label: "중간", maxDpr: 2.0, opticsHz: 12, caustics: false, causticHz: 0, bloom: false, gems: "high" },
+  { id: "low", label: "낮음", maxDpr: 1.5, opticsHz: 10, caustics: false, causticHz: 0, bloom: false, gems: "mid" },
+  { id: "low-", label: "최저", maxDpr: 1.2, opticsHz: 8, caustics: false, causticHz: 0, bloom: false, gems: "low" },
 ];
 
 export class QualityGovernor {

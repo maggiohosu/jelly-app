@@ -32,38 +32,48 @@
   <header class="top">
     <div class="brand">말랑젤리</div>
     <div class="badge" id="badge" hidden></div>
-    <button class="icon-button" id="info-button" aria-label="정보 및 설정">i</button>
+    <button class="icon-button" id="settings-button" aria-label="설정">
+      <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h4M12 17h8" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/><circle cx="16" cy="7" r="2.4" fill="none" stroke="currentColor" stroke-width="2.2"/><circle cx="10" cy="17" r="2.4" fill="none" stroke="currentColor" stroke-width="2.2"/></svg>
+    </button>
   </header>
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
   <div class="hint" id="hint" hidden>
-    <div><span class="hint-icon">👆</span>젤리를 잡고 쭉 늘려 보세요</div>
-    <div><span class="hint-icon">🔄</span>빈 곳을 밀면 회전 · 두 손가락으로 확대</div>
-    <div id="hint-tilt"><span class="hint-icon">📱</span>폰을 눕혀 기울이면 미끄러지고, 흔들면 출렁</div>
+    <div><span class="hint-icon">💧</span>아래 스포이드를 끌어다 젤리 위에서 놓으면 똑! 길게 누르면 계속 떨어져요</div>
+    <div><span class="hint-icon">🎨</span>노랑+파랑=초록처럼 섞이고, 맑은 물은 연하게 해요</div>
+    <div><span class="hint-icon">👆</span>젤리를 잡아 늘리기 · 빈 곳을 끌면 접시가 기울어요</div>
+    <div><span class="hint-icon">💎</span>보석함에서 보석을 끌어다 젤리에 넣어 보세요</div>
   </div>
 
-  <nav class="toolbar" id="toolbar" hidden>
-    <div class="flavours" role="radiogroup" aria-label="젤리 맛">
-      <button class="chip active" data-flavour="berry" role="radio" aria-checked="true"><i style="--c:#ed5187"></i>베리</button>
-      <button class="chip" data-flavour="mint" role="radio" aria-checked="false"><i style="--c:#4dc9a0"></i>민트</button>
-      <button class="chip" data-flavour="honey" role="radio" aria-checked="false"><i style="--c:#edb643"></i>허니</button>
+  <section class="drawer" id="gem-drawer" hidden aria-label="보석함">
+    <div class="drawer-head">
+      <b>보석함</b><span class="small">끌어다 젤리에 놓거나, 톡 눌러 선택한 젤리에 넣기</span>
     </div>
+    <div class="gem-grid" id="gem-shapes"></div>
+    <div class="gem-colors" id="gem-colors" role="radiogroup" aria-label="보석 색"></div>
+    <button class="pill" id="gem-scatter">✨ 한 줌 쏟기</button>
+  </section>
+
+  <nav class="toolbar" id="toolbar" hidden>
+    <div class="paints" id="paints" role="toolbar" aria-label="스포이드 물감"></div>
     <div class="actions">
+      <button class="round toggle" id="gems" aria-label="보석함" aria-pressed="false">💎</button>
       <button class="round" id="nudge" aria-label="톡 치기">톡</button>
       <button class="round" id="reset" aria-label="처음으로"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M4.5 12a7.5 7.5 0 1 0 2.2-5.3" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/><path d="M4 3.5v4.6h4.6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
-      <button class="round toggle on" id="tilt" aria-label="기울기 센서" aria-pressed="true">📱</button>
       <button class="round toggle on" id="sound" aria-label="소리" aria-pressed="true">🔊</button>
     </div>
   </nav>
+
+  <div class="ghost" id="drag-ghost" hidden aria-hidden="true"></div>
 
   <section class="start" id="start">
     <div class="start-card">
       <div class="logo" aria-hidden="true"></div>
       <h1>말랑젤리</h1>
-      <p>만지고, 늘리고, 흔들어 보세요</p>
+      <p>물감을 떨어뜨리고, 보석을 넣고, 출렁여 보세요</p>
       <button class="primary" id="start-button" disabled>준비 중…</button>
-      <p class="small" id="start-note">소리와 기울기 센서를 사용해요</p>
+      <p class="small" id="start-note">피아노 선율과 효과음이 나와요</p>
       <p class="small install" id="install-hint" hidden>Safari <b>공유</b> 버튼 → <b>홈 화면에 추가</b>하면 앱처럼 쓸 수 있어요</p>
     </div>
   </section>
@@ -71,9 +81,20 @@
   <section class="sheet" id="sheet" hidden>
     <div class="sheet-card" role="dialog" aria-modal="true" aria-labelledby="sheet-title">
       <div class="sheet-head">
-        <h2 id="sheet-title">말랑젤리</h2>
+        <h2 id="sheet-title">설정</h2>
         <button class="icon-button" id="sheet-close" aria-label="닫기">✕</button>
       </div>
+      <h3>젤리 바탕색</h3>
+      <div class="segmented" id="bases">
+        <button data-base="berry">베리</button>
+        <button data-base="mint">민트</button>
+        <button data-base="honey">허니</button>
+        <button data-base="clear">투명</button>
+      </div>
+      <h3>젤리</h3>
+      <div class="sliders" id="sliders-jelly"></div>
+      <h3>빛 · 소리</h3>
+      <div class="sliders" id="sliders-fx"></div>
       <h3>화질</h3>
       <div class="segmented" id="quality">
         <button data-quality="auto" class="active">자동</button>
@@ -84,15 +105,17 @@
       <p class="small" id="status-line"></p>
       <h3>조작법</h3>
       <ul class="small">
-        <li>젤리를 잡고 끌면 늘어나요. 놓으면 출렁!</li>
-        <li>빈 곳을 한 손가락으로 밀면 회전, 두 손가락으로 확대/축소</li>
-        <li>폰을 탁자에 눕힌 상태가 수평이에요. 기울이면 미끄러지고, 흔들면 튀어 올라요</li>
+        <li>스포이드를 젤리 위로 끌어 놓으면 물감 한 방울, 그 자리에서 길게 누르면 계속 떨어져요</li>
+        <li>물감은 떨어진 곳에서 번지며 섞여요. 출렁일수록 빨리 섞이고, 넣은 양만큼 색이 변해요</li>
+        <li>너무 진해지면 '물'을 떨어뜨려 연하게, ↺는 바탕색으로 처음부터</li>
+        <li>젤리를 잡아 늘리고, 빈 곳을 한 손가락으로 끌면 접시가 기울어요. 두 손가락은 회전·확대</li>
+        <li>보석은 젤리 속에서 함께 출렁이고, 흔들면 이리저리 섞이며 반짝여요</li>
       </ul>
       <p class="small install" id="install-hint-2" hidden>Safari <b>공유</b> → <b>홈 화면에 추가</b>로 설치할 수 있어요.</p>
       <h3>만든 재료</h3>
       <p class="small credits">
-        젤리 시뮬레이션·광학: <a href="https://github.com/scottstts/Threejs-Awesome-Graphics-Agent-Skills" target="_blank" rel="noopener">Three.js Awesome Graphics Agent Skills</a>
-        softbody-jelly (MIT © 2026 Scott Sun)<br>
+        젤리 시뮬레이션·광학·보석 굴절: <a href="https://github.com/scottstts/Threejs-Awesome-Graphics-Agent-Skills" target="_blank" rel="noopener">Three.js Awesome Graphics Agent Skills</a>
+        softbody-jelly · raytraced-diamond (MIT © 2026 Scott Sun)<br>
         렌더링: <a href="https://threejs.org" target="_blank" rel="noopener">three.js</a> r185 (MIT)
       </p>
     </div>

@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <title>Gem preview</title>
+  <link rel="icon" href="data:,">
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "../vendor/three/three.webgpu.min.js",
+        "three/webgpu": "../vendor/three/three.webgpu.min.js",
+        "three/tsl": "../vendor/three/three.tsl.min.js",
+        "three/addons/": "../vendor/three/addons/"
+      }
+    }
+  </script>
+  <style>
+    html, body { margin: 0; height: 100%; background: #dfe6e8; overflow: hidden; font: 12px/1.4 -apple-system, system-ui, sans-serif; color: #44545b; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    #hud { position: fixed; left: 8px; top: 6px; pointer-events: auto; }
+    #hud a { color: inherit; margin-right: 6px; }
+    #icons { position: fixed; left: 0; right: 0; bottom: 6px; display: flex; justify-content: center; gap: 2px; flex-wrap: wrap; }
+    #icons span { display: inline-block; width: 48px; height: 48px; background: #fff8; border-radius: 10px; }
+  </style>
+</head>
+<body>
+  <canvas id="stage"></canvas>
+  <div id="hud"></div>
+  <div id="icons"></div>
+  <script type="module" src="./gems-preview.js"></script>
+</body>
+</html>
