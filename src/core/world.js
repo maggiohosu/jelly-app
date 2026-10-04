@@ -35,6 +35,10 @@ const SIGMA_MAX = 420;            // safety clamp per channel
 const GEM_CLINK_SPEED = 0.02;     // m/s relative speed for an audible knock
 const GEM_RATTLE = 9;             // m/s² jolt that rattles a gem
 const GEM_WANDER = 0.03;          // m/s random drift at full stirring
+// 슬랑이 (crunchy slime): much softer and stickier, flows into the shape it is
+// pulled into (plastic), sags, then slowly rounds back into a blob.
+const SLIME = Object.freeze({ shear: 0.32, damping: 6.5, friction: 1.7, flow: 1.6, recover: 0.13, yieldStrain: 0.2, holdTime: 2.5, awake: 30, beads: 180, beadRadius: 0.0021 });
+const PLASTIC_HZ = 30;
 
 function makeType() {
   const cage = makeFlowerCage();
@@ -52,7 +56,8 @@ function makeType() {
 }
 
 export class JellyWorld {
-  constructor({ wallRadius = 0.075, base = "berry", gemCapacity = 14 } = {}) {
+  constructor({ wallRadius = 0.075, base = "berry", gemCapacity = 14, texture = "jelly" } = {}) {
+    this.texture = texture === "slime" ? "slime" : "jelly";
     this.wallRadius = wallRadius;
     this.type = makeType();
     this.gemCapacity = gemCapacity;
@@ -72,6 +77,8 @@ export class JellyWorld {
     body.gravityVector = this.gravityVector;
     body.frictionOverride = this.frictionOverride;
     this.body = body;
+    this.plasticClock = 0; this.lastTouch = this.time || 0;
+    this.applyTexture();
     this.dye = new Float64Array(body.nodeCount * 3);
     this.shellDye = new Float32Array(t.stencils.vertexCount * 3);
     this.meanDye = [0, 0, 0];
@@ -93,7 +100,56 @@ export class JellyWorld {
   }
 
   bodyParams() {
-    return { shear: this.params.shear, damping: this.params.damping, staticFriction: 0.65 * this.params.friction, dynamicFriction: 0.42 * this.params.friction };
+    const slime = this.texture === "slime";
+    const shear = this.params.shear * (slime ? SLIME.shear : 1);
+    const damping = slime ? Math.max(this.params.damping, SLIME.damping) : this.params.damping;
+    const friction = this.params.friction * (slime ? SLIME.friction : 1);
+    return { shear, damping, staticFriction: 0.65 * friction, dynamicFriction: 0.42 * friction };
+  }
+
+  // ---------------------------------------------------------------- texture
+  setTexture(texture) {
+    this.texture = texture === "slime" ? "slime" : "jelly";
+    this.applyTexture();
+    this.body.wake();
+    this.events.push({ type: "texture", texture: this.texture });
+  }
+
+  applyTexture() {
+    const body = this.body;
+    Object.assign(body.params, this.bodyParams());
+    if (this.texture === "slime") {
+      body.setPlastic(SLIME.flow, SLIME.recover, SLIME.yieldStrain);
+      if (!this.beads) this.makeBeads();
+    } else if (body.plastic) {
+      // back to jelly: un-squash quickly (≈ 1 s) instead of snapping
+      body.setPlastic(0, 3);
+    }
+  }
+
+  // Foam beads: fixed material points spread through the slime.
+  makeBeads(count = SLIME.beads) {
+    const L = this.type.locator, bnd = L.bounds, r = SLIME.beadRadius;
+    const tets = new Int32Array(count), bary = new Float64Array(count * 4);
+    let n = 0;
+    for (let tries = 0; n < count && tries < count * 40; tries++) {
+      const u = [bnd[0] + Math.random() * (bnd[3] - bnd[0]), bnd[1] + Math.random() * (bnd[4] - bnd[1]), bnd[2] + Math.random() * (bnd[5] - bnd[2])];
+      if (!this.gemFits(u, r)) continue;
+      const e = L.locate(u[0], u[1], u[2]);
+      tets[n] = e; bary.set(L.bary, n * 4); n++;
+    }
+    this.beads = { count: n, tets, bary, color: Uint8Array.from({ length: n }, () => Math.floor(Math.random() * 5)) };
+  }
+
+  // 4 floats per bead: x, y, z, colour index. Empty unless slime.
+  beadStates(out) {
+    const b = this.beads, body = this.body, p = [0, 0, 0], bary = [0, 0, 0, 0];
+    for (let i = 0; i < b.count; i++) {
+      bary[0] = b.bary[i * 4]; bary[1] = b.bary[i * 4 + 1]; bary[2] = b.bary[i * 4 + 2]; bary[3] = b.bary[i * 4 + 3];
+      body.pointInTet(b.tets[i], bary, p);
+      out[i * 4] = p[0]; out[i * 4 + 1] = p[1]; out[i * 4 + 2] = p[2]; out[i * 4 + 3] = b.color[i];
+    }
+    return out;
   }
 
   // ---------------------------------------------------------------- input
@@ -130,6 +186,7 @@ export class JellyWorld {
         break;
       }
       case "bounce": this.bounce(event.strength); break;
+      case "texture": this.setTexture(event.texture); break;
       case "nudge": body.nudge(); break;
       case "reset": this.reset(event.base); break;
       case "base": this.setBase(event.base); break;
@@ -178,6 +235,21 @@ export class JellyWorld {
       for (const g of this.grabs.values()) easeGrabTarget(g.target, g.raw, this.step);
       const awake = !body.sleeping || this.grabbing;
       body.step(this.step);
+      if (body.plastic && !body.sleeping) {
+        this.plasticClock += this.step;
+        if (this.plasticClock >= 1 / PLASTIC_HZ) {
+          const strain = body.plasticStep(this.plasticClock);
+          this.plasticClock = 0;
+          if (this.texture === "jelly" && strain < 0.004) body.setPlastic(0, 0);
+          else if (this.texture === "slime") {
+            // hold the pulled shape for a moment, then slowly round back —
+            // awake for at most SLIME.awake s after the last touch, so it can sleep
+            const since = this.time - this.lastTouch;
+            body.plastic.recover = since > SLIME.holdTime ? SLIME.recover : 0.01;
+            if (since < SLIME.awake && strain > 0.03) body.quietTime = 0;
+          }
+        }
+      }
       this.accumulator -= this.step;
       steps++;
       if (awake) stepped = true;
@@ -190,6 +262,8 @@ export class JellyWorld {
     }
     if (this.bounceQueued && body.grounded && !this.grabbing) this.bounce(this.bounceQueued);
     this.stepped = stepped;
+    this.time = (this.time || 0) + steps * this.step;
+    if (this.grabbing) this.lastTouch = this.time;
     if (steps > 0) this.tick(steps * this.step);
     return { steps, elapsed, stepped };
   }

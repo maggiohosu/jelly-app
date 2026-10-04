@@ -49,14 +49,14 @@ if (!ownServer) console.log(`(port ${PORT} busy: using the server already runnin
 
 // 3) browser
 const browser = await chromium.launch({ channel: "chromium", args: ["--autoplay-policy=no-user-gesture-required"] });
-let exitCode = 1;
+let exitCode = 1, page = null;
 try {
-  const page = await browser.newPage();
+  page = await browser.newPage();
   const pageErrors = [];
   page.on("pageerror", (e) => pageErrors.push(e.message));
   page.on("console", (m) => { if (m.type() === "error") pageErrors.push(m.text()); });
   await page.goto(`http://127.0.0.1:${PORT}/tests/audio.test.html`);
-  await page.waitForFunction(() => window.__audioTest && window.__audioTest.done, null, { timeout: 180000 });
+  await page.waitForFunction(() => window.__audioTest && window.__audioTest.done, null, { timeout: 100000 });
   const result = await page.evaluate(() => window.__audioTest);
   for (const line of result.lines) console.log(line);
   failures += result.failures;
@@ -68,7 +68,9 @@ try {
   }
   exitCode = failures ? 1 : 0;
 } catch (e) {
+  failures++;
   console.log(`FAIL  test page did not complete  ${e.message}`);
+  try { console.log(await page.evaluate(() => document.getElementById("log")?.textContent || "")); } catch { /* page gone */ }
 } finally {
   await browser.close();
   if (ownServer) server.close();

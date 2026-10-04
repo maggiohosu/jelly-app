@@ -448,6 +448,87 @@ export class SoftBody {
     }
   }
 
+  // ---------------------------------------------------------------- plasticity
+  // App extension (slime texture). Off by default: the original jelly is purely
+  // elastic. With plastic flow on, each tet's rest shape creeps toward its
+  // current (rotation-free) shape at `flow` 1/s, so a stretch or a sag stays,
+  // and recovers toward the original rest shape at `recover` 1/s — a slime
+  // that keeps the shape you pull it into and slowly rounds back into a
+  // blob. Rest volumes are preserved (det of each rest shape is kept).
+  setPlastic(flow = 0, recover = 0, yieldStrain = 0) {
+    if (!this.restDm0) {
+      const E = this.elementCount, p = this.rest, ids = this.ids;
+      this.restDm0 = new Float64Array(E * 9);
+      for (let e = 0; e < E; e++) {
+        const a = ids[e * 4] * 3, b = ids[e * 4 + 1] * 3, c = ids[e * 4 + 2] * 3, d = ids[e * 4 + 3] * 3, o = e * 9, m = this.restDm0;
+        m[o] = p[b] - p[a]; m[o + 1] = p[c] - p[a]; m[o + 2] = p[d] - p[a];
+        m[o + 3] = p[b + 1] - p[a + 1]; m[o + 4] = p[c + 1] - p[a + 1]; m[o + 5] = p[d + 1] - p[a + 1];
+        m[o + 6] = p[b + 2] - p[a + 2]; m[o + 7] = p[c + 2] - p[a + 2]; m[o + 8] = p[d + 2] - p[a + 2];
+      }
+      this.restDm = this.restDm0.slice();
+      this.gradients0 = this.gradients.slice();
+      this.plasticStrain = 0;
+    }
+    this.plastic = flow > 0 || recover > 0 ? { flow, recover, yieldStrain } : null;
+    if (!this.plastic) { this.restDm.set(this.restDm0); this.gradients.set(this.gradients0); this.plasticStrain = 0; }
+  }
+
+  // Advance plastic flow by dt (call at ~30 Hz). Returns the mean deviation of
+  // the rest shapes from the original (0 = original jelly).
+  plasticStep(dt) {
+    const P = this.plastic; if (!P || !this.restDm) return 0;
+    const E = this.elementCount, x = this.x, ids = this.ids, g = this.gradients, M0 = this.restDm0, M = this.restDm;
+    const kf = Math.min(0.5, P.flow * dt), kr = Math.min(0.5, P.recover * dt);
+    const S = this.plasticScratch ||= { F: new Float64Array(9), R: new Float64Array(9), U: new Float64Array(9), N: new Float64Array(9), I: new Float64Array(9), D: new Float64Array(9) };
+    const { F, R, U, N, I, D } = S;
+    let dev = 0, ref = 0;
+    for (let e = 0; e < E; e++) {
+      const o = e * 9;
+      if (kf > 0) {
+        const a = ids[e * 4] * 3, b = ids[e * 4 + 1] * 3, c = ids[e * 4 + 2] * 3, d = ids[e * 4 + 3] * 3;
+        D[0] = x[b] - x[a]; D[1] = x[c] - x[a]; D[2] = x[d] - x[a];
+        D[3] = x[b + 1] - x[a + 1]; D[4] = x[c + 1] - x[a + 1]; D[5] = x[d + 1] - x[a + 1];
+        D[6] = x[b + 2] - x[a + 2]; D[7] = x[c + 2] - x[a + 2]; D[8] = x[d + 2] - x[a + 2];
+        if (!inv3into(M, o, I)) continue;
+        mul3(D, I, F);
+        if (!polar3(F, R, I)) continue;
+        // U = Rᵀ F − I (right stretch, material frame); rest ← (I + kf·U) rest
+        let un = 0;
+        for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) {
+          const u = R[i] * F[j] + R[3 + i] * F[3 + j] + R[6 + i] * F[6 + j] - (i === j ? 1 : 0);
+          U[i * 3 + j] = u; un += u * u;
+        }
+        // Bingham-like yield: only the strain beyond the yield point flows.
+        un = Math.sqrt(un);
+        if (un > P.yieldStrain) {
+          const k = kf * (un - P.yieldStrain) / un;
+          for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) {
+            N[i * 3 + j] = M[o + i * 3 + j] + k * (U[i * 3] * M[o + j] + U[i * 3 + 1] * M[o + 3 + j] + U[i * 3 + 2] * M[o + 6 + j]);
+          }
+        } else for (let k = 0; k < 9; k++) N[k] = M[o + k];
+      } else for (let k = 0; k < 9; k++) N[k] = M[o + k];
+      let diff = 0;
+      for (let k = 0; k < 9; k++) { N[k] += (M0[o + k] - N[k]) * kr; diff += Math.abs(N[k] - M[o + k]); }
+      if (diff > 1e-9) {
+        const det0 = det3(M0, o), det = det3(N, 0);
+        if (det > det0 * 0.05) {
+          const sc = Math.cbrt(det0 / det);
+          for (let k = 0; k < 9; k++) M[o + k] = N[k] * sc;
+          if (inv3into(M, o, I)) {
+            const go = e * 12;
+            for (let k = 0; k < 3; k++) {
+              g[go + 3 + k] = I[k]; g[go + 6 + k] = I[3 + k]; g[go + 9 + k] = I[6 + k];
+              g[go + k] = -I[k] - I[3 + k] - I[6 + k];
+            }
+          }
+        }
+      }
+      for (let k = 0; k < 9; k++) { dev += Math.abs(M[o + k] - M0[o + k]); ref += Math.abs(M0[o + k]); }
+    }
+    this.plasticStrain = ref > 0 ? dev / ref : 0;
+    return this.plasticStrain;
+  }
+
   // Bounce: an upward launch with a squash — the bottom pushes off harder
   // than the top, so the jelly stretches up and lands with a wobble.
   bounce(vy, vx = 0, vz = 0) {
@@ -479,6 +560,39 @@ export class SoftBody {
     for (const pair of list) pair[1] /= sum;
     return { ids: Int32Array.from(list.map((p) => p[0])), weights: Float64Array.from(list.map((p) => p[1])) };
   }
+}
+
+// 3×3 row-major helpers for plasticity (allocation-free).
+function det3(m, o) {
+  return m[o] * (m[o + 4] * m[o + 8] - m[o + 5] * m[o + 7]) - m[o + 1] * (m[o + 3] * m[o + 8] - m[o + 5] * m[o + 6]) + m[o + 2] * (m[o + 3] * m[o + 7] - m[o + 4] * m[o + 6]);
+}
+function inv3into(m, o, out) {
+  const a = m[o], b = m[o + 1], c = m[o + 2], d = m[o + 3], e = m[o + 4], f = m[o + 5], g = m[o + 6], h = m[o + 7], i = m[o + 8];
+  const A = e * i - f * h, B = f * g - d * i, C = d * h - e * g, det = a * A + b * B + c * C;
+  if (!(Math.abs(det) > 1e-30)) return false;
+  const s = 1 / det;
+  out[0] = A * s; out[1] = (c * h - b * i) * s; out[2] = (b * f - c * e) * s;
+  out[3] = B * s; out[4] = (a * i - c * g) * s; out[5] = (c * d - a * f) * s;
+  out[6] = C * s; out[7] = (b * g - a * h) * s; out[8] = (a * e - b * d) * s;
+  return true;
+}
+function mul3(a, b, out) {
+  for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) out[i * 3 + j] = a[i * 3] * b[j] + a[i * 3 + 1] * b[3 + j] + a[i * 3 + 2] * b[6 + j];
+  return out;
+}
+// Rotation of the polar decomposition F = R U (Higham iteration R ← ½(R + R⁻ᵀ)).
+function polar3(F, R, tmp) {
+  for (let k = 0; k < 9; k++) R[k] = F[k];
+  for (let it = 0; it < 8; it++) {
+    if (!inv3into(R, 0, tmp)) return false;
+    let change = 0;
+    for (let i = 0; i < 3; i++) for (let j = 0; j < 3; j++) {
+      const next = 0.5 * (R[i * 3 + j] + tmp[j * 3 + i]);
+      change += Math.abs(next - R[i * 3 + j]); R[i * 3 + j] = next;
+    }
+    if (change < 1e-5) break;
+  }
+  return true;
 }
 
 // Original updateGrabTarget(): eases the constraint target toward the finger.

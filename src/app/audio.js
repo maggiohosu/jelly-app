@@ -1,26 +1,26 @@
 // 말랑젤리 sound engine. Everything is synthesised with plain Web Audio nodes
 // (no audio files, no AudioWorklet, no libraries):
-//   • boing()        the jelly squish (same sound as before)
-//   • piano          a soft additive "grand" improvising a C-major-pentatonic
-//                    melody over I–V–vi–IV; setActivity() drives density/dynamics
-//   • clink()        glassy gem "ting"s tuned to the chord that is sounding now
+//   • crunch         crunchy-slime ASMR: bead snaps (뽀득), sticky stretches (쩍)
+//                    and air pops (뽁); setActivity() drives the bead crunching
+//   • boing()/drip() the jelly squish and paint drops
+//   • clink()        glassy gem "ting"s (C-major pentatonic, C6–C7)
 //
 // iOS rules: the AudioContext must be created/resumed synchronously inside a
 // user gesture (unlock()); the 'ambient' audio session mixes with the user's
 // music (Melon/Spotify keep playing) and respects the ringer switch.
 //
 // Signal graph (volumes are linear gains; each bus is unity at its default):
-//   boing voices → boingBus (master·boing/0.6) → legacy compressor ──────┐
-//   piano voices → pianoBus (piano/0.7) ─┬─→ musicIn (master) ──────────┤
-//   gem voices   → gemBus  (gems/0.6) ───┤        ↑                     │
-//                  sends ─→ room (short generated convolver)            │
-//                                 limiter (-4 dB, 20:1) ←───────────────┘ → make-up trim → out
+//   boing voices  → boingBus (master·boing/0.6) → legacy compressor ─────┐
+//   crunch grains → crunchBus (crunch/0.8) → tone LP ─┬─→ musicIn (master) ┤
+//   gem voices    → gemBus  (gems/0.6) ───────────────┤        ↑          │
+//                   sends ─→ room (short generated convolver)            │
+//                                 limiter (-4 dB, 20:1) ←────────────────┘ → make-up trim → out
 //
 // Offline rendering (tests): give the engine an OfflineAudioContext. Its clock
 // is then virtual: call advanceTo(t) once per simulated frame (it runs the
 // lookahead scheduler), then setActivity()/clink()/boing() as the app would,
 // and finally startRendering(). onNote callbacks fire synchronously at
-// scheduling time in that mode (event.time is the audio time of the note).
+// scheduling time in that mode (event.time is the audio time of the crunch).
 //   const off = new OfflineAudioContext(2, 12 * 48000, 48000);
 //   const audio = new JellyAudio({ context: off, random: seededRng });
 //   for (let f = 0; f <= 12 * 60; f++) { audio.advanceTo(f / 60); audio.setActivity(a, r); }
@@ -29,7 +29,7 @@
 
 const LOOKAHEAD = 0.12;            // s of audio scheduled ahead of the clock
 const TICK_MS = 25;                // scheduler interval
-const PIANO_VOICES = 10;
+const GRAIN_VOICES = 28;
 const GEM_VOICES = 6;
 const ACT_ON = 0.06, ACT_OFF = 0.04;          // start / stop thresholds (hysteresis)
 const ATTACK_TAU = 0.05;           // activity rises to ~95 % in 0.15 s
@@ -43,29 +43,14 @@ const LIMIT_DB = -4, LIMIT_RATIO = 20;
 // and the ceiling ends up near -3.8 dBFS.
 const LIMITER_MAKEUP = Math.pow(10, (-LIMIT_DB * (1 - 1 / LIMIT_RATIO) * 0.6) / 20);
 const LIMITER_DELAY = 0.006;       // compressor look-ahead (for onNote alignment)
-const DEFAULT_VOLUMES = Object.freeze({ master: 0.9, piano: 0.7, gems: 0.6, boing: 0.6 });
+const DEFAULT_VOLUMES = Object.freeze({ master: 0.9, crunch: 0.8, gems: 0.6, boing: 0.6 });
+const CRUNCH_LEVEL = 0.32;          // peak of a velocity-1 grain before the bus
 
 const PENTA = [0, 2, 4, 7, 9];     // C D E G A
-const CHORDS = Object.freeze([
-  Object.freeze({ name: "C", root: 0, tones: [0, 4, 7] }),
-  Object.freeze({ name: "G", root: 7, tones: [7, 11, 2] }),
-  Object.freeze({ name: "Am", root: 9, tones: [9, 0, 4] }),
-  Object.freeze({ name: "F", root: 5, tones: [5, 9, 0] }),
-]);
-// Which pentatonic degrees are chord tones of each chord (melody snapping).
-const CHORD_DEG = CHORDS.map((c) => PENTA.map((pc) => c.tones.includes(pc)));
-// Gem pitches: chord tones from C6 (84) to C7 (96).
-const CLINK_PITCHES = CHORDS.map((c) => {
-  const out = [];
-  for (let m = 84; m <= 96; m++) if (c.tones.includes(m % 12)) out.push(m);
-  return out;
-});
-// Melody rhythm: probability weight of each 8th in the bar.
-const STEP_WEIGHT = [1, 0.55, 0.85, 0.6, 0.95, 0.55, 0.8, 0.65];
+// Gem pitches: C-major pentatonic from C6 (84) to C7 (96).
+const CLINK_PITCHES = [];
+for (let m = 84; m <= 96; m++) if (PENTA.includes(m % 12)) CLINK_PITCHES.push(m);
 
-const PIANO_LEVEL = 0.3;           // peak of a velocity-1 note before the bus
-const PIANO_PARTIALS = [1, 0.62, 0.42, 0.28, 0.19, 0.13, 0.09];
-const STRING2 = 0.35;              // level of the second (detuned) string
 const GEM_LEVEL = 0.13;              // gems sit just under the piano
 const GEM_RATIOS = [1, 2.76, 5.40, 8.93];
 const GEM_LEVELS = [1, 0.5, 0.28, 0.14];
@@ -73,8 +58,6 @@ const GEM_TAUS = [0.2, 0.075, 0.035, 0.018];
 
 const mtof = (m) => 440 * Math.pow(2, (m - 69) / 12);
 const clamp = (x, lo, hi) => (x < lo ? lo : x > hi ? hi : x);
-const degToMidi = (d) => { const o = Math.floor(d / 5); return 60 + 12 * o + PENTA[d - 5 * o]; };
-const mod5 = (d) => ((d % 5) + 5) % 5;
 function hash32(x) {
   x |= 0;
   x = Math.imul(x ^ (x >>> 16), 0x7feb352d);
@@ -97,8 +80,6 @@ export class JellyAudio {
     this.noise = null;
     this._random = typeof options.random === "function" ? options.random : Math.random;
     this._vol = { ...DEFAULT_VOLUMES };
-    this._bpm = 92;
-    this._eighth = 30 / 92;
     this._listeners = [];
     this._gen = 0;                 // bumped on suspend/dispose: drops pending onNote timers
     this._timer = 0;
@@ -110,24 +91,17 @@ export class JellyAudio {
     this._actTarget = 0; this._regTarget = 0.5;
     this._act = 0; this._reg = 0.5;
     this._actStamp = -1e9; this._smoothT = NaN;
-    // 8th-note grid on the audio clock
-    this._gridReady = false;
-    this._anchorTime = 0; this._anchorStep = 0;
-    this._step = 0; this._nextStepTime = 0;
-    // improviser
-    this._resting = true;
-    this._deg = 5; this._dir = 1; this._lastMove = 1;
-    this._pedalBar = -1; this._lastReplayBar = -9;
-    this._motifSlot = new Float64Array(4); this._motifDeg = new Int16Array(4);
-    this._motifLen = 0; this._motifHead = 0;
-    this._planSlot = new Float64Array(4); this._planDeg = new Int16Array(4);
-    this._planLen = 0; this._planIdx = 0;
+    // crunch
+    this.texture = "jelly";
+    this._crunchOn = false; this._nextBurst = 0; this._lastPulse = -1e9;
+    this._lastSquelch = -1e9; this._lastPop = -1e9;
+    this._banks = null;
+    this._grains = [];
     // voices
-    this._piano = [];
     this._gems = [];
     this._clinkTokens = CLINK_BURST; this._clinkTokT = 0;
     this._lastClink = -1e9; this._lastClinkMidi = -1;
-    this.stats = { notes: 0, bassNotes: 0, clinks: 0, pianoSteals: 0, gemSteals: 0, maxPianoVoices: 0, maxGemVoices: 0, oscSeconds: 0 };
+    this.stats = { bursts: 0, grains: 0, grainDrops: 0, maxGrains: 0, clinks: 0, gemSteals: 0, maxGemVoices: 0, oscSeconds: 0 };
     if (options.context) {
       this.ctx = options.context;
       this._ownsContext = false;
@@ -136,8 +110,7 @@ export class JellyAudio {
     }
   }
 
-  static get CHORDS() { return CHORDS; }
-  static get VOICE_LIMITS() { return { piano: PIANO_VOICES, gems: GEM_VOICES }; }
+  static get VOICE_LIMITS() { return { grains: GRAIN_VOICES, gems: GEM_VOICES }; }
   static get DEFAULT_VOLUMES() { return DEFAULT_VOLUMES; }
 
   /** Render `seconds` offline; `script(audio, t)` runs once per frame (fps). */
@@ -196,7 +169,7 @@ export class JellyAudio {
     this._stopTimer();
     this._gen++;
     const ctx = this.ctx;
-    for (const list of [this._piano, this._gems]) {
+    for (const list of [this._gems]) {
       for (const v of list) for (const o of v.oscs) { try { o.stop(); } catch { /* not started */ } }
       list.length = 0;
     }
@@ -232,7 +205,7 @@ export class JellyAudio {
     this._listeners.length = 0;
     const ctx = this.ctx;
     if (ctx) {
-      for (const list of [this._piano, this._gems]) {
+      for (const list of [this._gems]) {
         for (const v of list) for (const o of v.oscs) { try { o.stop(); } catch { /* not started */ } }
         list.length = 0;
       }
@@ -245,7 +218,7 @@ export class JellyAudio {
 
   // ------------------------------------------------------------------ controls
 
-  /** Each 0..1 (linear gain; defaults master 0.9, piano 0.7, gems 0.6, boing 0.6). */
+  /** Each 0..1 (linear gain; defaults master 0.9, crunch 0.8, gems 0.6, boing 0.6). */
   setVolumes(volumes = {}) {
     for (const key in DEFAULT_VOLUMES) {
       const v = volumes[key];
@@ -255,18 +228,6 @@ export class JellyAudio {
   }
 
   get volumes() { return { ...this._vol }; }
-
-  get tempo() { return this._bpm; }
-  set tempo(bpm) {
-    const b = clamp(Number(bpm) || 92, 40, 220);
-    if (b === this._bpm) return;
-    if (this._gridReady) {         // re-anchor the grid at the next unscheduled 8th
-      this._anchorTime = this._nextStepTime;
-      this._anchorStep = this._step;
-    }
-    this._bpm = b;
-    this._eighth = 30 / b;
-  }
 
   /** Called every frame: activity 0..1 (movement/stretch), register 0 low … 1 high. */
   setActivity(activity, register) {
@@ -279,10 +240,23 @@ export class JellyAudio {
     this._smooth(now);
   }
 
-  /** Smoothed activity (what the improviser is using). */
+  /** 'jelly' (bright, crisp) or 'slime' (low, wet, more crunch). */
+  setTexture(texture) {
+    this.texture = texture === "slime" ? "slime" : "jelly";
+    this._applyTexture();
+  }
+
+  _applyTexture() {
+    if (!this._crunchTone) return;
+    const f = this.texture === "slime" ? 5200 : 9000;
+    if (this._offline) this._crunchTone.frequency.value = f;
+    else this._crunchTone.frequency.setTargetAtTime(f, this.ctx.currentTime, 0.05);
+  }
+
+  /** Smoothed activity (what the crunch scheduler is using). */
   get activity() { return this._act; }
 
-  /** callback({ midi, velocity, chord, time }) when a melody note sounds. Returns an unsubscribe fn. */
+  /** callback({ velocity, time }) when a crunch burst sounds (for visual pulses). Returns an unsubscribe fn. */
   onNote(callback) {
     if (typeof callback !== "function") return () => {};
     this._listeners.push(callback);
@@ -291,19 +265,6 @@ export class JellyAudio {
       if (i >= 0) this._listeners.splice(i, 1);
     };
   }
-
-  /** Chord index (0 C, 1 G, 2 Am, 3 F) sounding at audio time t. */
-  chordAt(t) {
-    if (!this._gridReady) return 0;
-    const step = this._anchorStep + Math.floor((t - this._anchorTime) / this._eighth + 1e-7);
-    const bar = Math.floor(step / 8);
-    return ((bar % 4) + 4) % 4;
-  }
-
-  get currentChord() { return this.ctx ? this.chordAt(this._now()) : 0; }
-
-  /** Audio time of 8th-note step 0 (valid while the tempo is unchanged). */
-  get gridOrigin() { return this._anchorTime - this._anchorStep * this._eighth; }
 
   /** Offline contexts only: move the virtual clock to t and run the scheduler. */
   advanceTo(t) {
@@ -399,8 +360,8 @@ export class JellyAudio {
   // ------------------------------------------------------------------ gem clink
 
   /**
-   * Gem collision. Rate-limited (≥ 45 ms apart, ~10/s sustained). Pitched to a
-   * chord tone of the chord sounding now, C6–C7. Returns the MIDI note played,
+   * Gem collision. Rate-limited (≥ 45 ms apart, ~10/s sustained). Pitched to
+   * the C-major pentatonic, C6–C7. Returns the MIDI note played,
    * or -1 when dropped (rate limit, too soft, not running).
    */
   clink(strength, seed = 0) {
@@ -414,8 +375,7 @@ export class JellyAudio {
     if (now - this._lastClink < CLINK_GAP || this._clinkTokens < 1) return -1;
     this._clinkTokens -= 1;
     this._lastClink = now;
-    const chord = this.chordAt(now);
-    const pitches = CLINK_PITCHES[chord];
+    const pitches = CLINK_PITCHES;
     const h = hash32((seed | 0) ^ 0x5bd1e995);
     let i = h % pitches.length;
     if (pitches[i] === this._lastClinkMidi) i = (i + 1 + ((h >>> 8) & 1)) % pitches.length;
@@ -424,13 +384,6 @@ export class JellyAudio {
     this._gemNote(midi, s, now + 0.002, h);
     this.stats.clinks++;
     return midi;
-  }
-
-  /** Play one piano note now (or at audio time `when`). Mainly for tests/UI. */
-  playNote(midi, velocity = 0.7, when = 0) {
-    const ctx = this.ctx;
-    if (!ctx || (!this._offline && ctx.state !== "running")) return;
-    this._pianoNote(midi, velocity, Math.max(this._now(), when), false, -1);
   }
 
   // ======================================================================
@@ -467,23 +420,27 @@ export class JellyAudio {
     limiter.connect(this._out).connect(ctx.destination);
     this.master.connect(compressor).connect(limiter);
 
-    // Music: piano + gems (+ room) → master gain → limiter.
+    // Crunch + gems (+ room) → master gain → limiter.
     this._musicIn = ctx.createGain();
     this._musicIn.connect(limiter);
-    this._pianoBus = ctx.createGain();
-    this._pianoBus.connect(this._musicIn);
+    this._crunchBus = ctx.createGain();
+    this._crunchTone = ctx.createBiquadFilter();
+    this._crunchTone.type = "lowpass"; this._crunchTone.Q.value = 0.5;
+    this._crunchBus.connect(this._crunchTone).connect(this._musicIn);
+    this._applyTexture();
     this._gemBus = ctx.createGain();
     this._gemBus.connect(this._musicIn);
     this._room = ctx.createConvolver();
     const roomOut = ctx.createGain(); roomOut.gain.value = 1;
     this._room.connect(roomOut).connect(this._musicIn);
-    const pianoSend = ctx.createGain(); pianoSend.gain.value = 0.5;   // wet ≈ -17 dB
-    this._pianoBus.connect(pianoSend).connect(this._room);
+    const crunchSend = ctx.createGain(); crunchSend.gain.value = 0.22;  // a touch of room
+    this._crunchTone.connect(crunchSend).connect(this._room);
     const gemSend = ctx.createGain(); gemSend.gain.value = 0.55;      // wet ≈ -13 dB
     this._gemBus.connect(gemSend).connect(this._room);
     // ~1 ms of maths: keep it out of the tap handler on a live context.
-    if (sync) this._room.buffer = this._impulse(1.1);
-    else setTimeout(() => { if (this.ctx === ctx) this._room.buffer = this._impulse(1.1); }, 0);
+    this._grains.length = 0; this._banks = null;
+    if (sync) { this._room.buffer = this._impulse(1.1); this._makeBanks(); }
+    else setTimeout(() => { if (this.ctx === ctx) { this._room.buffer = this._impulse(1.1); this._makeBanks(); } }, 0);
     this._applyVolumes(true);
   }
 
@@ -514,7 +471,7 @@ export class JellyAudio {
 
   _applyVolumes(immediate) {
     if (!this.ctx || !this.master) return;
-    const { master, piano, gems, boing } = this._vol;
+    const { master, crunch, gems, boing } = this._vol;
     const now = this._now();
     const set = (param, value) => {
       if (immediate) param.value = value;
@@ -522,7 +479,7 @@ export class JellyAudio {
     };
     set(this.master.gain, master * boing / DEFAULT_VOLUMES.boing);
     set(this._musicIn.gain, master);
-    set(this._pianoBus.gain, piano / DEFAULT_VOLUMES.piano);
+    set(this._crunchBus.gain, crunch / DEFAULT_VOLUMES.crunch);
     set(this._gemBus.gain, gems / DEFAULT_VOLUMES.gems);
   }
 
@@ -539,209 +496,199 @@ export class JellyAudio {
 
   // ------------------------------------------------------------ scheduler
 
+  // ------------------------------------------------------------ crunch scheduler
+  //
+  // Crunchy-slime ASMR, three sounds from small generated sample banks
+  // (built once per context; playback is one BufferSource per grain):
+  //   beads   뽀득·톡  foam beads snapping under pressure — bursts of 1–6
+  //                    grains whose rate and loudness follow setActivity()
+  //   squelch 쩍·찍    sticky stretch: a decelerating train of wet micro-clicks
+  //   pop     뽁       an air pocket popping when a finger lets go
+  // texture 'jelly' plays them brighter and crisper, 'slime' lower and wetter.
+
   _tick() {
     const ctx = this.ctx;
     if (!ctx) return;
     if (!this._offline && ctx.state !== "running") return;
     const now = this._now();
     this._smooth(this._wall());
-    if (!this._gridReady) {
-      this._anchorTime = now + 0.05;
-      this._anchorStep = 0;
-      this._step = 0;
-      this._gridReady = true;
-    }
-    const e = this._eighth;
-    let t = this._anchorTime + (this._step - this._anchorStep) * e;
-    if (t < now - 0.03) {          // timer was throttled: skip the missed 8ths silently
-      this._step = this._anchorStep + Math.ceil((now - this._anchorTime) / e);
-      t = this._anchorTime + (this._step - this._anchorStep) * e;
-      this._planLen = 0;
-    }
-    const horizon = now + LOOKAHEAD;
-    while (t < horizon) {
-      this._doStep(this._step, t);
-      this._step++;
-      t = this._anchorTime + (this._step - this._anchorStep) * this._eighth;
-    }
-    this._nextStepTime = t;
+    this._crunchTick(now, now + LOOKAHEAD);
   }
 
-  _doStep(step, t) {
+  _crunchTick(now, horizon) {
     const a = this._act;
-    const s = step & 7;
-    const bar = Math.floor(step / 8);
-    const chord = bar & 3;
-    const e = this._eighth;
-    if (a < ACT_OFF || !this.enabled) { this._resting = true; this._planLen = 0; return; }
-    if (this._resting && a < ACT_ON) return;
-    if (s === 0 && !this._resting) this._maybeReplay(step, chord, bar);
-
-    // Left hand: soft root (+ fifth) on beat 1, a light octave on beat 3 when busy.
-    if (s === 0 && a > 0.25) {
-      const root = this._bassRoot(chord);
-      this._bass(root, 0.22 + 0.3 * a, t, bar);
-      if (a > 0.45) this._bass(root + 7, (0.22 + 0.3 * a) * 0.72, t, bar);
-    } else if (s === 4 && a > 0.7) {
-      this._bass(this._bassRoot(chord) + 12, 0.16 + 0.2 * a, t, bar);
-    }
-
-    const slot = step * 2;         // 16th-note slot index
-    if (this._planLen) {           // replaying a motif: it owns this part of the bar
-      while (this._planIdx < this._planLen && this._planSlot[this._planIdx] <= slot + 1) {
-        const ps = this._planSlot[this._planIdx];
-        const d = this._planDeg[this._planIdx];
-        this._planIdx++;
-        if (ps < slot) continue;
-        const sub = ps === slot + 1;
-        this._setDeg(d);
-        this._melody(d, sub ? t + e / 2 : t, this._velocity(a, s, sub), chord, ps, bar);
-      }
-      if (this._planIdx >= this._planLen) this._planLen = 0;
-      return;
-    }
-
-    let play;
-    if (this._resting) {           // rising from silence: start right on this 8th
-      this._resting = false;
-      play = true;
-      this._setDeg(this._snap(Math.round(this._reg * 10), chord, 1));
-    } else {
-      let p = s === 0 ? (a > 0.15 ? 1 : a * 1.5) : Math.min(0.95, a * 1.3 * STEP_WEIGHT[s]);
-      if ((bar & 1) && s >= 6) p *= a > 0.85 ? 0.3 : 0.04;      // breathe every 2 bars
-      play = this._random() < p;
-      if (play) {
-        const strong = s === 0 || s === 4 || ((bar & 1) === 1 && s === 5);
-        this._setDeg(this._nextDeg(strong, chord));
-      }
-    }
-    if (play) this._melody(this._deg, t, this._velocity(a, s, false), chord, slot, bar);
-
-    // 16th pickups / runs when the jelly is really moving.
-    if (a > 0.65 && !((bar & 1) && s === 6)) {
-      const q = (a - 0.65) * (s === 7 ? 2.4 : 1.4);
-      if (this._random() < q) {
-        const d = this._clampDeg(this._deg + this._dir);
-        this._setDeg(d);
-        this._melody(d, t + e / 2, this._velocity(a, s, true), chord, slot + 1, bar);
-      }
-    }
-  }
-
-  // Occasionally repeat the last 3–4-note motif, transposed onto the new chord.
-  _maybeReplay(step, chord, bar) {
-    if (this._motifLen < 3 || this._act < 0.25 || bar - this._lastReplayBar < 2 || this._random() > 0.35) return;
-    const base = step * 2;
-    const last = (this._motifHead + 3) & 3;
-    let n = this._motifLen, first = 0;
-    for (; n >= 3; n--) {          // the longest recent motif that fits in one bar
-      first = (this._motifHead - n + 4) & 3;
-      const span = this._motifSlot[last] - this._motifSlot[first];
-      if (span >= 2 && span <= 14) break;
-    }
-    if (n < 3 || base - this._motifSlot[first] > 32) return;
-    const d0 = this._motifDeg[first];
-    const dirn = this._random() < 0.5 ? 1 : -1;
-    let target = this._snap(d0 + dirn, chord, dirn);
-    if (target === d0) target = this._snap(d0 + 2 * dirn, chord, dirn);
-    let shift = target - d0;
-    const c = Math.round(this._reg * 10);
-    for (let k = 0; k < n; k++) {  // keep it in range: sequence the other way instead
-      const d = this._motifDeg[(first + k) & 3] + shift;
-      if (d < c - 6 || d > c + 7) { shift = this._snap(d0 - dirn * 2, chord, -dirn) - d0; break; }
-    }
-    for (let k = 0; k < n; k++) {
-      const i = (first + k) & 3;
-      this._planSlot[k] = base + (this._motifSlot[i] - this._motifSlot[first]);
-      this._planDeg[k] = this._clampDeg(this._motifDeg[i] + shift);
-    }
-    this._planLen = n;
-    this._planIdx = 0;
-    this._lastReplayBar = bar;
-  }
-
-  _nextDeg(strong, chord) {
+    if (this._crunchOn ? a < ACT_OFF : a >= ACT_ON) this._crunchOn = !this._crunchOn;
+    if (!this._crunchOn || !this._banks) { this._nextBurst = 0; return; }
+    const slime = this.texture === "slime";
+    const rate = (slime ? 3 : 4) + (slime ? 30 : 40) * Math.pow(a, 1.3);   // bursts per second
     const rnd = this._random;
-    const c = this._reg * 10;
-    const r = rnd();
-    let mv = r < 0.3 ? 1 : r < 0.6 ? -1 : r < 0.72 ? 2 : r < 0.84 ? -2 : r < 0.92 ? 0 : r < 0.96 ? 3 : -3;
-    if (mv !== 0 && rnd() < 0.35) mv = Math.abs(mv) * this._dir;        // keep going the same way
-    if (mv === 0 && this._lastMove === 0) mv = this._dir;               // no triple repeats
-    const d0 = this._deg;
-    if ((d0 > c + 3 && mv > 0) || (d0 < c - 3 && mv < 0)) mv = -mv;    // drift back to the centre
-    let d = this._clampDeg(d0 + mv);
-    if (strong) d = this._snap(d, chord, mv >= 0 ? 1 : -1);
-    return d;
-  }
-
-  _clampDeg(d) {
-    const c = Math.round(this._reg * 10);
-    const lo = Math.max(-3, c - 5), hi = Math.min(15, c + 6);
-    return d < lo ? lo + (d < lo - 1 ? 0 : 1) : d > hi ? hi - (d > hi + 1 ? 0 : 1) : d;
-  }
-
-  // Nearest pentatonic chord tone, preferring the direction of motion.
-  _snap(d, chord, dir) {
-    const mask = CHORD_DEG[chord];
-    if (mask[mod5(d)]) return d;
-    const sgn = dir < 0 ? -1 : 1;
-    for (let k = 1; k <= 3; k++) {
-      if (mask[mod5(d + sgn * k)]) return d + sgn * k;
-      if (mask[mod5(d - sgn * k)]) return d - sgn * k;
-    }
-    return d;
-  }
-
-  _setDeg(d) {
-    const mv = d - this._deg;
-    if (mv) this._dir = mv > 0 ? 1 : -1;
-    this._lastMove = mv;
-    this._deg = d;
-  }
-
-  _velocity(a, s, sub) {
-    let v = 0.16 + 0.74 * a;
-    if (s === 0) v += 0.08; else if (s === 4) v += 0.04; else if (s & 1) v -= 0.05;
-    if (sub) v -= 0.1;
-    v += (this._random() - 0.5) * 0.08;
-    return clamp(v, 0.06, 1);
-  }
-
-  _bassRoot(chord) {
-    const pc = CHORDS[chord].root;
-    const root = pc + 36 < 41 ? pc + 48 : pc + 36;      // F2 … E3
-    return this._reg > 0.7 ? root + 12 : root;
-  }
-
-  _melody(deg, t, velocity, chord, slot, bar) {
-    const midi = degToMidi(deg);
-    this._pedal(bar, t);
-    this._pianoNote(midi, velocity, t, false, bar);
-    const h = this._motifHead;
-    this._motifSlot[h] = slot; this._motifDeg[h] = deg;
-    this._motifHead = (h + 1) & 3;
-    if (this._motifLen < 4) this._motifLen++;
-    this.stats.notes++;
-    this._emitNote(midi, velocity, chord, t);
-  }
-
-  _bass(midi, velocity, t, bar) {
-    this._pedal(bar, t);
-    this._pianoNote(midi, velocity, t, true, bar);
-    this.stats.bassNotes++;
-  }
-
-  // "Pedal change" on the first note of a new bar: damp what rang in the old chord.
-  _pedal(bar, t) {
-    if (bar === this._pedalBar) return;
-    this._pedalBar = bar;
-    const list = this._piano;
-    for (let i = 0; i < list.length; i++) {
-      const v = list[i];
-      if (v.t0 < t - 0.001 && !v.released) this._release(v, t + 0.004, 0.11);
+    if (this._nextBurst < now - 0.03) this._nextBurst = now + 0.004 - Math.log(1 - rnd() * 0.999) / rate;
+    while (this._nextBurst < horizon) {
+      this._burst(this._nextBurst, a);
+      this._nextBurst += -Math.log(1 - rnd() * 0.999) / rate;
     }
   }
 
+  // One crunch: a cluster of bead snaps a few ms apart, decaying.
+  _burst(t, a, boost = 1) {
+    const rnd = this._random, slime = this.texture === "slime";
+    const n = 1 + Math.floor(rnd() * (1.5 + (slime ? 5 : 3.5) * a));
+    let v = clamp((0.3 + 0.7 * a) * (0.55 + 0.45 * rnd()) * boost, 0, 1.4);
+    for (let k = 0; k < n; k++) {
+      this._grain(this._banks.beads, t, v, slime ? 0.78 : 1.12);
+      t += 0.003 + rnd() * (slime ? 0.016 : 0.011);
+      v *= 0.62 + 0.3 * rnd();
+    }
+    this.stats.bursts++;
+    if (t - this._lastPulse > 0.11) { this._lastPulse = t; this._emitNote(0, clamp(v * 1.6, 0, 1), 0, t); }
+  }
+
+  _grain(bank, t, velocity, rate) {
+    const ctx = this.ctx, rnd = this._random;
+    const live = this._grains;
+    while (live.length && live[0] <= t) live.shift();
+    if (live.length >= GRAIN_VOICES) { this.stats.grainDrops++; return; }
+    const buffer = bank[Math.floor(rnd() * bank.length)];
+    const src = ctx.createBufferSource();
+    src.buffer = buffer;
+    const r = rate * (0.88 + 0.24 * rnd());
+    src.playbackRate.value = r;
+    const g = ctx.createGain();
+    g.gain.value = CRUNCH_LEVEL * velocity;
+    src.connect(g);
+    const nodes = [src, g];
+    if (ctx.createStereoPanner) {
+      const pan = ctx.createStereoPanner();
+      pan.pan.value = (rnd() - 0.5) * 0.8;
+      g.connect(pan); pan.connect(this._crunchBus); nodes.push(pan);
+    } else g.connect(this._crunchBus);
+    src.onended = () => { for (const node of nodes) { try { node.disconnect(); } catch { /* gone */ } } };
+    src.start(t);
+    const end = t + buffer.duration / r;
+    let i = live.length;
+    while (i > 0 && live[i - 1] > end) i--;
+    live.splice(i, 0, end);
+    this.stats.grains++;
+    if (live.length > this.stats.maxGrains) this.stats.maxGrains = live.length;
+  }
+
+  /** A crunch burst right now (pressing in, a gem landing). strength 0..1. */
+  crunch(strength = 0.7) {
+    if (!this._ready()) return;
+    const s = clamp(+strength || 0, 0, 1);
+    if (s < 0.03) return;
+    this._burst(this._now() + 0.002, s, 1.15);
+  }
+
+  /** Sticky stretch '쩍'. Rate-limited (≥ 0.14 s apart). strength 0..1. */
+  squelch(strength = 0.6) {
+    if (!this._ready()) return;
+    const now = this._now();
+    if (now - this._lastSquelch < 0.14) return;
+    const s = clamp(+strength || 0, 0, 1);
+    if (s < 0.05) return;
+    this._lastSquelch = now;
+    const slime = this.texture === "slime";
+    this._grain(this._banks.squelch, now + 0.002, (0.45 + 0.6 * s) * (slime ? 1.15 : 0.8), slime ? 0.82 : 1.15);
+  }
+
+  /** Air pocket '뽁' (finger let go). strength 0..1. */
+  pop(strength = 0.6) {
+    if (!this._ready()) return;
+    const now = this._now();
+    if (now - this._lastPop < 0.08) return;
+    this._lastPop = now;
+    const s = clamp(+strength || 0, 0, 1);
+    const slime = this.texture === "slime";
+    this._grain(this._banks.pop, now + 0.002, 0.5 + 0.6 * s, (slime ? 0.8 : 1.1) * (0.9 + 0.3 * s));
+  }
+
+  _ready() {
+    const ctx = this.ctx;
+    return Boolean(ctx && this.enabled && this._banks && (this._offline || ctx.state === "running"));
+  }
+
+  // ------------------------------------------------------------ sample banks
+
+  _makeBanks() {
+    const ctx = this.ctx, sr = ctx.sampleRate, rnd = this._random;
+    const make = (seconds, fill) => {
+      const len = Math.max(1, Math.floor(seconds * sr));
+      const buffer = ctx.createBuffer(1, len, sr), d = buffer.getChannelData(0);
+      fill(d, len);
+      let peak = 0;
+      for (let i = 0; i < len; i++) peak = Math.max(peak, Math.abs(d[i]));
+      if (peak > 0) for (let i = 0; i < len; i++) d[i] /= peak;
+      for (let i = Math.max(0, len - 64); i < len; i++) d[i] *= (len - i) / 64;   // no end click
+      return buffer;
+    };
+    const TAU = Math.PI * 2;
+    // Bead snap: a hard noise transient, two bright resonances of the bead
+    // shell and a soft low "thud" of the wet matrix around it; some beads crack twice.
+    const beads = [];
+    for (let k = 0; k < 28; k++) {
+      const f1 = 1500 + rnd() * 3800, f2 = f1 * (1.45 + rnd() * 0.9), f3 = 220 + rnd() * 420;
+      const t1 = 0.0018 + rnd() * 0.0045, t2 = 0.001 + rnd() * 0.002, t3 = 0.004 + rnd() * 0.007, tn = 0.0005 + rnd() * 0.0012;
+      const wet = 0.2 + rnd() * 0.7, p1 = rnd() * TAU, p2 = rnd() * TAU;
+      const second = rnd() < 0.4 ? 0.002 + rnd() * 0.005 : -1, a2 = 0.35 + rnd() * 0.4;
+      beads.push(make(0.034, (d, len) => {
+        let lp = 0;
+        const snap = (t) => (t < 0 ? 0 : Math.min(1, t / 0.00015));
+        for (let i = 0; i < len; i++) {
+          const t = i / sr, n = rnd() * 2 - 1;
+          lp += 0.35 * (n - lp);
+          const hp = n - lp;
+          let y = hp * Math.exp(-t / tn) + 0.55 * Math.sin(TAU * f1 * t + p1) * Math.exp(-t / t1)
+            + 0.3 * Math.sin(TAU * f2 * t + p2) * Math.exp(-t / t2) + wet * 0.6 * Math.sin(TAU * f3 * t) * Math.exp(-t / t3);
+          y *= snap(t);
+          if (second > 0 && t >= second) {
+            const u = t - second;
+            y += a2 * snap(u) * (hp * Math.exp(-u / tn) + 0.5 * Math.sin(TAU * f1 * 1.07 * u) * Math.exp(-u / t1));
+          }
+          d[i] = y;
+        }
+      }));
+    }
+    // Sticky stretch: wet micro-clicks that slow down as the strand thins,
+    // a falling formant, and a little low-passed slurp underneath.
+    const squelch = [];
+    for (let k = 0; k < 6; k++) {
+      const dur = 0.22 + rnd() * 0.12, fA = 900 + rnd() * 600, fB = fA * (0.55 + rnd() * 0.15);
+      squelch.push(make(dur, (d, len) => {
+        let t = 0.004;
+        while (t < dur - 0.02) {
+          const p = t / dur, f = fA + (fB - fA) * p, tau = 0.0009 + 0.0012 * rnd();
+          const amp = Math.min(1, t / 0.03) * (1 - p * 0.55) * (0.45 + 0.55 * rnd());
+          const i0 = Math.floor(t * sr), span = Math.floor(tau * 7 * sr), ph = rnd() * TAU;
+          for (let j = 0; j < span && i0 + j < len; j++) {
+            const u = j / sr;
+            d[i0 + j] += amp * Math.sin(TAU * f * u + ph) * Math.exp(-u / tau);
+          }
+          t += 0.0015 + 0.014 * p * p + rnd() * 0.004;
+        }
+        let lp = 0;
+        for (let i = 0; i < len; i++) {
+          const p = i / len, n = rnd() * 2 - 1;
+          lp += 0.06 * (n - lp);
+          d[i] += lp * 2.2 * Math.sin(Math.PI * Math.min(1, p * 1.2)) * (0.6 + 0.4 * Math.sin(TAU * 31 * p));
+        }
+      }));
+    }
+    // Air pocket: a bubble whose resonance sweeps up as it closes, plus a click.
+    const pop = [];
+    for (let k = 0; k < 4; k++) {
+      const f0 = 330 + rnd() * 260, rise = 1.8 + rnd() * 1.2, tau = 0.025 + rnd() * 0.02;
+      pop.push(make(0.13, (d, len) => {
+        let phase = 0;
+        for (let i = 0; i < len; i++) {
+          const t = i / sr, f = f0 * (1 + rise * (1 - Math.exp(-t / 0.012)));
+          phase += TAU * f / sr;
+          d[i] = Math.sin(phase) * Math.exp(-t / tau) * Math.min(1, t / 0.0006) + (t < 0.0012 ? (rnd() * 2 - 1) * 0.6 * (1 - t / 0.0012) : 0);
+        }
+      }));
+    }
+    this._banks = { beads, squelch, pop };
+  }
   _emitNote(midi, velocity, chord, time) {
     if (!this._listeners.length) return;
     if (this._offline) {
@@ -820,103 +767,6 @@ export class JellyAudio {
       for (let i = 0; i < nodes.length; i++) { try { nodes[i].disconnect(); } catch { /* gone */ } }
     };
     voice.end = stops[last];
-  }
-
-  // Additive soft grand: inharmonic partials f_n = n·f0·√(1+B·n²), two detuned
-  // strings on the lowest partials, per-partial two-stage decays, a velocity
-  // low-pass that closes over time, and a filtered-noise hammer.
-  _pianoNote(midi, velocity, t, bass, bar) {
-    const ctx = this.ctx, list = this._piano;
-    this._prune(list, t);
-    if (list.length >= PIANO_VOICES) { this._steal(list, t, 0.02, bar); this.stats.pianoSteals++; }
-    const rnd = this._random;
-    const v = clamp(velocity, 0.02, 1);
-    const f0 = mtof(midi);
-    const fMax = Math.min(14000, ctx.sampleRate * 0.45);
-    const B = 0.0004 * (1 + Math.max(0, midi - 60) / 36);
-    const nPart = midi < 55 ? 7 : midi < 67 ? 6 : midi < 79 ? 5 : 4;
-    const T60 = clamp(3.6 * Math.pow(0.72, (midi - 60) / 12), 1.0, 4.5);
-    const tau1 = T60 / 6.9;
-    const bright = 0.55 + 0.45 * v;
-    const amp = PIANO_LEVEL * Math.pow(v, 1.4);
-    const atk = 0.0025;
-
-    // Velocity low-pass: opens with velocity, closes over ~0.5–1.6 s. k-rate and
-    // a finite ramp: a-rate biquad automation recomputes coefficients per sample.
-    const fOpen = Math.min(fMax, f0 * (2 + 14 * v * v) + 500);
-    const fClose = Math.min(fOpen, f0 * 2.5 + 300);
-    // Partials: skip what the filter or the velocity would make inaudible.
-    let count = 0, norm = 0;
-    for (let n = 1; n <= nPart; n++) {
-      const fn = n * f0 * Math.sqrt(1 + B * n * n);
-      const rel = PIANO_PARTIALS[n - 1] * Math.pow(bright, n - 1);
-      if (fn > fMax || (n > 2 && (rel < 0.02 || fn > 2.5 * fOpen))) break;
-      norm += rel * (n <= 2 ? 1 + STRING2 : 1);
-      count = n;
-    }
-
-    const gain = ctx.createGain();
-    gain.connect(this._pianoBus);
-    const lp = ctx.createBiquadFilter();
-    lp.type = "lowpass"; lp.Q.value = 0;
-    try { lp.frequency.automationRate = "k-rate"; } catch { /* older engines: a-rate */ }
-    lp.frequency.setValueAtTime(fOpen, t);
-    if (fClose < fOpen) lp.frequency.exponentialRampToValueAtTime(fClose, t + 0.5 + 1.1 * (1 - v));
-    lp.connect(gain);
-    const nodes = [gain, lp], oscs = [], stops = [];
-
-    for (let n = 1; n <= count; n++) {
-      const fn = n * f0 * Math.sqrt(1 + B * n * n);
-      const a = amp * PIANO_PARTIALS[n - 1] * Math.pow(bright, n - 1) / norm;
-      const tau = tau1 / (1 + 0.8 * (n - 1));          // upper partials die sooner
-      const g = ctx.createGain();
-      g.gain.setValueAtTime(0, t);
-      g.gain.linearRampToValueAtTime(a, t + atk);
-      let stopAt;
-      if (n <= 2) {                // prompt sound then a slower aftersound
-        g.gain.setTargetAtTime(0, t + atk, 0.25);
-        g.gain.setTargetAtTime(0, t + atk + 0.15, tau);
-        stopAt = t + atk + 0.15 + tau * 5.2;            // ≈ -50 dB
-      } else {
-        g.gain.setTargetAtTime(0, t + atk, tau);
-        stopAt = t + atk + tau * 5.75;                  // -50 dB
-      }
-      g.connect(lp);
-      const o = ctx.createOscillator();
-      o.frequency.value = fn;
-      o.detune.value = n <= 2 ? -1.5 : (rnd() - 0.5) * 2;
-      o.connect(g);
-      o.start(t); o.stop(stopAt);
-      nodes.push(g, o); oscs.push(o); stops.push(stopAt);
-      if (n <= 2) {                // second string, +1.5 cents
-        const o2 = ctx.createOscillator();
-        o2.frequency.value = fn;
-        o2.detune.value = 1.5;
-        const g2 = ctx.createGain();
-        g2.gain.value = STRING2;
-        o2.connect(g2); g2.connect(g);
-        o2.start(t); o2.stop(stopAt);
-        nodes.push(g2, o2); oscs.push(o2); stops.push(stopAt);
-      }
-    }
-
-    // Hammer: a few ms of band-passed noise.
-    const src = ctx.createBufferSource();
-    src.buffer = this.noise;
-    const bp = ctx.createBiquadFilter();
-    bp.type = "bandpass"; bp.frequency.value = clamp(f0 * 6, 1200, 5000); bp.Q.value = 0.7;
-    const hg = ctx.createGain();
-    hg.gain.setValueAtTime(0, t);
-    hg.gain.linearRampToValueAtTime(amp * (0.35 + 0.9 * v), t + 0.0012);
-    hg.gain.setTargetAtTime(0, t + 0.0012, 0.007);
-    src.connect(bp); bp.connect(hg); hg.connect(gain);
-    src.start(t, rnd() * 0.18, 0.06);
-    nodes.push(src, bp, hg);
-
-    const voice = { t0: t, end: t, gain, oscs, stops, bass, bar, released: false, relT: 0 };
-    this._finishVoice(nodes, oscs, stops, voice);
-    list.push(voice);
-    if (list.length > this.stats.maxPianoVoices) this.stats.maxPianoVoices = list.length;
   }
 
   // Glass/crystal "ting": inharmonic bell partials with fast decays, a beating

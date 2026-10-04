@@ -15,6 +15,7 @@ let stepTimeAvg = 0;
 let tickCount = 0;
 let dyeSent = 0;
 let sentOnce = false;
+let beadsSent = false;
 const pool = new Map(); // byteLength → [ArrayBuffer]
 
 function take(length) {
@@ -44,6 +45,12 @@ function frame(steps, elapsed, stepped) {
   const gemCount = world.gems.length;
   out.gemCount = gemCount;
   if (gemCount) { const g = take(gemCount * 10); world.gemStates(g); out.gems = g; transfer.push(g.buffer); }
+  out.texture = world.texture;
+  if (world.texture === "slime" && world.beads && (stepped || !beadsSent)) {
+    const b = take(world.beads.count * 4);
+    world.beadStates(b); out.beads = b; transfer.push(b.buffer);
+    beadsSent = true;
+  } else if (world.texture !== "slime" && beadsSent) { out.beads = new Float32Array(0); beadsSent = false; }
   out.grab = body.grab ? { point: body.grab.point.slice(), target: body.grab.target.slice() } : null;
   out.impact = body.impact; out.wallImpact = body.wallImpact;
   body.impact = 0; body.wallImpact = 0;
@@ -56,7 +63,7 @@ function frame(steps, elapsed, stepped) {
 self.onmessage = ({ data }) => {
   try {
     if (data.type === "init") {
-      world = new JellyWorld({ wallRadius: data.wallRadius, base: data.base });
+      world = new JellyWorld({ wallRadius: data.wallRadius, base: data.base, texture: data.texture });
       world.events.length = 0;
       self.postMessage({ type: "ready", indices: world.type.stencils.indices.slice(), positions: world.body.positions.slice() });
     } else if (data.type === "tick") {
@@ -67,7 +74,8 @@ self.onmessage = ({ data }) => {
       }
       for (const event of data.events || []) {
         if (event.type === "pause") { paused = Boolean(event.paused); if (paused) world.handle({ type: "grabEnd" }); world.accumulator = 0; continue; }
-        if (event.type === "reset") sentOnce = false;
+        if (event.type === "reset") { sentOnce = false; beadsSent = false; }
+        if (event.type === "texture") sentOnce = false;
         world.handle(event);
       }
       tickCount++;

@@ -168,24 +168,21 @@ function legacyBoing(self, strength, pitch = 1, kind = "drop") {
 
 // ======================================================================= tests
 const SR = 48000;
-const C = JellyAudio.CHORDS;
 const PENTA = new Set([0, 2, 4, 7, 9]);
 const LIMITS = JellyAudio.VOICE_LIMITS;
 
 async function testApi() {
   const a = new JellyAudio();
-  const methods = ["unlock", "suspend", "resume", "setEnabled", "setVolumes", "boing", "setActivity", "onNote", "clink", "dispose"];
+  const methods = ["unlock", "suspend", "resume", "setEnabled", "setVolumes", "boing", "setActivity", "onNote", "clink", "crunch", "squelch", "pop", "setTexture", "dispose"];
   check("API: all methods present", methods.every((m) => typeof a[m] === "function"), methods.filter((m) => typeof a[m] !== "function").join(","));
-  check("API: default tempo 92", a.tempo === 92);
-  a.tempo = 110; check("API: tempo setter", a.tempo === 110);
+  check("API: no piano left", a.playNote === undefined && a.tempo === undefined);
   a.setVolumes({ gems: 0.25 });
   const v = a.volumes;
-  check("API: setVolumes keeps omitted keys / defaults", v.master === 0.9 && v.piano === 0.7 && v.gems === 0.25 && v.boing === 0.6, JSON.stringify(v));
-  // Calls before unlock() must be harmless no-ops.
+  check("API: setVolumes keeps omitted keys / defaults", v.master === 0.9 && v.crunch === 0.8 && v.gems === 0.25 && v.boing === 0.6, JSON.stringify(v));
   let threw = null;
-  try { a.setActivity(0.5, 0.5); a.boing(1, 1, "drop"); a.clink(1, 3); a.suspend(); a.resume(); a.setEnabled(false); a.setEnabled(true); a.dispose(); } catch (e) { threw = e; }
+  try { a.setActivity(0.5, 0.5); a.boing(1, 1, "drop"); a.clink(1, 3); a.crunch(1); a.squelch(1); a.pop(1); a.setTexture("slime"); a.suspend(); a.resume(); a.setEnabled(false); a.setEnabled(true); a.dispose(); } catch (e) { threw = e; }
   check("API: safe to call everything before unlock()", !threw, threw ? threw.message : "");
-  check("API: voice limits 10 piano / 6 gems", LIMITS.piano === 10 && LIMITS.gems === 6, JSON.stringify(LIMITS));
+  check("API: voice limits 28 grains / 6 gems", LIMITS.grains === 28 && LIMITS.gems === 6, JSON.stringify(LIMITS));
 }
 
 // Output stage: quiet signals at unity, overloads limited below 0 dBFS.
@@ -261,147 +258,70 @@ async function testSmoothing() {
 let mainRender = null;
 
 async function testMainRender() {
-  const seconds = 12, eighth = 30 / 92;
+  const seconds = 12;
   const act = (t) => (t < 1 ? 0 : t < 6 ? (0.8 * (t - 1)) / 5 : t < 9 ? 0.8 : 0);
-  const reg = (t) => 0.5 + 0.2 * Math.sin(t * 0.7);
-  const notes = [], clinks = [], burst = [];
+  const pulses = [], clinks = [], burst = [];
   const clinkPlan = [[0.3, 0.6, 11], [2.0, 0.5, 3], [3.3, 0.9, 7], [5.1, 0.4, 21], [6.4, 0.7, 5], [7.05, 1, 9], [8.2, 0.6, 2], [10.0, 0.5, 17], [10.9, 0.8, 4]];
   const boingPlan = [[0.15, 0.7, 1.0, "drop"], [4.2, 0.5, 0.9, "bump"], [7.7, 0.9, 1.08, "snap"]];
+  const fxPlan = [[3.6, "squelch", 0.8], [5.5, "pop", 0.7], [6.8, "crunch", 0.9]];
   const near = (t, x) => Math.abs(t - x) < 0.5 / 60;
-  let frame = 0;
+  let frame = 0, bursts = [];
   const t0 = performance.now();
   const { buffer, audio } = await JellyAudio.renderOffline(seconds, (a, t) => {
     frame++;
-    a.setActivity(act(t), reg(t));
-    for (const [ct, s, seed] of clinkPlan) if (near(t, ct)) clinks.push({ t, midi: a.clink(s, seed), chord: a.chordAt(t) });
+    a.setActivity(act(t), 0.5);
+    for (const [ct, s, seed] of clinkPlan) if (near(t, ct)) clinks.push({ t, midi: a.clink(s, seed) });
     if (t >= 8.5 && t < 8.5 + 6 / 60) burst.push(a.clink(0.7, frame));
     for (const [bt, s, p, kind] of boingPlan) if (near(t, bt)) a.boing(s, p, kind);
-  }, { sampleRate: SR, random: mulberry32(12345), setup: (a) => a.onNote((e) => notes.push(e)) });
+    for (const [ft, kind, s] of fxPlan) if (near(t, ft)) a[kind](s);
+    if (Math.abs(t - Math.round(t)) < 0.5 / 60) bursts.push([t, a.stats.bursts]);
+  }, { sampleRate: SR, random: mulberry32(12345), setup: (a) => a.onNote((e) => pulses.push(e)) });
   const renderMs = performance.now() - t0;
   mainRender = buffer;
-  const origin = audio.gridOrigin;
-  info(`main render: ${seconds} s in ${fmt(renderMs, 0)} ms (${fmt((seconds * 1000) / renderMs, 1)}× realtime, desktop Chromium), ${notes.length} melody notes, ${audio.stats.bassNotes} bass notes, stats ${JSON.stringify(audio.stats)}`);
+  info(`main render: ${seconds} s in ${fmt(renderMs, 0)} ms (${fmt((seconds * 1000) / renderMs, 1)}× realtime), stats ${JSON.stringify(audio.stats)}`);
 
   const activeRms = rmsOf(buffer, 3, 9);
   check("main: output not silent while active (RMS 3–9 s)", activeRms > 0.01, `${fmt(dB(activeRms), 1)} dBFS`);
   const tp = truePeak(buffer);
-  check("main: true peak < 1.0", tp < 1, `${fmt(tp, 3)} (${fmt(dB(tp), 2)} dBFS), sample peak ${fmt(samplePeak(buffer), 3)}`);
-
-  check("main: onNote fired for melody notes", notes.length >= 12, String(notes.length));
-  check("main: no notes before activity starts (t < 1 s)", notes.every((n) => n.time >= 1));
-  const first = notes[0]?.time ?? NaN;
-  check("main: first note soon after activity rises (on the next 8th)", first > 1 && first < 2.2, `first at ${fmt(first)} s`);
-  const sixteenth = eighth / 2;
-  let worst = 0, on8 = 0;
-  for (const n of notes) {
-    const k = (n.time - origin) / sixteenth;
-    worst = Math.max(worst, Math.abs(k - Math.round(k)) * sixteenth);
-    if (Math.round(k) % 2 === 0) on8++;
-  }
-  check("main: every note on the grid (±10 ms)", worst <= 0.01, `worst ${fmt(worst * 1000, 3)} ms`);
-  check("main: most notes on 8ths (16ths only as pickups/runs)", on8 / notes.length >= 0.75, `${on8}/${notes.length}`);
-  const sixteenths = notes.filter((n) => Math.round((n.time - origin) / sixteenth) % 2 !== 0);
-  check("main: 16th pickups only when activity is high", sixteenths.every((n) => act(n.time - 0.2) > 0.55 || act(n.time) > 0.55),
-    `${sixteenths.length} sixteenths at ${sixteenths.map((n) => fmt(n.time, 2)).join(",")}`);
-  const chordOf = (t) => (Math.floor((t - origin) / (8 * eighth) + 1e-6) % 4 + 4) % 4;
-  check("main: onNote chord = I–V–vi–IV bar index", notes.every((n) => n.chord === chordOf(n.time)));
-  check("main: melody stays in C major pentatonic", notes.every((n) => PENTA.has(n.midi % 12)));
-  check("main: melody register C3..C7", notes.every((n) => n.midi >= 48 && n.midi <= 96), `${Math.min(...notes.map((n) => n.midi))}..${Math.max(...notes.map((n) => n.midi))}`);
-  const downbeats = notes.filter((n) => Math.round((n.time - origin) / sixteenth) % 16 === 0);
-  const dbChord = downbeats.filter((n) => C[n.chord].tones.includes(n.midi % 12)).length;
-  check("main: beat-1 melody notes are chord tones", dbChord / Math.max(1, downbeats.length) >= 0.9, `${dbChord}/${downbeats.length}`);
-  check("main: velocity follows activity", (() => {
-    const lo = notes.filter((n) => n.time < 2.6), hi = notes.filter((n) => n.time > 6 && n.time < 9);
-    const avg = (l) => l.reduce((s, n) => s + n.velocity, 0) / Math.max(1, l.length);
-    return lo.length > 0 && hi.length > 0 && avg(hi) > avg(lo) + 0.2;
-  })());
-  const dens = (t0, t1) => notes.filter((n) => n.time >= t0 && n.time < t1).length / (t1 - t0);
-  check("main: note density grows with activity", dens(6, 9) > dens(1.5, 3.5) * 1.5, `${fmt(dens(1.5, 3.5), 2)}/s → ${fmt(dens(6, 9), 2)}/s`);
-
-  // The first note must actually sound when onNote says so (± 10 ms).
-  if (notes.length) {
-    const x = mono(buffer);
-    const hop = Math.round(0.001 * SR);
-    const energy = (i) => { let s = 0; for (let j = 0; j < hop; j++) s += x[i + j] * x[i + j]; return s / hop; };
-    const startI = Math.floor((first - 0.06) * SR);
-    let base = 0; for (let k = 0; k < 30; k++) base += energy(startI + k * hop); base /= 30;
-    let onset = NaN;
-    for (let i = startI + 30 * hop; i < startI + 0.2 * SR; i += hop) if (energy(i) > base * 30 + 1e-9) { onset = i / SR; break; }
-    check("main: first note audible at its onNote time (±10 ms, incl. 6 ms limiter look-ahead)", Math.abs(onset - first) <= 0.012,
-      `onset ${fmt(onset, 4)} s vs note ${fmt(first, 4)} s (${fmt((onset - first) * 1000, 1)} ms)`);
-  }
-
-  const lastNote = notes.length ? notes[notes.length - 1].time : 0;
-  check("main: no new notes once activity has decayed (after 10.6 s)", lastNote < 10.6, `last note ${fmt(lastNote, 2)} s`);
+  check("main: true peak < 1.0", tp < 1, `${fmt(tp, 3)} (${fmt(dB(tp), 2)} dBFS)`);
+  const at = (t) => (bursts.find(([bt]) => Math.abs(bt - t) < 0.02) || [0, 0])[1];
+  const low = (at(3) - at(1)) / 2, high = (at(9) - at(6)) / 3;
+  check("crunch: bursts while the jelly moves", audio.stats.bursts > 60, `${audio.stats.bursts} bursts, ${audio.stats.grains} grains`);
+  check("crunch: denser with more activity", high > low * 1.5, `${fmt(low, 1)}/s → ${fmt(high, 1)}/s`);
+  check("crunch: nothing before activity starts", at(1) === 0 || (pulses[0] && pulses[0].time >= 1));
+  check("crunch: grain voice limit holds", audio.stats.maxGrains <= LIMITS.grains, `max ${audio.stats.maxGrains}, dropped ${audio.stats.grainDrops}`);
+  check("crunch: onNote pulses for the glow", pulses.length > 20, `${pulses.length}`);
+  // A crunch is a transient: most of a burst's energy is above 1.5 kHz.
+  const x = mono(buffer);
+  const hi = tonePower(x, 7.0 * SR, 4096, 3000, SR) + tonePower(x, 7.0 * SR, 4096, 4500, SR);
+  const lo = tonePower(x, 7.0 * SR, 4096, 150, SR);
+  check("crunch: bright, crackly spectrum", hi > lo, `${fmt(10 * Math.log10(hi / lo), 1)} dB (3–4.5 kHz vs 150 Hz)`);
+  const lastPulse = pulses.length ? pulses[pulses.length - 1].time : 0;
+  check("crunch: stops once activity has decayed (after 10.6 s)", lastPulse < 10.6, `last ${fmt(lastPulse, 2)} s`);
   const tailRms = rmsOf(buffer, 11.5, 12);
   check("main: silent ≥ 2.5 s after activity went to 0 (RMS 11.5–12 s)", tailRms < 0.003 && tailRms < activeRms * 0.03,
     `${fmt(dB(tailRms), 1)} dBFS (active ${fmt(dB(activeRms), 1)} dBFS)`);
 
   const played = clinks.filter((c) => c.midi > 0);
   check("clink: planned clinks played", played.length === clinkPlan.length, `${played.length}/${clinkPlan.length}`);
-  check("clink: pitch class ∈ current chord", played.every((c) => C[c.chord].tones.includes(c.midi % 12) && c.chord === chordOf(c.t)),
-    played.map((c) => `${fmt(c.t, 2)}s:${C[c.chord].name}/${c.midi}`).join(" "));
-  check("clink: high register C6–C7", played.every((c) => c.midi >= 84 && c.midi <= 96));
+  check("clink: C-major pentatonic, C6–C7", played.every((c) => PENTA.has(c.midi % 12) && c.midi >= 84 && c.midi <= 96));
   const burstPlayed = burst.filter((m) => m > 0).length;
   check("clink: rate-limited (6 calls in 100 ms → ≤ 2 sound)", burstPlayed >= 1 && burstPlayed <= 2, `${burstPlayed} played`);
-  const liveOsc = audio.stats.oscSeconds / seconds;
-  check("cpu proxy: average live oscillators (main render) ≤ 40", liveOsc <= 40, fmt(liveOsc, 1));
-  check("voices: piano ≤ 10, gems ≤ 6", audio.stats.maxPianoVoices <= LIMITS.piano && audio.stats.maxGemVoices <= LIMITS.gems,
-    `max piano ${audio.stats.maxPianoVoices}, max gems ${audio.stats.maxGemVoices}, steals ${audio.stats.pianoSteals}/${audio.stats.gemSteals}`);
   const boingRms = rmsOf(buffer, 0.15, 0.5);
   check("boing: audible in the mix", boingRms > 0.01, `${fmt(dB(boingRms), 1)} dBFS`);
-
-  // Spectral: each melody note has energy at its fundamental vs. ±1 semitone.
-  const x = mono(buffer);
-  let good = 0, total = 0;
-  for (const n of notes) {
-    const f = mtof(n.midi), N = 8192, s = (n.time + 0.03) * SR;
-    if (s + N > x.length) continue;
-    const p0 = tonePower(x, s, N, f, SR);
-    const pl = tonePower(x, s, N, f * Math.pow(2, -1 / 12), SR), ph = tonePower(x, s, N, f * Math.pow(2, 1 / 12), SR);
-    total++;
-    if (p0 > 4 * Math.max(pl, ph)) good++;
-  }
-  check("spectrum: melody notes have energy at their fundamentals", total > 0 && good / total >= 0.75, `${good}/${total} notes ≥ 6 dB above ±1 semitone`);
-  return { notes, audio };
 }
 
-// Isolated piano notes: pitch, partials, decay, velocity brightness.
-async function testPianoNotes() {
-  const renderNote = async (midi, vel) => {
-    const { buffer } = await JellyAudio.renderOffline(1.6, null, { sampleRate: SR, random: mulberry32(midi), setup: (a) => a.playNote(midi, vel, 0.05) });
-    return mono(buffer);
-  };
-  for (const midi of [48, 60, 72, 84]) {
-    const x = await renderNote(midi, 0.7);
-    const f = mtof(midi), N = 8192, B = 0.0004 * (1 + Math.max(0, midi - 60) / 36);
-    const s0 = 0.07 * SR, NL = 32768;   // long window: resolves ±1 semitone at C3
-    const p0L = tonePower(x, s0, NL, f, SR);
-    const pn = Math.max(tonePower(x, s0, NL, f * Math.pow(2, -1 / 12), SR), tonePower(x, s0, NL, f * Math.pow(2, 1 / 12), SR));
-    const p0 = tonePower(x, s0, N, f, SR);
-    const part = (n) => tonePower(x, s0, N, n * f * Math.sqrt(1 + B * n * n), SR);
-    const gap = (n) => tonePower(x, s0, N, (n + 0.5) * f, SR);
-    const late = tonePower(x, 1.05 * SR, N, f, SR);
-    const decayDb = 10 * Math.log10(late / p0);
-    // attack: RMS over one period (phase-independent), sampled every 1 ms;
-    // time from first sound to 70 % of the maximum, allowed ≤ max(5 ms, 1 period)
-    const env = [], hop = SR / 1000, win = Math.max(hop, Math.round(SR / f));
-    for (let i = 0; i < 0.3 * SR; i += hop) { let e = 0; for (let j = 0; j < win; j++) e += x[i + j] ** 2; env.push(Math.sqrt(e / win)); }
-    const emax = Math.max(...env), on = env.findIndex((e) => e > emax * 0.01), rise = env.findIndex((e) => e >= emax * 0.7) - on;
-    const allowed = Math.max(5, Math.ceil(1000 / f));
-    check(`piano ${midi}: fundamental dominant`, p0L > 10 * pn, `${fmt(10 * Math.log10(p0L / pn), 1)} dB over ±1 st`);
-    check(`piano ${midi}: partials 2–3 present`, part(2) > 20 * gap(2) && part(3) > 20 * gap(3),
-      `${fmt(10 * Math.log10(part(2) / gap(2)), 1)} / ${fmt(10 * Math.log10(part(3) / gap(3)), 1)} dB`);
-    check(`piano ${midi}: natural decay (fundamental −6…−40 dB after 1 s)`, decayDb < -6 && decayDb > -40, `${fmt(decayDb, 1)} dB`);
-    check(`piano ${midi}: fast attack (70 % of peak level within max(5 ms, 1 period))`, rise <= allowed, `${rise} ms ≤ ${allowed} ms`);
+// Squelch / pop / textures in isolation.
+async function testFx() {
+  const one = async (kind, texture) => (await JellyAudio.renderOffline(0.6, (a, t) => { if (Math.abs(t - 0.05) < 0.5 / 60) a[kind](0.8); }, { sampleRate: SR, random: mulberry32(4), setup: (a) => a.setTexture(texture) })).buffer;
+  for (const kind of ["squelch", "pop", "crunch"]) {
+    const b = await one(kind, "jelly");
+    check(`${kind}: audible`, rmsOf(b, 0.05, 0.35) > 0.003, `${fmt(dB(rmsOf(b, 0.05, 0.35)), 1)} dBFS`);
+    check(`${kind}: short (−30 dB by 0.5 s, room tail only)`, rmsOf(b, 0.5, 0.6) < rmsOf(b, 0.05, 0.35) * 0.03, `${fmt(dB(rmsOf(b, 0.5, 0.6) / rmsOf(b, 0.05, 0.35)), 1)} dB`);
   }
-  const soft = await renderNote(60, 0.3), hard = await renderNote(60, 1.0);
-  const f = mtof(60), s0 = 0.07 * SR, N = 8192;
-  const brightness = (x) => (tonePower(x, s0, N, 4 * f, SR) + tonePower(x, s0, N, 5 * f, SR)) / tonePower(x, s0, N, f, SR);
-  const bs = brightness(soft), bh = brightness(hard);
-  check("piano: brighter at high velocity", bh > 2 * bs, `upper/fundamental ${fmt(10 * Math.log10(bs), 1)} dB → ${fmt(10 * Math.log10(bh), 1)} dB`);
-  check("piano: louder at high velocity", samplePeak({ numberOfChannels: 1, length: hard.length, sampleRate: SR, getChannelData: () => hard }) >
-    2 * samplePeak({ numberOfChannels: 1, length: soft.length, sampleRate: SR, getChannelData: () => soft }));
+  const centroid = (b) => { const x = mono(b); let num = 0, den = 0; for (let f = 150; f <= 10000; f += 75) { const p = tonePower(x, 0.05 * SR, 4096, f, SR); num += p * f; den += p; } return num / den; };
+  const j = centroid(await one("squelch", "jelly")), sl = centroid(await one("squelch", "slime"));
+  check("texture: slime sounds lower/wetter than jelly", sl < j, `${fmt(j, 0)} Hz → ${fmt(sl, 0)} Hz`);
 }
 
 // One gem: inharmonic bell partials, upper ones decaying faster.
@@ -413,7 +333,7 @@ async function testGemTimbre() {
   const x = mono(buffer), f = mtof(midi), N = 2048;
   const at = (ratio, t) => tonePower(x, t * SR, N, f * ratio, SR);
   const e1 = at(1, 0.105), e2 = at(2.76, 0.105), l1 = at(1, 0.4), l2 = at(2.76, 0.4), off = at(2.3, 0.105);
-  check("gem: tuned to a chord tone of C (bar 1)", [0, 4, 7].includes(midi % 12) && midi >= 84 && midi <= 96, `midi ${midi}, chord ${C[audio.chordAt(0.1)].name}`);
+  check("gem: tuned to C-major pentatonic, C6–C7", PENTA.has(midi % 12) && midi >= 84 && midi <= 96, `midi ${midi}`);
   check("gem: inharmonic partial at 2.76·f", e2 > 30 * off, `${fmt(10 * Math.log10(e2 / off), 1)} dB over 2.3·f`);
   check("gem: upper partial decays faster", 10 * Math.log10(l2 / e2) < 10 * Math.log10(l1 / e1) - 6,
     `2.76·f ${fmt(10 * Math.log10(l2 / e2), 1)} dB vs f ${fmt(10 * Math.log10(l1 / e1), 1)} dB over 0.3 s`);
@@ -427,22 +347,21 @@ async function testRateLimit() {
   check("clink: ~10/s when called every frame for 1 s", n >= 8 && n <= 13, `${n} clinks, max gem voices ${audio.stats.maxGemVoices}`);
 }
 
-// Everything at once: max activity, register sweep, gems every frame, boings.
+// Everything at once: max activity, gems every frame, stretches, boings.
 async function testStress() {
   const t0 = performance.now();
   const { buffer, audio } = await JellyAudio.renderOffline(8, (a, t) => {
-    a.setActivity(1, (Math.sin(t * 1.3) + 1) / 2);
+    a.setActivity(1, 0.5);
     a.clink(1, Math.round(t * 600));
-    if (Math.round(t * 60) % 6 === 0) a.boing(1, 1.2, "drop");
-  }, { sampleRate: SR, random: mulberry32(99), setup: (a) => a.setVolumes({ master: 1, piano: 1, gems: 1, boing: 1 }) });
+    a.squelch(1); a.pop(1);
+    if (Math.round(t * 60) % 6 === 0) { a.boing(1, 1.2, "drop"); a.crunch(1); }
+  }, { sampleRate: SR, random: mulberry32(99), setup: (a) => { a.setVolumes({ master: 1, crunch: 1, gems: 1, boing: 1 }); a.setTexture("slime"); } });
   const ms = performance.now() - t0;
   const tp = truePeak(buffer);
-  check("stress (all volumes 1, max activity, gems every frame): true peak < 1.0", tp < 1, `${fmt(dB(tp), 2)} dBFS`);
-  check("stress: voice limits hold", audio.stats.maxPianoVoices <= LIMITS.piano && audio.stats.maxGemVoices <= LIMITS.gems,
-    `piano ${audio.stats.maxPianoVoices} (steals ${audio.stats.pianoSteals}), gems ${audio.stats.maxGemVoices} (steals ${audio.stats.gemSteals})`);
-  const liveOsc = audio.stats.oscSeconds / 8;
-  check("stress: cpu proxy — average live oscillators ≤ 100", liveOsc <= 100, fmt(liveOsc, 1));
-  info(`stress: 8 s rendered in ${fmt(ms, 0)} ms (${fmt(8000 / ms, 1)}× realtime), ${audio.stats.notes} melody + ${audio.stats.bassNotes} bass notes, ${audio.stats.clinks} clinks`);
+  check("stress (all volumes 1, max activity, everything every frame): true peak < 1.0", tp < 1, `${fmt(dB(tp), 2)} dBFS`);
+  check("stress: voice limits hold", audio.stats.maxGrains <= LIMITS.grains && audio.stats.maxGemVoices <= LIMITS.gems,
+    `grains ${audio.stats.maxGrains} (dropped ${audio.stats.grainDrops}), gems ${audio.stats.maxGemVoices}`);
+  info(`stress: 8 s rendered in ${fmt(ms, 0)} ms (${fmt(8000 / ms, 1)}× realtime), ${audio.stats.grains} grains, ${audio.stats.clinks} clinks`);
 }
 
 async function testSilenceAndDeterminism() {
@@ -450,23 +369,11 @@ async function testSilenceAndDeterminism() {
   check("idle: no activity → digital silence", samplePeak(buffer) < 1e-5, `peak ${samplePeak(buffer)}`);
   const seq = async () => {
     const out = [];
-    await JellyAudio.renderOffline(5, (a, t) => a.setActivity(0.6, t / 5), { sampleRate: 22050, random: mulberry32(42), setup: (a) => a.onNote((e) => out.push(e.midi + "@" + e.time.toFixed(4))) });
+    await JellyAudio.renderOffline(4, (a, t) => a.setActivity(0.6, 0.5), { sampleRate: 22050, random: mulberry32(42), setup: (a) => a.onNote((e) => out.push(e.time.toFixed(4))) });
     return out.join(" ");
   };
   const s1 = await seq(), s2 = await seq();
-  check("determinism: same seed → same melody", s1 === s2 && s1.length > 0, `${s1.split(" ").length} notes`);
-}
-
-async function testTempo() {
-  const notes = [];
-  await JellyAudio.renderOffline(7, (a, t) => {
-    a.setActivity(0.9, 0.5);
-    if (Math.abs(t - 3) < 0.5 / 60) a.tempo = 120;
-  }, { sampleRate: 22050, random: mulberry32(8), setup: (a) => a.onNote((e) => notes.push(e.time)) });
-  const after = notes.filter((t) => t > 3.4);
-  let worst = 0;
-  for (let i = 1; i < after.length; i++) { const k = (after[i] - after[0]) / 0.125; worst = Math.max(worst, Math.abs(k - Math.round(k)) * 0.125); }
-  check("tempo: 120 BPM after a mid-run change (16th grid 125 ms)", after.length > 5 && worst < 0.002, `${after.length} notes, worst ${fmt(worst * 1000, 2)} ms`);
+  check("determinism: same seed → same crunch timing", s1 === s2 && s1.length > 0, `${s1.split(" ").length} pulses`);
 }
 
 // Real AudioContext (Chromium with autoplay allowed): onNote fires when the
@@ -495,12 +402,12 @@ async function testRealtime() {
   }).sort((a, b) => a - b);
   if (!diffs.length) { check("realtime: notes fired", false); return; }
   const med = diffs[Math.floor(diffs.length / 2)], p90 = Math.max(Math.abs(diffs[Math.floor(diffs.length * 0.05)]), Math.abs(diffs[Math.floor(diffs.length * 0.95)]));
-  check("realtime: onNote fires when the note is heard (median ±10 ms)", Math.abs(med) <= 10,
-    `${diffs.length} notes, median ${fmt(med, 1)} ms, 5–95 % within ±${fmt(p90, 1)} ms (headless timer jitter), latency ${fmt(lat * 1000, 1)} ms`);
+  check("realtime: onNote fires when the crunch is heard (median ±10 ms)", Math.abs(med) <= 10,
+    `${diffs.length} pulses, median ${fmt(med, 1)} ms, 5–95 % within ±${fmt(p90, 1)} ms (headless timer jitter), latency ${fmt(lat * 1000, 1)} ms`);
 }
 
 async function main() {
-  const steps = [testApi, testOutputStage, testBoingMatchesLegacy, testSmoothing, testMainRender, testPianoNotes, testGemTimbre, testRateLimit, testStress, testSilenceAndDeterminism, testTempo, testRealtime];
+  const steps = [testApi, testOutputStage, testBoingMatchesLegacy, testSmoothing, testMainRender, testFx, testGemTimbre, testRateLimit, testStress, testSilenceAndDeterminism, testRealtime];
   for (const step of steps) {
     try { await step(); } catch (e) { check(`${step.name} threw`, false, e && e.stack ? e.stack : String(e)); }
   }

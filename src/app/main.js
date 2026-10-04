@@ -5,6 +5,7 @@ import { createStage, TRAY_RADIUS } from "../render/stage.js";
 import { createJellyView } from "../render/jelly-view.js";
 import { createInput } from "../render/input.js";
 import { createGemLibrary, GemLayer, GEM_SHAPES } from "../render/gems.js";
+import { BeadLayer } from "../render/beads.js";
 import { PAINTS } from "../core/world.js";
 import { JellyAudio } from "./audio.js";
 import { QualityGovernor } from "./quality.js";
@@ -62,7 +63,7 @@ async function boot() {
   let ready;
   try {
     const simReady = once(sim, "ready");
-    sim.postMessage({ type: "init", wallRadius: TRAY_RADIUS, base: settings.base });
+    sim.postMessage({ type: "init", wallRadius: TRAY_RADIUS, base: settings.base, texture: settings.texture });
     ready = await simReady;
     const opticsReady = once(optics, "ready");
     optics.postMessage({ type: "init", size: 192 });
@@ -77,10 +78,11 @@ async function boot() {
   const gemLibrary = createGemLibrary({ quality: "high" });
   const gemLayer = new GemLayer(tray, gemLibrary);
   gemLayer.setGlowScale(settings.glow);
+  const beadLayer = new BeadLayer(tray);
   const audio = new JellyAudio();
-  audio.setVolumes({ master: settings.master, piano: settings.piano, gems: settings.gems, boing: settings.boing });
-  audio.tempo = settings.tempo;
-  audio.onNote((note) => { view.pulse(0.12 + 0.3 * note.velocity); needsRender = true; });
+  audio.setVolumes({ master: settings.master, crunch: settings.crunch, gems: settings.gems, boing: settings.boing });
+  audio.setTexture(settings.texture);
+  audio.onNote((pulse) => { view.pulse(0.08 + 0.22 * pulse.velocity); needsRender = true; });
 
   // GPU errors only affect the caustic passes: drop those. A lost device leaves
   // a frozen canvas: reload once; twice within a minute → WebGL2 lite mode.
@@ -112,7 +114,7 @@ async function boot() {
   let opticsBusy = false, opticsClock = 1, opticsDirty = true, causticClock = 1;
   let started = false, needsRender = true, running = false, frameId = 0;
   let lastTime = 0, lastAnimatedTime = 0;
-  let asleep = false, grabbing = false, grabHeight = 0, lastStretch = 0;
+  let asleep = false, grabbing = false, grabHeight = 0, lastStretch = 0, stretchTime = 0;
   let lastGravity = null, lastGravitySent = 0;
   let soundOn = true;
   const eventLog = [];
@@ -150,19 +152,24 @@ async function boot() {
     simBusy = false;
     view.sync(data, (buffer) => freeBuffers.push(buffer));
     gemLayer.update(data.gems || EMPTY, data.gemCount);
+    if (data.beads) { beadLayer.update(data.beads); if (data.beads.length) freeBuffers.push(data.beads.buffer); needsRender = true; }
     if (data.gems) freeBuffers.push(data.gems.buffer);
     asleep = data.asleep;
     if (data.positions || data.dye || data.gemCount) { needsRender = true; opticsDirty = opticsDirty || Boolean(data.positions); }
     grabbing = Boolean(data.grab);
     if (data.grab) {
       grabHeight = data.grab.target[1];
-      lastStretch = Math.hypot(data.grab.point[0] - data.grab.target[0], data.grab.point[1] - data.grab.target[1], data.grab.point[2] - data.grab.target[2]);
-    }
+      const stretch = Math.hypot(data.grab.point[0] - data.grab.target[0], data.grab.point[1] - data.grab.target[1], data.grab.point[2] - data.grab.target[2]);
+      // pulling it out further: the sticky '쩍' of the stretching strand
+      const now = performance.now(), rate = (stretch - lastStretch) / Math.max(0.008, (now - stretchTime) / 1000);
+      if (rate > 0.03 && stretch > 0.004) audio.squelch(Math.min(1, rate / 0.12));
+      lastStretch = stretch; stretchTime = now;
+    } else lastStretch = 0;
     if (data.stepMs) governor.physics(data.stepMs, performance.now());
     for (const e of data.events) {
       if (eventLog.push(e.type) > 200) eventLog.shift();
       switch (e.type) {
-        case "release": if (e.stretch > 0.006) audio.boing(e.stretch / 0.03, 1.08, "snap"); break;
+        case "release": audio.pop(0.35 + Math.min(0.65, e.stretch / 0.03)); break;
         case "clink": audio.clink(e.strength, e.seed); break;
         case "gemFull": toast("보석이 가득 찼어요"); break;
         case "gemIn": case "gemScatter": audio.clink(0.45, (e.gem || e.count || 1) * 13); break;
@@ -170,8 +177,8 @@ async function boot() {
         case "recovered": toast("젤리가 너무 늘어나서 처음 모양으로 돌아왔어요"); break;
       }
     }
-    if (data.impact > 0.22) audio.boing((data.impact - 0.18) / 0.6, 1, "drop");
-    else if (data.wallImpact > 0.12) audio.boing((data.wallImpact - 0.1) / 0.4 * 0.7, 0.9, "bump");
+    if (data.impact > 0.22) audio.crunch((data.impact - 0.12) / 0.6);
+    else if (data.wallImpact > 0.12) audio.crunch((data.wallImpact - 0.08) / 0.4 * 0.7);
   };
   const EMPTY = new Float32Array(0);
 
@@ -209,7 +216,7 @@ async function boot() {
   const input = createInput({
     canvas, stage, view,
     isEnabled: () => started,
-    onGrabStart: (id, hit) => { pendingEvents.push({ type: "grabStart", id, a: hit.a, b: hit.b, c: hit.c, bary: hit.bary, point: hit.point }); grabbing = true; },
+    onGrabStart: (id, hit) => { audio.crunch(0.55); pendingEvents.push({ type: "grabStart", id, a: hit.a, b: hit.b, c: hit.c, bary: hit.bary, point: hit.point }); grabbing = true; },
     onGrabMove: (id, point) => pendingEvents.push({ type: "target", id, point }),
     onGrabEnd: (id, flick) => { pendingEvents.push({ type: "grabEnd", id, flick }); grabbing = input?.grabbing ?? false; },
     onTap: () => {},
@@ -251,8 +258,14 @@ async function boot() {
     onSetting: (key, value) => {
       if (key === "softness" || key === "wobble" || key === "slippery") sendParams();
       else if (key === "glow") { gemLayer.setGlowScale(value); stage.setBloomStrength(Math.max(0.2, value)); needsRender = true; }
-      else if (key === "tempo") audio.tempo = value;
-      else if (["piano", "gems", "boing", "master"].includes(key)) audio.setVolumes({ [key]: value });
+      else if (["crunch", "gems", "boing", "master"].includes(key)) audio.setVolumes({ [key]: value });
+    },
+    onTexture: (texture) => {
+      pendingEvents.push({ type: "texture", texture });
+      audio.setTexture(texture);
+      audio.squelch(0.7);
+      toast(texture === "slime" ? "슬랑이로 바꿨어요 — 쭉 늘려 보세요" : "말랑 젤리로 돌아왔어요");
+      dismissHint();
     },
     onPaintDrop: (paint, x, y, holding) => {
       const hit = pickAt(x, y);

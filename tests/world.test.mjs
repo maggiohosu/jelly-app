@@ -126,6 +126,36 @@ check("lifting one finger keeps the other grab", w.grabbing && w.body.grab && !w
 w.handle({ type: "grabEnd", id: 2 }); run(w, 3);
 check("released jelly stays finite and calm", w.body.isFinite() && !w.grabbing);
 
+// 5d) 슬랑이 texture: softer and saggier, keeps a pulled shape, rounds back, beads
+w = new JellyWorld(); run(w, 2);
+const jellyH = w.body.bounds[4] - w.body.bounds[1];
+w.handle({ type: "texture", texture: "slime" }); run(w, 6);
+const slimeH = w.body.bounds[4] - w.body.bounds[1];
+check("slime sags (lower than jelly)", slimeH < jellyH * 0.85 && slimeH > jellyH * 0.5, `${(jellyH * 1000).toFixed(1)} → ${(slimeH * 1000).toFixed(1)} mm`);
+check("slime has foam beads", w.beads && w.beads.count >= 150, `${w.beads?.count}`);
+const bs = w.beadStates(new Float32Array(w.beads.count * 4));
+check("bead positions finite and inside the slime bounds", Array.from(bs).every(Number.isFinite) && (() => { const b = w.body.bounds; for (let i = 0; i < w.beads.count; i++) { const y = bs[i * 4 + 1]; if (y < b[1] - 1e-3 || y > b[4] + 1e-3) return false; } return true; })());
+const widthOf = () => w.body.bounds[3] - w.body.bounds[0];
+const w0 = widthOf();
+{
+  const ix = w.type.stencils.indices; let k = 0;
+  for (let i = 0; i < ix.length / 3; i++) if (w.body.positions[ix[i * 3] * 3] > w.body.positions[ix[k * 3] * 3]) k = i;
+  const [a, b, c] = [ix[k * 3], ix[k * 3 + 1], ix[k * 3 + 2]], p = [w.body.positions[a * 3], w.body.positions[a * 3 + 1], w.body.positions[a * 3 + 2]];
+  w.handle({ type: "grabStart", id: 1, a, b, c, bary: [1, 0, 0], point: p });
+  w.handle({ type: "target", id: 1, point: [p[0] + 0.04, p[1] + 0.01, p[2]] });
+}
+run(w, 1.5); w.handle({ type: "grabEnd", id: 1 }); run(w, 1.5);
+const wHeld = widthOf();
+check("slime keeps the pulled shape after release", wHeld > w0 + 0.012, `${(w0 * 1000).toFixed(0)} → ${(wHeld * 1000).toFixed(0)} mm`);
+run(w, 25);
+const wRound = widthOf();
+check("then slowly rounds back", wRound < wHeld - 0.006, `${(wHeld * 1000).toFixed(0)} → ${(wRound * 1000).toFixed(0)} mm after 25 s`);
+run(w, 10);
+check("and eventually sleeps (no endless CPU)", w.body.sleeping);
+w.handle({ type: "texture", texture: "jelly" }); run(w, 4);
+const backH = w.body.bounds[4] - w.body.bounds[1];
+check("switching back to jelly restores its shape", Math.abs(backH - jellyH) < 0.0015 && w.body.isFinite(), `${(backH * 1000).toFixed(1)} mm`);
+
 // 6) cost (awake, 240 Hz, with gems and an active dye field)
 w = new JellyWorld(); run(w, 0.3);
 w.handle({ type: "gemScatter", count: 12 });

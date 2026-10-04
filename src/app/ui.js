@@ -13,8 +13,8 @@ export const DEFAULT_SETTINGS = Object.freeze({
   wobble: 0.5,      // 0 short … 1 long      → damping 6 … 1 /s (0.5 ≈ original 3.5)
   slippery: 0.3,    // 0 grippy … 1 icy      → friction ×1.4 … ×0.3
   glow: 1,          // 0 … 2
-  piano: 0.7, gems: 0.6, boing: 0.6, master: 0.9,
-  tempo: 92,
+  crunch: 0.8, gems: 0.6, boing: 0.6, master: 0.9,
+  texture: "jelly", // 'jelly' | 'slime' (슬랑이)
   gemColor: 0,      // index into GEM_COLORS, -1 = random
   base: "berry",
 });
@@ -106,7 +106,7 @@ function draggable(button, { ghostHTML, onTap, onDrop, onHold }) {
   button.addEventListener("pointercancel", (event) => end(event, true));
 }
 
-export function buildUI({ settings, onSetting, onPaintDrop, onPaintTap, onGemDrop, onGemTap, onScatter, onBase }) {
+export function buildUI({ settings, onSetting, onTexture, onPaintDrop, onPaintTap, onGemDrop, onGemTap, onScatter, onBase }) {
   const change = (key, value) => { settings[key] = value; saveSettings(settings); onSetting(key, value); };
 
   // ---- pipette palette ----
@@ -126,6 +126,22 @@ export function buildUI({ settings, onSetting, onPaintDrop, onPaintTap, onGemDro
     });
   });
 
+  // ---- texture toggle (toolbar): 젤리 ↔ 슬랑이 ----
+  const textureButton = $("texture");
+  const paintTexture = () => {
+    const slime = settings.texture === "slime";
+    textureButton.textContent = slime ? "슬랑이" : "젤리";
+    textureButton.classList.toggle("on", slime);
+    textureButton.setAttribute("aria-pressed", String(slime));
+    textureButton.setAttribute("aria-label", slime ? "슬랑이 질감 (누르면 젤리로)" : "젤리 질감 (누르면 슬랑이로)");
+  };
+  paintTexture();
+  textureButton.addEventListener("click", () => {
+    change("texture", settings.texture === "slime" ? "jelly" : "slime");
+    paintTexture();
+    onTexture(settings.texture);
+  });
+
   // ---- base colour (settings) ----
   for (const button of document.querySelectorAll("[data-base]")) {
     button.classList.toggle("active", button.dataset.base === settings.base);
@@ -142,10 +158,9 @@ export function buildUI({ settings, onSetting, onPaintDrop, onPaintTap, onGemDro
   slider(jelly, { key: "wobble", label: "출렁임 지속", min: 0, max: 1, step: 0.01, value: settings.wobble }, change);
   slider(jelly, { key: "slippery", label: "미끄러움", min: 0, max: 1, step: 0.01, value: settings.slippery }, change);
   slider(fx, { key: "glow", label: "빛 세기", min: 0, max: 2, step: 0.01, value: settings.glow }, change);
-  slider(fx, { key: "piano", label: "피아노", min: 0, max: 1, step: 0.01, value: settings.piano }, change);
+  slider(fx, { key: "crunch", label: "크런치 소리", min: 0, max: 1, step: 0.01, value: settings.crunch }, change);
   slider(fx, { key: "gems", label: "보석 소리", min: 0, max: 1, step: 0.01, value: settings.gems }, change);
   slider(fx, { key: "boing", label: "효과음", min: 0, max: 1, step: 0.01, value: settings.boing }, change);
-  slider(fx, { key: "tempo", label: "선율 빠르기", min: 70, max: 130, step: 1, value: settings.tempo }, change);
 
   // ---- gem colours ----
   const colors = $("gem-colors");
