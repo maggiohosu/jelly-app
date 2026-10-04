@@ -166,6 +166,7 @@ async function boot() {
         case "clink": audio.clink(e.strength, e.seed); break;
         case "gemFull": toast("보석이 가득 찼어요"); break;
         case "gemIn": case "gemScatter": audio.clink(0.45, (e.gem || e.count || 1) * 13); break;
+        case "bounced": audio.boing(0.5 + 0.3 * Math.min(1, e.strength), 1.25, "drop"); break;
         case "recovered": toast("젤리가 너무 늘어나서 처음 모양으로 돌아왔어요"); break;
       }
     }
@@ -208,10 +209,11 @@ async function boot() {
   const input = createInput({
     canvas, stage, view,
     isEnabled: () => started,
-    onGrabStart: (hit) => { pendingEvents.push({ type: "grabStart", a: hit.a, b: hit.b, c: hit.c, bary: hit.bary, point: hit.point }); grabbing = true; },
-    onGrabMove: (point) => pendingEvents.push({ type: "target", point }),
-    onGrabEnd: () => { pendingEvents.push({ type: "grabEnd" }); grabbing = false; },
+    onGrabStart: (id, hit) => { pendingEvents.push({ type: "grabStart", id, a: hit.a, b: hit.b, c: hit.c, bary: hit.bary, point: hit.point }); grabbing = true; },
+    onGrabMove: (id, point) => pendingEvents.push({ type: "target", id, point }),
+    onGrabEnd: (id, flick) => { pendingEvents.push({ type: "grabEnd", id, flick }); grabbing = input?.grabbing ?? false; },
     onTap: () => {},
+    onDoubleTap: () => bounce(1),
     onTilt: (dir, angle) => {
       if (!dir || angle <= 0) { stage.tilt.goalAngle = 0; return; }
       stage.tilt.goalAxis.set(0, 1, 0).cross(dir).normalize();
@@ -282,7 +284,8 @@ async function boot() {
     $("gems").classList.toggle("on", open);
     if (open) dismissHint();
   });
-  $("nudge").addEventListener("click", () => { pendingEvents.push({ type: "nudge" }); dismissHint(); });
+  function bounce(strength) { pendingEvents.push({ type: "bounce", strength }); dismissHint(); }
+  $("nudge").addEventListener("click", () => bounce(1));
   $("reset").addEventListener("click", () => { pendingEvents.push({ type: "reset", base: settings.base }); });
   $("sound").addEventListener("click", () => {
     soundOn = !soundOn;
@@ -310,6 +313,11 @@ async function boot() {
     clearTimeout(hintTimer);
     setTimeout(() => { hint.hidden = true; }, 450);
   }
+
+  // Every touch re-checks the audio context (iOS home-screen apps return from
+  // the background with audio interrupted, and only a gesture can resume it).
+  const kickAudio = () => { if (started && soundOn && !audio.running) audio.unlock(); };
+  for (const type of ["pointerdown", "touchend", "click"]) document.addEventListener(type, kickAudio, { capture: true, passive: true });
 
   // ---- start (user gesture: audio unlock) ----
   const startButton = $("start-button");

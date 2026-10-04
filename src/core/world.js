@@ -61,7 +61,7 @@ export class JellyWorld {
     this.step = 1 / 240; this.accumulator = 0;
     this.events = [];
     this.nextGemId = 1;
-    this.rawTarget = [0, 0, 0];
+    this.grabs = new Map();
     this.reset(base);
   }
 
@@ -76,7 +76,8 @@ export class JellyWorld {
     this.shellDye = new Float32Array(t.stencils.vertexCount * 3);
     this.meanDye = [0, 0, 0];
     this.gems = [];
-    this.grabbing = false;
+    this.grabs = new Map(); this.grabbing = false;
+    this.falling = [];
     this.accumulator = 0;
     this.setBase(base);
     this.events.push({ type: "reset" });
@@ -102,21 +103,33 @@ export class JellyWorld {
       case "grabStart": {
         const w = body.grabWeights(event.a, event.b, event.c, event.bary[0], event.bary[1], event.bary[2]);
         if (!w) return;
+        const id = event.id ?? 0;
+        if (!this.grabs.has(id) && this.grabs.size >= 3) return;
         body.wake();
-        body.grab = { ...w, target: event.point.slice(), point: event.point.slice(), lambda: new Float64Array(3) };
-        this.rawTarget[0] = event.point[0]; this.rawTarget[1] = event.point[1]; this.rawTarget[2] = event.point[2];
-        this.grabbing = true;
+        const grab = { ...w, target: event.point.slice(), point: event.point.slice(), lambda: new Float64Array(3), raw: event.point.slice(), id };
+        this.grabs.set(id, grab);
+        this.syncGrabs();
         break;
       }
       case "grabEnd": {
-        const g = body.grab;
-        if (g) this.events.push({ type: "release", stretch: Math.hypot(g.point[0] - g.target[0], g.point[1] - g.target[1], g.point[2] - g.target[2]) });
-        body.grab = null; this.grabbing = false;
+        const ids = event.id === undefined ? [...this.grabs.keys()] : [event.id];
+        for (const id of ids) {
+          const g = this.grabs.get(id);
+          if (!g) continue;
+          this.events.push({ type: "release", stretch: Math.hypot(g.point[0] - g.target[0], g.point[1] - g.target[1], g.point[2] - g.target[2]) });
+          this.grabs.delete(id);
+        }
+        this.syncGrabs();
+        // Flick: a fast upward release launches the jelly.
+        if (event.flick && event.flick > 0.25 && !this.grabs.size) this.bounce(Math.min(1.6, event.flick * 0.9));
         break;
       }
-      case "target":
-        if (body.grab) { this.rawTarget[0] = event.point[0]; this.rawTarget[1] = event.point[1]; this.rawTarget[2] = event.point[2]; clampGrabTarget(this.rawTarget, this.wallRadius); }
+      case "target": {
+        const g = this.grabs.get(event.id ?? 0);
+        if (g) { g.raw[0] = event.point[0]; g.raw[1] = event.point[1]; g.raw[2] = event.point[2]; clampGrabTarget(g.raw, this.wallRadius); }
         break;
+      }
+      case "bounce": this.bounce(event.strength); break;
       case "nudge": body.nudge(); break;
       case "reset": this.reset(event.base); break;
       case "base": this.setBase(event.base); break;
@@ -136,6 +149,25 @@ export class JellyWorld {
     }
   }
 
+  syncGrabs() {
+    const list = [...this.grabs.values()];
+    this.body.grab = list[0] || null;
+    this.body.extraGrabs = list.slice(1);
+    this.grabbing = list.length > 0;
+  }
+
+  // 통통: launch upward (m/s at the base). Ignored while held by a finger.
+  // Mid-air presses are queued and fire on the next touchdown, so tapping
+  // repeatedly keeps it bouncing in rhythm instead of rocketing off.
+  bounce(strength = 1) {
+    if (this.grabbing) return;
+    if (!this.body.sleeping && !this.body.grounded) { this.bounceQueued = Math.max(this.bounceQueued || 0, strength); return; }
+    this.bounceQueued = 0;
+    const v = 0.55 + 0.45 * Math.max(0, Math.min(2, strength));
+    this.body.bounce(v, (Math.random() - 0.5) * 0.05, (Math.random() - 0.5) * 0.05);
+    this.events.push({ type: "bounced", strength });
+  }
+
   // ---------------------------------------------------------------- simulation
   advance(dt) {
     const wallDelta = Math.min(Math.max(Number(dt) || 0, 0), 0.05);
@@ -143,8 +175,8 @@ export class JellyWorld {
     let steps = 0, stepped = false;
     const started = performance.now(), body = this.body;
     while (this.accumulator >= this.step && steps < 12) {
-      if (body.grab) easeGrabTarget(body.grab.target, this.rawTarget, this.step);
-      const awake = !body.sleeping || body.grab;
+      for (const g of this.grabs.values()) easeGrabTarget(g.target, g.raw, this.step);
+      const awake = !body.sleeping || this.grabbing;
       body.step(this.step);
       this.accumulator -= this.step;
       steps++;
@@ -153,9 +185,10 @@ export class JellyWorld {
     if (steps === 12) this.accumulator = Math.min(this.accumulator, this.step);
     const elapsed = performance.now() - started;
     if (stepped) {
-      if (!body.isFinite()) { body.reset(); this.events.push({ type: "recovered" }); }
+      if (!body.isFinite()) { body.reset(); this.grabs.clear(); this.grabbing = false; this.events.push({ type: "recovered" }); }
       body.updateSurface();
     }
+    if (this.bounceQueued && body.grounded && !this.grabbing) this.bounce(this.bounceQueued);
     this.stepped = stepped;
     if (steps > 0) this.tick(steps * this.step);
     return { steps, elapsed, stepped };
@@ -296,19 +329,76 @@ export class JellyWorld {
     this.events.push({ type: "gemIn", gem: gem.id });
   }
 
+  // 한 줌 쏟기: gems appear in the air above the jelly, fall, and stick in.
+  // Each reserves its final spot (undeformed coords) up front, so capacity and
+  // spacing hold; while falling it flies free in tray space.
   scatterGems({ count = 5, shape = -1, color = -1, radius = 0.0034, shapes = 9, colors = 6 }) {
     const bnd = this.type.locator.bounds;
     let added = 0;
     for (let n = 0; n < count && this.gems.length < this.gemCapacity; n++) {
       for (let tries = 0; tries < 60; tries++) {
-        const u = [bnd[0] + Math.random() * (bnd[3] - bnd[0]), bnd[1] + (0.25 + 0.6 * Math.random()) * (bnd[4] - bnd[1]), bnd[2] + Math.random() * (bnd[5] - bnd[2])];
+        const u = [bnd[0] + Math.random() * (bnd[3] - bnd[0]), bnd[1] + (0.45 + 0.45 * Math.random()) * (bnd[4] - bnd[1]), bnd[2] + Math.random() * (bnd[5] - bnd[2])];
         if (!this.gemFits(u, radius) || this.overlapsGem(u, radius)) continue;
-        this.gems.push(this.makeGem(shape >= 0 ? shape : Math.floor(Math.random() * shapes), color >= 0 ? color : Math.floor(Math.random() * colors), radius, u));
+        const gem = this.makeGem(shape >= 0 ? shape : Math.floor(Math.random() * shapes), color >= 0 ? color : Math.floor(Math.random() * colors), radius, u);
+        const e = this.type.locator.locate(u[0], u[1], u[2]), T = [0, 0, 0];
+        this.body.pointInTet(e, this.type.locator.bary, T);
+        const top = this.body.bounds[4];
+        gem.fall = {
+          pos: [T[0] + (Math.random() - 0.5) * 0.012, top + 0.05 + 0.03 * Math.random() + n * 0.006, T[2] + (Math.random() - 0.5) * 0.012],
+          vel: [0, -0.15 * Math.random(), 0], delay: n * 0.07 + Math.random() * 0.05, spin: randomQuat(), sink: -1, from: null,
+        };
+        gem.wpos = gem.fall.pos.slice(); gem.prev = gem.wpos.slice();
+        this.gems.push(gem);
         added++;
         break;
       }
     }
     this.events.push({ type: added ? "gemScatter" : "gemFull", count: added });
+  }
+
+  // Falling-gem flight and landing (tray space). Returns true while in flight.
+  flyGem(gem, dt) {
+    const f = gem.fall, body = this.body, L = this.type.locator;
+    const e = L.locate(gem.u[0], gem.u[1], gem.u[2]), T = [0, 0, 0];
+    if (e >= 0) body.pointInTet(e, L.bary, T);
+    if (f.delay > 0) { f.delay -= dt; gem.glow = 0.6; return true; }
+    if (f.sink < 0) {
+      const g = this.gravityVector || [0, -9.81, 0];
+      for (let k = 0; k < 3; k++) f.vel[k] += g[k] * dt;
+      // steer horizontally toward the reserved spot so it lands on it
+      f.vel[0] += (T[0] - f.pos[0]) * 40 * dt; f.vel[2] += (T[2] - f.pos[2]) * 40 * dt;
+      for (let k = 0; k < 3; k++) f.pos[k] += f.vel[k] * dt;
+      slerpInto(gem.quat, quatMultiply(f.spin, gem.quat, this.scratchQ3 ||= [0, 0, 0, 1]), 0.12);
+      gem.wpos[0] = f.pos[0]; gem.wpos[1] = f.pos[1]; gem.wpos[2] = f.pos[2];
+      gem.glow = 0.8;
+      // land when it reaches the jelly's top at this spot (or anything below)
+      const surface = Math.min(body.bounds[4], T[1] + 0.02);
+      if (f.pos[1] <= surface + gem.radius * 0.3) {
+        f.sink = 0; f.from = f.pos.slice();
+        const speed = Math.hypot(f.vel[0], f.vel[1], f.vel[2]);
+        this.kick(f.pos, Math.min(1.2, 0.35 + speed * 0.5));
+        this.events.push({ type: "clink", strength: Math.min(0.9, 0.35 + speed * 0.3), seed: gem.id * 13 + 5 });
+        this.events.push({ type: "gemLand", point: f.pos.slice() });
+      }
+      return true;
+    }
+    // sink: ease from the landing point into its spot, following the jelly
+    f.sink = Math.min(1, f.sink + dt / 0.22);
+    const t = 1 - (1 - f.sink) ** 3;
+    for (let k = 0; k < 3; k++) gem.wpos[k] = f.from[k] + (T[k] - f.from[k]) * t;
+    gem.glow = 1;
+    if (f.sink >= 1) { gem.fall = null; gem.fresh = true; return false; }
+    return true;
+  }
+
+  // A small downward knock on the jelly around a tray-space point.
+  kick(point, amount = 1) {
+    const body = this.body, x = body.x, v = body.velocity, n = body.nodeCount, s2 = 2 * 0.012 * 0.012;
+    for (let i = 0; i < n; i++) {
+      const r2 = (x[i * 3] - point[0]) ** 2 + (x[i * 3 + 1] - point[1]) ** 2 + (x[i * 3 + 2] - point[2]) ** 2;
+      v[i * 3 + 1] -= 0.09 * amount * Math.exp(-r2 / s2);
+    }
+    body.wake();
   }
 
   updateGems(dt) {
@@ -343,6 +433,7 @@ export class JellyWorld {
     }
     // World pose follows the containing tet's deformation.
     for (const gem of gems) {
+      if (gem.fall && this.flyGem(gem, dt)) { gem.vel = null; continue; }
       const e = L.locate(gem.u[0], gem.u[1], gem.u[2]);
       gem.prev[0] = gem.wpos[0]; gem.prev[1] = gem.wpos[1]; gem.prev[2] = gem.wpos[2];
       if (e < 0) continue;
@@ -370,6 +461,7 @@ export class JellyWorld {
     const gems = this.gems;
     for (let i = 0; i < gems.length; i++) for (let j = i + 1; j < gems.length; j++) {
       const a = gems[i], b = gems[j];
+      if (a.fall || b.fall) continue;
       const d = Math.hypot(a.wpos[0] - b.wpos[0], a.wpos[1] - b.wpos[1], a.wpos[2] - b.wpos[2]);
       if (d >= (a.radius + b.radius) * 1.02) { if (d > (a.radius + b.radius) * 1.15) { a.contacts.delete(b.id); b.contacts.delete(a.id); } continue; }
       if (a.contacts.has(b.id)) continue;

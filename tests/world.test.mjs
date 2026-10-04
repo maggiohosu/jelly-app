@@ -88,6 +88,44 @@ check("gem states finite", Array.from(states).every(Number.isFinite));
 w.handle({ type: "gemScatter", count: 20 });
 check("gem capacity is enforced", w.gems.length <= w.gemCapacity, `${w.gems.length}/${w.gemCapacity}`);
 
+// 5b) scattered gems fall from the air and land inside
+w = new JellyWorld(); run(w, 0.5); drain(w);
+w.handle({ type: "gemScatter", count: 5 });
+const startY = Math.min(...w.gems.map((g) => g.wpos[1]));
+check("scattered gems start above the jelly", startY > w.body.bounds[4], `lowest ${(startY * 1000).toFixed(0)} mm vs top ${(w.body.bounds[4] * 1000).toFixed(0)} mm`);
+let landed = 0; run(w, 0.15); const midFall = w.gems.some((g) => g.fall);
+run(w, 2, () => { landed += w.events.filter((e) => e.type === "gemLand").length; drain(w); });
+check("gems are in flight shortly after scattering", midFall);
+check("every gem lands and sticks in", landed === 5 && w.gems.every((g) => !g.fall), `${landed} landings`);
+const inside = w.gems.every((g) => g.wpos[1] < w.body.bounds[4] && g.wpos[1] > w.body.bounds[1]);
+check("landed gems sit within the jelly", inside);
+
+// 5c) bounce and multi-finger grabs
+w = new JellyWorld(); run(w, 1.5);
+const y0 = w.body.center[1];
+w.handle({ type: "bounce", strength: 1 }); let peak = y0;
+run(w, 0.6, () => { peak = Math.max(peak, w.body.center[1]); });
+check("통통 lifts the jelly", peak - y0 > 0.01, `+${((peak - y0) * 1000).toFixed(1)} mm`);
+run(w, 2.5);
+check("it settles back after bouncing", Math.abs(w.body.center[1] - y0) < 0.002 && w.body.isFinite());
+const tri = (i) => { const ix = w.type.stencils.indices; return [ix[i * 3], ix[i * 3 + 1], ix[i * 3 + 2]]; };
+const surf = (a) => [w.body.positions[a * 3], w.body.positions[a * 3 + 1], w.body.positions[a * 3 + 2]];
+let left = 0, right = 0;
+for (let i = 0; i < w.type.stencils.indices.length / 3; i++) { const p = surf(tri(i)[0]); if (p[0] < surf(tri(left)[0])[0]) left = i; if (p[0] > surf(tri(right)[0])[0]) right = i; }
+const width0 = w.body.bounds[3] - w.body.bounds[0];
+for (const [id, t, dx] of [[1, left, -0.03], [2, right, 0.03]]) {
+  const [a, b, c] = tri(t), p = surf(a);
+  w.handle({ type: "grabStart", id, a, b, c, bary: [1, 0, 0], point: p });
+  w.handle({ type: "target", id, point: [p[0] + dx, p[1] + 0.01, p[2]] });
+}
+run(w, 1.2);
+const width1 = w.body.bounds[3] - w.body.bounds[0];
+check("two fingers stretch the jelly both ways", width1 > width0 + 0.02, `width ${(width0 * 1000).toFixed(0)} → ${(width1 * 1000).toFixed(0)} mm`);
+w.handle({ type: "grabEnd", id: 1 }); run(w, 0.2);
+check("lifting one finger keeps the other grab", w.grabbing && w.body.grab && !w.body.extraGrabs.length);
+w.handle({ type: "grabEnd", id: 2 }); run(w, 3);
+check("released jelly stays finite and calm", w.body.isFinite() && !w.grabbing);
+
 // 6) cost (awake, 240 Hz, with gems and an active dye field)
 w = new JellyWorld(); run(w, 0.3);
 w.handle({ type: "gemScatter", count: 12 });

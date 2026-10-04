@@ -728,7 +728,8 @@ function createGemMaterial(planes, tier) {
 
   const material = new THREE.MeshBasicNodeMaterial({ side: THREE.FrontSide, transparent: false, depthWrite: true, depthTest: true });
   material.name = `GemCrystal:${tier}`;
-  material.colorNode = shade();
+  // Seen through the jelly the gems lose some contrast: lift them so they sparkle.
+  material.colorNode = shade().mul(1.22);
   return material;
 }
 

@@ -332,3 +332,4 @@ button {
 .paint.water i { background: radial-gradient(circle at 35% 30%, #fff 0 25%, #cfeaf7 70%); }
 .paint:active { transform: scale(0.92); background: rgba(255, 255, 255, 0.7); }
 .ghost { width: 56px; height: 76px; margin: -38px 0 0 -28px; }
+#nudge { font-size: 13px; letter-spacing: -0.5px; }

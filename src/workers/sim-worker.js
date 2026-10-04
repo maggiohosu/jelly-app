@@ -26,7 +26,7 @@ function frame(steps, elapsed, stepped) {
   const body = world.body, transfer = [];
   const out = {
     type: "frame", steps, bounds: Array.from(body.bounds), center: body.center.slice(),
-    energy: world.energy || 0, meanDye: world.meanDye.slice(), asleep: body.sleeping && !body.grab,
+    energy: world.energy || 0, meanDye: world.meanDye.slice(), asleep: body.sleeping && !world.grabbing && !world.gems.some((g) => g.fall),
   };
   if (stepped || !sentOnce) {
     const p = take(body.positions.length), n = take(body.normals.length);

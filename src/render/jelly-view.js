@@ -19,7 +19,7 @@ function makeMaterial(glow) {
   const T = exp(sigma.mul(-ATTENUATION_DISTANCE));        // transmittance over the reference depth
   const thickness = attribute("opticalThickness", "float");
   const material = new THREE.MeshPhysicalNodeMaterial({
-    roughness: 0.075, metalness: 0, transmission: 1, thickness: 0.035, ior: 1.35, dispersion: 0.025,
+    roughness: 0.028, metalness: 0, transmission: 1, thickness: 0.035, ior: 1.33, dispersion: 0.01,
     attenuationDistance: ATTENUATION_DISTANCE, clearcoat: 0.42, clearcoatRoughness: 0.05,
     transparent: false, side: THREE.FrontSide,
   });
@@ -27,7 +27,9 @@ function makeMaterial(glow) {
   // pair e.g. #ffe0eb with an attenuation of #ed5187).
   material.colorNode = vec3(1).sub(vec3(1).sub(T).mul(0.16));
   material.attenuationColorNode = T;
-  material.thicknessNode = thickness;
+  // Clear gelatin: low roughness keeps embedded gems crisp, and the optical
+  // path is trimmed a little so they read through the colour (still tinted).
+  material.thicknessNode = thickness.mul(0.82);
   // Inner glow in the body's own hue (normalised so dark mixes still glow).
   const hueColor = T.div(max(max(T.x, T.y), max(T.z, 0.05)));
   material.emissiveNode = hueColor.mul(glow).mul(float(0.35).add(clamp(thickness.div(0.03), 0, 1).mul(0.65))).mul(0.6);

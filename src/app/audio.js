@@ -158,24 +158,52 @@ export class JellyAudio {
 
   // ---------------------------------------------------------------- lifecycle
 
+  // Call from inside every user gesture (pointerdown/touchend/click). Cheap when
+  // already running. iOS home-screen apps come back from the background with the
+  // context 'interrupted' or 'suspended', and only a gesture may resume it; if a
+  // couple of gestures fail, the context is rebuilt from scratch.
   unlock() {
     try {
-      if (navigator.audioSession) navigator.audioSession.type = "ambient";
+      if (navigator.audioSession && navigator.audioSession.type !== "ambient") navigator.audioSession.type = "ambient";
     } catch { /* older Safari */ }
+    if (this._offline) return;
+    if (this.ctx && (this.ctx.state === "closed" || (this.ctx.state !== "running" && (this._failedUnlocks || 0) >= 2))) this._rebuildContext();
     if (!this.ctx) {
       const Context = window.AudioContext || window.webkitAudioContext;
       if (!Context) return;
       this.ctx = new Context({ latencyHint: "interactive" });
+      this._ownsContext = true;
       this._build(false);
-      // A silent blip inside the gesture fully unlocks output on iOS.
+      this._failedUnlocks = 0;
+    }
+    if (this.ctx.state === "running") { this._failedUnlocks = 0; if (this.enabled) this._startTimer(); return; }
+    // A silent blip inside the gesture fully unlocks output on iOS.
+    try {
       const blip = this.ctx.createBufferSource();
       blip.buffer = this.ctx.createBuffer(1, 1, this.ctx.sampleRate);
       blip.connect(this.ctx.destination);
       blip.start();
-    }
-    if (this._offline) return;
-    if (this.ctx.state !== "running") this.ctx.resume().catch(() => {});
+    } catch { /* closed */ }
+    const ctx = this.ctx;
+    ctx.resume().then(() => { if (ctx.state === "running") this._failedUnlocks = 0; }).catch(() => {});
+    this._failedUnlocks = (this._failedUnlocks || 0) + 1;
     if (this.enabled) this._startTimer();
+  }
+
+  get running() { return Boolean(this.ctx && this.ctx.state === "running"); }
+
+  _rebuildContext() {
+    this._stopTimer();
+    this._gen++;
+    const ctx = this.ctx;
+    for (const list of [this._piano, this._gems]) {
+      for (const v of list) for (const o of v.oscs) { try { o.stop(); } catch { /* not started */ } }
+      list.length = 0;
+    }
+    try { this._out?.disconnect(); } catch { /* already */ }
+    try { ctx?.close?.().catch(() => {}); } catch { /* closed */ }
+    this.ctx = null;
+    this.master = null;
   }
 
   suspend() {

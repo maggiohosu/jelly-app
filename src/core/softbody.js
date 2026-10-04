@@ -72,7 +72,7 @@ export class SoftBody {
     for (let i = 0; i < nodeCount; i++) this.inverseMass[i] = 1 / this.mass[i];
     this.totalMass = this.mass.reduce((a, b) => a + b, 0);
 
-    this.grab = null;
+    this.grab = null; this.extraGrabs = [];
     this.sleeping = false; this.quietTime = 0; this.grounded = false; this.internalRms = 0; this.rigidRms = 0;
 
     // App extensions. null gravityVector = original fixed -Y gravity.
@@ -205,7 +205,12 @@ export class SoftBody {
 
   // grab = {ids:Int32Array, weights:Float64Array, target:[x,y,z], point:[x,y,z], lambda:Float64Array(3)}
   solveGrab(h) {
-    const grab = this.grab; if (!grab) return;
+    if (this.grab) this.solveGrabOne(this.grab, h);
+    for (const g of this.extraGrabs) this.solveGrabOne(g, h);
+  }
+
+  // App extension: extraGrabs = more fingers, each its own force-limited constraint.
+  solveGrabOne(grab, h) {
     const p = grab.point, ids = grab.ids, weights = grab.weights, n = ids.length;
     p[0] = 0; p[1] = 0; p[2] = 0;
     let denominator = 0;
@@ -235,7 +240,7 @@ export class SoftBody {
   }
 
   beginStep(h) {
-    if (this.grab) this.wake();
+    if (this.grab || this.extraGrabs.length) this.wake();
     if (this.sleeping) return false;
     const P = this.params;
     const x = this.x, v = this.velocity, old = this.previous, n = this.nodeCount;
@@ -254,6 +259,7 @@ export class SoftBody {
     }
     this.lambdaD.fill(0); this.lambdaH.fill(0); this.lambdaB.fill(0);
     if (this.grab) this.grab.lambda.fill(0);
+    for (const g of this.extraGrabs) g.lambda.fill(0);
     if (this.wallRadius > 0) this.wallContact.fill(0);
     return true;
   }
@@ -311,7 +317,7 @@ export class SoftBody {
 
     this.grounded = false;
     for (let i = 0; i < n; i++) if (this.contact[i] > 0) { this.grounded = true; break; }
-    this.quietTime = !this.grab && this.grounded && this.rigidRms < .004 && this.internalRms < .021 ? this.quietTime + h : 0;
+    this.quietTime = !this.grab && !this.extraGrabs.length && this.grounded && this.rigidRms < .004 && this.internalRms < .021 ? this.quietTime + h : 0;
     if (this.quietTime > .45) {
       this.sleeping = true;
       v.fill(0); this.internalRms = this.rigidRms = 0;
@@ -418,7 +424,7 @@ export class SoftBody {
   reset(lift = 0) {
     this.x.set(this.rest);
     if (lift) for (let i = 1; i < this.x.length; i += 3) this.x[i] += lift;
-    this.previous.set(this.x); this.velocity.fill(0); this.grab = null;
+    this.previous.set(this.x); this.velocity.fill(0); this.grab = null; this.extraGrabs = [];
     this.grounded = false; this.internalRms = this.rigidRms = 0; this.wake();
     this.updateSurface();
   }
@@ -434,11 +440,22 @@ export class SoftBody {
 
   // Shake impulse: horizontal push (m/s) plus a vertical pop and a little spin.
   impulse(vx, vy, vz) {
-    if (this.grab) return;
+    if (this.grab || this.extraGrabs.length) return;
     this.wake();
     for (let i = 0; i < this.nodeCount; i++) {
       const j = i * 3, dy = this.x[j + 1] - this.center[1];
       this.velocity[j] += vx * (1 + dy * 30); this.velocity[j + 1] += vy; this.velocity[j + 2] += vz * (1 + dy * 30);
+    }
+  }
+
+  // Bounce: an upward launch with a squash — the bottom pushes off harder
+  // than the top, so the jelly stretches up and lands with a wobble.
+  bounce(vy, vx = 0, vz = 0) {
+    this.wake();
+    const b = this.bounds, h = Math.max(1e-4, b[4] - b[1]);
+    for (let i = 0; i < this.nodeCount; i++) {
+      const j = i * 3, t = (this.x[j + 1] - b[1]) / h;
+      this.velocity[j] += vx; this.velocity[j + 1] += vy * (1.12 - 0.24 * t); this.velocity[j + 2] += vz;
     }
   }
 
