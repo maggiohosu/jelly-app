@@ -1,0 +1,17 @@
+{
+  "name": "말랑젤리",
+  "short_name": "말랑젤리",
+  "description": "손끝으로 만지는 말랑한 3D 젤리",
+  "lang": "ko",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#dfe6e8",
+  "theme_color": "#dfe6e8",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png" },
+    { "src": "icons/icon-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

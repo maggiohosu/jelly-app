@@ -1,0 +1,111 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <title>말랑젤리</title>
+  <meta name="description" content="손끝으로 만지는 말랑한 3D 젤리">
+  <meta name="theme-color" content="#dfe6e8">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="말랑젤리">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="format-detection" content="telephone=no">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="apple-touch-icon" href="icons/apple-touch-icon.png">
+  <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png">
+  <link rel="stylesheet" href="styles.css">
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "./vendor/three/three.webgpu.min.js",
+        "three/webgpu": "./vendor/three/three.webgpu.min.js",
+        "three/tsl": "./vendor/three/three.tsl.min.js",
+        "three/addons/": "./vendor/three/addons/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <canvas id="stage" aria-label="3D 젤리"></canvas>
+
+  <header class="top">
+    <div class="brand">말랑젤리</div>
+    <div class="badge" id="badge" hidden></div>
+    <button class="icon-button" id="info-button" aria-label="정보 및 설정">i</button>
+  </header>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <div class="hint" id="hint" hidden>
+    <div><span class="hint-icon">👆</span>젤리를 잡고 쭉 늘려 보세요</div>
+    <div><span class="hint-icon">🔄</span>빈 곳을 밀면 회전 · 두 손가락으로 확대</div>
+    <div id="hint-tilt"><span class="hint-icon">📱</span>폰을 눕혀 기울이면 미끄러지고, 흔들면 출렁</div>
+  </div>
+
+  <nav class="toolbar" id="toolbar" hidden>
+    <div class="flavours" role="radiogroup" aria-label="젤리 맛">
+      <button class="chip active" data-flavour="berry" role="radio" aria-checked="true"><i style="--c:#ed5187"></i>베리</button>
+      <button class="chip" data-flavour="mint" role="radio" aria-checked="false"><i style="--c:#4dc9a0"></i>민트</button>
+      <button class="chip" data-flavour="honey" role="radio" aria-checked="false"><i style="--c:#edb643"></i>허니</button>
+    </div>
+    <div class="actions">
+      <button class="round" id="nudge" aria-label="톡 치기">톡</button>
+      <button class="round" id="reset" aria-label="처음으로"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M4.5 12a7.5 7.5 0 1 0 2.2-5.3" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/><path d="M4 3.5v4.6h4.6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+      <button class="round toggle on" id="tilt" aria-label="기울기 센서" aria-pressed="true">📱</button>
+      <button class="round toggle on" id="sound" aria-label="소리" aria-pressed="true">🔊</button>
+    </div>
+  </nav>
+
+  <section class="start" id="start">
+    <div class="start-card">
+      <div class="logo" aria-hidden="true"></div>
+      <h1>말랑젤리</h1>
+      <p>만지고, 늘리고, 흔들어 보세요</p>
+      <button class="primary" id="start-button" disabled>준비 중…</button>
+      <p class="small" id="start-note">소리와 기울기 센서를 사용해요</p>
+      <p class="small install" id="install-hint" hidden>Safari <b>공유</b> 버튼 → <b>홈 화면에 추가</b>하면 앱처럼 쓸 수 있어요</p>
+    </div>
+  </section>
+
+  <section class="sheet" id="sheet" hidden>
+    <div class="sheet-card" role="dialog" aria-modal="true" aria-labelledby="sheet-title">
+      <div class="sheet-head">
+        <h2 id="sheet-title">말랑젤리</h2>
+        <button class="icon-button" id="sheet-close" aria-label="닫기">✕</button>
+      </div>
+      <h3>화질</h3>
+      <div class="segmented" id="quality">
+        <button data-quality="auto" class="active">자동</button>
+        <button data-quality="high">높음</button>
+        <button data-quality="mid">중간</button>
+        <button data-quality="low">낮음</button>
+      </div>
+      <p class="small" id="status-line"></p>
+      <h3>조작법</h3>
+      <ul class="small">
+        <li>젤리를 잡고 끌면 늘어나요. 놓으면 출렁!</li>
+        <li>빈 곳을 한 손가락으로 밀면 회전, 두 손가락으로 확대/축소</li>
+        <li>폰을 탁자에 눕힌 상태가 수평이에요. 기울이면 미끄러지고, 흔들면 튀어 올라요</li>
+      </ul>
+      <p class="small install" id="install-hint-2" hidden>Safari <b>공유</b> → <b>홈 화면에 추가</b>로 설치할 수 있어요.</p>
+      <h3>만든 재료</h3>
+      <p class="small credits">
+        젤리 시뮬레이션·광학: <a href="https://github.com/scottstts/Threejs-Awesome-Graphics-Agent-Skills" target="_blank" rel="noopener">Three.js Awesome Graphics Agent Skills</a>
+        softbody-jelly (MIT © 2026 Scott Sun)<br>
+        렌더링: <a href="https://threejs.org" target="_blank" rel="noopener">three.js</a> r185 (MIT)
+      </p>
+    </div>
+  </section>
+
+  <section class="fatal" id="fatal" hidden>
+    <div class="start-card">
+      <h1>앗, 젤리를 띄울 수 없어요</h1>
+      <p id="fatal-message">이 기기의 브라우저가 3D 그래픽(WebGPU/WebGL2)을 지원하지 않아요.</p>
+      <p class="small">iOS 26 이상 Safari에서 열어 주세요.</p>
+    </div>
+  </section>
+
+  <script type="module" src="src/app/main.js"></script>
+</body>
+</html>

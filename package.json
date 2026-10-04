@@ -1,0 +1,13 @@
+{
+  "name": "jelly-app",
+  "private": true,
+  "type": "module",
+  "description": "말랑젤리 — Three.js WebGPU softbody jelly as an iPhone PWA",
+  "scripts": {
+    "test": "node tests/golden.test.mjs && node tests/optics.test.mjs && node tests/stability.test.mjs && node tests/quality.test.mjs",
+    "serve": "node tests/serve.mjs"
+  },
+  "devDependencies": {
+    "three": "0.185.1"
+  }
+}
