@@ -5,7 +5,7 @@
 // Material and receiver shading follow the softbody-jelly example
 // (threejs-awesome-graphics-agent-skills, MIT, Copyright (c) 2026 Scott Sun).
 import * as THREE from "three/webgpu";
-import { attribute, clamp, exp, float, max, positionLocal, texture, uniform, vec3 } from "three/tsl";
+import { abs, attribute, clamp, dot, exp, float, max, mix, normalView, positionLocal, positionViewDirection, sin, texture, time, uniform, vec3 } from "three/tsl";
 import { GPUCausticField } from "./gpu-caustic-field.js";
 
 const ATTENUATION_DISTANCE = 0.035;
@@ -32,7 +32,16 @@ function makeMaterial(glow) {
   material.thicknessNode = thickness.mul(0.82);
   // Inner glow in the body's own hue (normalised so dark mixes still glow).
   const hueColor = T.div(max(max(T.x, T.y), max(T.z, 0.05)));
-  material.emissiveNode = hueColor.mul(glow).mul(float(0.35).add(clamp(thickness.div(0.03), 0, 1).mul(0.65))).mul(0.6);
+  const inner = hueColor.mul(glow).mul(float(0.35).add(clamp(thickness.div(0.03), 0, 1).mul(0.65))).mul(0.6);
+  // 금펄 paint: a pearly gold sheen that shifts toward pink at grazing angles
+  // and shimmers slowly; 야광 paint: a soft lime glow in its own light.
+  const fx = attribute("fx", "vec2");
+  const facing = abs(dot(normalView, positionViewDirection));
+  const rim = float(1).sub(facing);
+  const shimmer = sin(time.mul(1.7).add(positionLocal.x.mul(260)).add(positionLocal.y.mul(190))).mul(0.25).add(0.75);
+  const pearl = mix(vec3(1.0, 0.82, 0.42), vec3(1.0, 0.62, 0.78), rim).mul(rim.mul(0.6).add(0.1)).mul(shimmer).mul(clamp(fx.x, 0, 1)).mul(0.32);
+  const glowPaint = vec3(0.45, 1.0, 0.35).mul(clamp(fx.y, 0, 1)).mul(facing.mul(0.25).add(0.2));
+  material.emissiveNode = inner.add(pearl).add(glowPaint);
   return material;
 }
 
@@ -45,10 +54,12 @@ export function createJellyView(stage, init, { caustics = true } = {}) {
   const normal = new THREE.BufferAttribute(new Float32Array(vertexCount * 3), 3).setUsage(THREE.DynamicDrawUsage);
   const thickness = new THREE.BufferAttribute(new Float32Array(vertexCount).fill(0.03), 1).setUsage(THREE.DynamicDrawUsage);
   const dye = new THREE.BufferAttribute(new Float32Array(vertexCount * 3), 3).setUsage(THREE.DynamicDrawUsage);
+  const fxAttr = new THREE.BufferAttribute(new Float32Array(vertexCount * 2), 2).setUsage(THREE.DynamicDrawUsage);
   geometry.setAttribute("position", position);
   geometry.setAttribute("normal", normal);
   geometry.setAttribute("opticalThickness", thickness);
   geometry.setAttribute("dye", dye);
+  geometry.setAttribute("fx", fxAttr);
   geometry.setIndex(new THREE.BufferAttribute(init.indices, 1));
   geometry.boundingBox = new THREE.Box3();
   geometry.boundingSphere = new THREE.Sphere();
@@ -82,8 +93,9 @@ export function createJellyView(stage, init, { caustics = true } = {}) {
   const shadowField = texture(shadowTexture, trayPosition.xz.sub(originNode).div(spanNode));
   const bench = texture(benchTexture, trayPosition.xz.div(0.16).add(0.5)).rgb;
   const sunColor = uniform(sun.color);
-  const causticEmission = () => bench.mul(field.sampleIrradiance(trayPosition)).mul(sunColor).mul(sun.intensity / Math.PI);
-  benchMaterial.colorNode = bench.mul(float(1).sub(shadowField.r.mul(0.63))).mul(float(1).sub(shadowField.g.mul(0.40)));
+  const causticEmission = () => bench.mul(field.sampleIrradiance(trayPosition)).mul(sunColor).mul(sun.intensity / Math.PI).mul(shadowStrength);
+  const shadowStrength = uniform(1);       // 0 while the jelly is hidden (eaten)
+  benchMaterial.colorNode = bench.mul(float(1).sub(shadowField.r.mul(shadowStrength.mul(0.63)))).mul(float(1).sub(shadowField.g.mul(shadowStrength.mul(0.40))));
   benchMaterial.emissiveNode = field ? causticEmission() : float(0);
   benchMaterial.needsUpdate = true;
   let causticsOn = Boolean(field);
@@ -124,6 +136,7 @@ export function createJellyView(stage, init, { caustics = true } = {}) {
         recycle(frame.positions.buffer); recycle(frame.normals.buffer);
       }
       if (frame.dye) { dye.array.set(frame.dye); dye.needsUpdate = true; recycle(frame.dye.buffer); }
+      if (frame.fx) { fxAttr.array.set(frame.fx); fxAttr.needsUpdate = true; recycle(frame.fx.buffer); }
       const b = frame.bounds;
       geometry.boundingBox.min.set(b[0], b[1], b[2]); geometry.boundingBox.max.set(b[3], b[4], b[5]);
       geometry.boundingBox.getBoundingSphere(geometry.boundingSphere);
@@ -159,6 +172,12 @@ export function createJellyView(stage, init, { caustics = true } = {}) {
       return g > 0.003;
     },
     pulse(strength) { state.pulse = Math.min(1.2, state.pulse + strength); },
+    // Hide the jelly (and its shadow / caustics) while it is gone.
+    setHidden(hidden) {
+      jelly.visible = !hidden;
+      shadowStrength.value = hidden ? 0 : 1;
+    },
+    get hidden() { return !jelly.visible; },
 
     updateCaustics(renderer, allowTransport) {
       if (!causticsOn) return;

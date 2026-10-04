@@ -1,7 +1,7 @@
 // Offline cache for 말랑젤리. Bump VERSION on every deploy so phones pick up
 // the new files (the new worker installs in the background and takes over on
 // the next launch).
-const VERSION = "v5";
+const VERSION = "v6";
 const CACHE = `mallang-jelly-${VERSION}`;
 const PRECACHE = [
   "./",
@@ -20,10 +20,20 @@ const PRECACHE = [
   "./src/app/audio.js",
   "./src/app/quality.js",
   "./src/app/ui.js",
+  "./src/app/progress.js",
+  "./src/app/orders.js",
+  "./src/app/game-ui.js",
   "./src/render/stage.js",
   "./src/render/jelly-view.js",
   "./src/render/gems.js",
   "./src/render/beads.js",
+  "./src/render/additives.js",
+  "./src/render/coins.js",
+  "./src/render/rabbit.js",
+  "./src/render/rabbit-fur.js",
+  "./src/render/rare-gems.js",
+  "./src/render/rare-shapes.js",
+  "./src/render/thumbnail.js",
   "./src/render/input.js",
   "./src/render/gpu-caustic-field.js",
   "./src/workers/sim-worker.js",

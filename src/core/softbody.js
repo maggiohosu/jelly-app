@@ -219,8 +219,8 @@ export class SoftBody {
       p[0] += this.x[id * 3] * weight; p[1] += this.x[id * 3 + 1] * weight; p[2] += this.x[id * 3 + 2] * weight;
       denominator += this.inverseMass[id] * weight * weight;
     }
-    const alpha = 1 / (90 * h * h); denominator += alpha;
-    const limit = this.params.maxGrabForce * h * h;
+    const alpha = 1 / ((grab.stiffness || 90) * h * h); denominator += alpha;
+    const limit = (grab.maxForce || this.params.maxGrabForce) * h * h;
     for (let axis = 0; axis < 3; axis++) {
       const C = p[axis] - grab.target[axis];
       const dl = (-C - alpha * grab.lambda[axis]) / denominator;
@@ -456,6 +456,13 @@ export class SoftBody {
   // that keeps the shape you pull it into and slowly rounds back into a
   // blob. Rest volumes are preserved (det of each rest shape is kept).
   setPlastic(flow = 0, recover = 0, yieldStrain = 0) {
+    this.ensureRestShapes();
+    this.plastic = flow > 0 || recover > 0 ? { flow, recover, yieldStrain } : null;
+    if (!this.plastic) { this.restDm.set(this.restDm0); this.refreshGradients(); this.plasticStrain = 0; }
+  }
+
+  // Per-tet rest shapes (edge matrices) that plasticity and bites can change.
+  ensureRestShapes() {
     if (!this.restDm0) {
       const E = this.elementCount, p = this.rest, ids = this.ids;
       this.restDm0 = new Float64Array(E * 9);
@@ -466,11 +473,61 @@ export class SoftBody {
         m[o + 6] = p[b + 2] - p[a + 2]; m[o + 7] = p[c + 2] - p[a + 2]; m[o + 8] = p[d + 2] - p[a + 2];
       }
       this.restDm = this.restDm0.slice();
-      this.gradients0 = this.gradients.slice();
       this.plasticStrain = 0;
     }
-    this.plastic = flow > 0 || recover > 0 ? { flow, recover, yieldStrain } : null;
-    if (!this.plastic) { this.restDm.set(this.restDm0); this.gradients.set(this.gradients0); this.plasticStrain = 0; }
+  }
+
+  // Gradients (inverse rest edge matrices) from the current rest shapes.
+  refreshGradients(from = 0, to = this.elementCount) {
+    const g = this.gradients, M = this.restDm, I = new Float64Array(9);
+    for (let e = from; e < to; e++) {
+      if (!inv3into(M, e * 9, I)) continue;
+      const go = e * 12;
+      for (let k = 0; k < 3; k++) {
+        g[go + 3 + k] = I[k]; g[go + 6 + k] = I[3 + k]; g[go + 9 + k] = I[6 + k];
+        g[go + k] = -I[k] - I[3 + k] - I[6 + k];
+      }
+    }
+  }
+
+  // Uniformly scale every rest shape (and the original): the jelly settles
+  // to a smaller size (each bite takes some of it away).
+  scaleRest(scale) {
+    this.ensureRestShapes();
+    const M = this.restDm, M0 = this.restDm0;
+    for (let k = 0; k < M.length; k++) { M[k] *= scale; M0[k] *= scale; }
+    this.refreshGradients();
+    this.wake();
+  }
+
+  // A bite: tets near `center` (current positions) shrink their rest shape —
+  // and their original rest shape, so it stays — by up to `factor` (linear),
+  // with a smooth falloff to `radius`. The surface there caves in like a
+  // bite taken out of the jelly. Returns how many tets were affected.
+  shrinkRegion(center, radius, factor = 0.3) {
+    this.ensureRestShapes();
+    const E = this.elementCount, x = this.x, ids = this.ids, M = this.restDm, M0 = this.restDm0, I = new Float64Array(9);
+    const g = this.gradients;
+    let count = 0;
+    for (let e = 0; e < E; e++) {
+      let cx = 0, cy = 0, cz = 0;
+      for (let v = 0; v < 4; v++) { const j = ids[e * 4 + v] * 3; cx += x[j]; cy += x[j + 1]; cz += x[j + 2]; }
+      const d = Math.hypot(cx / 4 - center[0], cy / 4 - center[1], cz / 4 - center[2]) / radius;
+      if (d >= 1) continue;
+      const w = 1 - d * d * (3 - 2 * d);              // smoothstep falloff
+      const s = 1 - (1 - factor) * w, o = e * 9;
+      for (let k = 0; k < 9; k++) { M[o + k] *= s; M0[o + k] *= s; }
+      if (inv3into(M, o, I)) {
+        const go = e * 12;
+        for (let k = 0; k < 3; k++) {
+          g[go + 3 + k] = I[k]; g[go + 6 + k] = I[3 + k]; g[go + 9 + k] = I[6 + k];
+          g[go + k] = -I[k] - I[3 + k] - I[6 + k];
+        }
+      }
+      count++;
+    }
+    if (count) this.wake();
+    return count;
   }
 
   // Advance plastic flow by dt (call at ~30 Hz). Returns the mean deviation of

@@ -156,6 +156,57 @@ w.handle({ type: "texture", texture: "jelly" }); run(w, 4);
 const backH = w.body.bounds[4] - w.body.bounds[1];
 check("switching back to jelly restores its shape", Math.abs(backH - jellyH) < 0.0015 && w.body.isFinite(), `${(backH * 1000).toFixed(1)} mm`);
 
+// 5e) bunny: grab with two paws, lift, bite (caves in + eats gems), new paints, additives, rare gems
+w = new JellyWorld(); run(w, 1);
+w.handle({ type: "gemScatter", count: 6 }); run(w, 2.5); drain(w);
+w.handle({ type: "gemScatter", count: 1, rare: { index: 3, tier: 2 }, radius: 0.0048 }); run(w, 2.5);
+const rareGem = w.gems.find((g) => g.rare);
+const gs = w.gemStates(new Float32Array(w.gems.length * 10));
+check("rare gem is encoded in the gem states (tier ≥ 100)", rareGem && Array.from({ length: w.gems.length }, (_, i) => gs[i * 10 + 1]).includes(102));
+for (let i = 0; i < 4; i++) w.handle({ type: "gemScatter", count: 1, rare: { index: i, tier: 0 }, radius: 0.0048 });
+check("at most 4 rare gems per jelly", w.rareCount <= 4 && w.events.some((e) => e.type === "rareFull"), `${w.rareCount}`);
+drain(w);
+const meshVolume = () => { const P = w.body.positions, I = w.type.stencils.indices; let v = 0; for (let t = 0; t < I.length; t += 3) { const a = I[t] * 3, b = I[t + 1] * 3, c = I[t + 2] * 3; v += (P[a] * (P[b + 1] * P[c + 2] - P[b + 2] * P[c + 1]) - P[a + 1] * (P[b] * P[c + 2] - P[b + 2] * P[c]) + P[a + 2] * (P[b] * P[c + 1] - P[b + 1] * P[c])) / 6; } return Math.abs(v); };
+const vol0 = meshVolume();
+const c0 = w.body.center.slice(), b0 = Array.from(w.body.bounds);
+w.handle({ type: "grabNear", id: "L", point: [b0[0], c0[1], c0[2]] });
+w.handle({ type: "grabNear", id: "R", point: [b0[3], c0[1], c0[2]] });
+check("two paw grabs attach", w.grabs.size === 2);
+for (let t = 0; t < 1.2; t += dt) {
+  const k = Math.min(1, t / 0.8);
+  w.handle({ type: "target", id: "L", point: [b0[0] + 0.004, c0[1] + 0.05 * k, c0[2]] });
+  w.handle({ type: "target", id: "R", point: [b0[3] - 0.004, c0[1] + 0.05 * k, c0[2]] });
+  w.advance(dt);
+}
+check("the paws lift the jelly", w.body.center[1] > c0[1] + 0.025, `+${((w.body.center[1] - c0[1]) * 1000).toFixed(0)} mm`);
+const widthBefore = w.body.bounds[3] - w.body.bounds[0], gemsBefore = w.gems.length;
+const mouth = [w.body.center[0], w.body.center[1] + 0.004, w.body.bounds[5] + 0.004];
+let eatenCount = 0;
+for (let i = 0; i < 4; i++) {
+  const m = [mouth[0] + (i - 1.5) * 0.012, mouth[1], w.body.bounds[5] + 0.003];
+  w.handle({ type: "bite", center: m });
+  eatenCount += w.events.filter((e) => e.type === "bitten").reduce((n, e) => n + e.eaten.length, 0); drain(w);
+  run(w, 0.5);
+}
+const vol1 = meshVolume();
+check("bites cave the jelly in (it gets visibly smaller)", vol1 < vol0 * 0.45, `volume ${(vol0 * 1e6).toFixed(0)} → ${(vol1 * 1e6).toFixed(0)} cm³`);
+check("bitten jelly stays stable", w.body.isFinite());
+check("gems inside the bites are eaten", w.gems.length <= gemsBefore, `${gemsBefore} → ${w.gems.length} (${eatenCount} eaten)`);
+w.handle({ type: "grabEnd" }); run(w, 1);
+w.handle({ type: "reset", base: "berry", lift: 0.05 });
+check("a new jelly appears (lifted, then drops)", w.body.center[1] > 0.05 && w.gems.length === 0);
+run(w, 2);
+check("…and lands on the tray", w.body.center[1] < 0.03 && w.body.isFinite());
+w.handle({ type: "drop", point: top(w), paint: paint("pearl") });
+w.handle({ type: "drop", point: top(w), paint: paint("glow") });
+const fx = w.computeShellFx();
+check("pearl and glow paints carry their effect", Math.max(...Array.from(fx).filter((_, i) => i % 2 === 0)) > 0.3 && Math.max(...Array.from(fx).filter((_, i) => i % 2 === 1)) > 0.3);
+w.handle({ type: "additive", kind: "glitter", point: top(w) });
+w.handle({ type: "additive", kind: "stars", point: top(w) });
+const nAdd = w.additiveCount(), as = w.additiveStates(new Float32Array(nAdd * 5));
+check("glitter and star candies are added", w.additives.glitter.length >= 60 && w.additives.stars.length >= 4, `${w.additives.glitter.length} glitter, ${w.additives.stars.length} stars`);
+check("additive positions are finite and on/in the jelly", Array.from(as).every(Number.isFinite) && (() => { const b = w.body.bounds; for (let i = 0; i < nAdd; i++) { const y = as[i * 5 + 1]; if (y < b[1] - 0.002 || y > b[4] + 0.002) return false; } return true; })());
+
 // 6) cost (awake, 240 Hz, with gems and an active dye field)
 w = new JellyWorld(); run(w, 0.3);
 w.handle({ type: "gemScatter", count: 12 });

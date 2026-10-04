@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <title>Rare gem preview</title>
+  <link rel="icon" href="data:,">
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "../vendor/three/three.webgpu.min.js",
+        "three/webgpu": "../vendor/three/three.webgpu.min.js",
+        "three/tsl": "../vendor/three/three.tsl.min.js",
+        "three/addons/": "../vendor/three/addons/"
+      }
+    }
+  </script>
+  <style>
+    html, body { margin: 0; height: 100%; background: #dfe6e8; overflow: hidden; font: 12px/1.4 -apple-system, system-ui, sans-serif; color: #44545b; }
+    body { display: flex; flex-direction: column; }
+    #view { position: relative; flex: 1; min-height: 0; }
+    canvas { display: block; width: 100%; height: 100%; }
+    #hud { position: absolute; left: 8px; top: 6px; z-index: 2; }
+    #hud a { color: inherit; margin-right: 6px; }
+    #hud a.on { font-weight: 700; text-decoration: none; color: #1d2a30; }
+    #labels { position: absolute; inset: 0; pointer-events: none; }
+    #labels span { position: absolute; transform: translate(-50%, 0); font-size: 11px; color: #5b6b72; white-space: nowrap; }
+    #strips { flex: none; padding: 4px 6px 6px; background: #eef2f3; border-top: 1px solid #cfd8db; }
+    #strips .row { display: flex; gap: 2px; flex-wrap: wrap; justify-content: center; min-height: 52px; }
+    #strips .row + .row { margin-top: 3px; }
+    #thumbs img, #thumbs span { width: 52px; height: 52px; border-radius: 10px; background: #fff8; }
+    #icons span { display: inline-block; width: 48px; height: 48px; padding: 2px; border-radius: 10px; background: #fff8; }
+    #strips[hidden] { display: none; }
+  </style>
+</head>
+<body>
+  <div id="view">
+    <canvas id="stage"></canvas>
+    <div id="labels"></div>
+    <div id="hud"></div>
+  </div>
+  <div id="strips">
+    <div class="row" id="thumbs"></div>
+    <div class="row" id="icons"></div>
+  </div>
+  <script type="module" src="./rare-gems-preview.js"></script>
+</body>
+</html>

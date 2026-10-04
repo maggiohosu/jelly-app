@@ -30,14 +30,36 @@
   <canvas id="stage" aria-label="3D 젤리"></canvas>
 
   <header class="top">
-    <div class="brand">말랑젤리</div>
+    <div class="hud" id="hud" hidden>
+      <button class="hud-pill coins" id="coins" aria-label="금화"><i class="coin-icon" aria-hidden="true"></i><b id="coin-count">0</b></button>
+      <button class="hud-pill friend" id="friend" aria-label="토끼 친밀도"><span class="heart" aria-hidden="true">♥</span><b id="friend-level">Lv1</b><span class="bar"><i id="friend-bar"></i></span></button>
+    </div>
+    <div class="brand" id="brand">말랑젤리</div>
     <div class="badge" id="badge" hidden></div>
-    <button class="icon-button" id="settings-button" aria-label="설정">
+    <button class="icon-button" id="gacha-button" aria-label="카드 뽑기" hidden>🎴</button>
+    <button class="icon-button plain" id="book-button" aria-label="도감" hidden>📖</button>
+    <button class="icon-button plain" id="settings-button" aria-label="설정">
       <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h4M12 17h8" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/><circle cx="16" cy="7" r="2.4" fill="none" stroke="currentColor" stroke-width="2.2"/><circle cx="10" cy="17" r="2.4" fill="none" stroke="currentColor" stroke-width="2.2"/></svg>
     </button>
   </header>
 
+  <button class="order" id="order" hidden aria-label="토끼 주문서">
+    <span class="order-swatch" id="order-swatch"></span>
+    <span class="order-body"><small>🐰 토끼 주문</small><b id="order-text">…</b></span>
+    <span class="order-gem" id="order-gem"></span>
+  </button>
+
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <canvas class="confetti" id="confetti" aria-hidden="true"></canvas>
+
+  <section class="reward" id="reward" hidden aria-live="polite">
+    <div class="reward-card">
+      <div class="stars" id="reward-stars">★★★</div>
+      <div class="reward-line" id="reward-text">맛있어요!</div>
+      <div class="reward-coins"><i class="coin-icon" aria-hidden="true"></i><b id="reward-coins">+0</b><span class="small" id="reward-xp"></span></div>
+      <div class="levelup" id="levelup" hidden></div>
+    </div>
+  </section>
 
   <div class="hint" id="hint" hidden>
     <div><span class="hint-icon">💧</span>아래 스포이드를 끌어다 젤리 위에서 놓으면 똑! 길게 누르면 계속 떨어져요</div>
@@ -51,6 +73,10 @@
       <b>보석함</b><span class="small">끌어다 젤리에 놓거나, 톡 눌러 선택한 젤리에 넣기</span>
     </div>
     <div class="gem-grid" id="gem-shapes"></div>
+    <div class="rare-row" id="rare-row" hidden>
+      <b class="rare-title">레어</b>
+      <div class="rare-gems" id="rare-gems"></div>
+    </div>
     <div class="gem-colors" id="gem-colors" role="radiogroup" aria-label="보석 색"></div>
     <button class="pill" id="gem-scatter">✨ 한 줌 쏟기</button>
   </section>
@@ -61,12 +87,42 @@
       <button class="round toggle" id="gems" aria-label="보석함" aria-pressed="false">💎</button>
       <button class="round toggle texture" id="texture" aria-pressed="false">젤리</button>
       <button class="round" id="nudge" aria-label="통통 튀기기">통통</button>
-      <button class="round" id="reset" aria-label="처음으로"><svg viewBox="0 0 24 24" width="20" height="20" aria-hidden="true"><path d="M4.5 12a7.5 7.5 0 1 0 2.2-5.3" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/><path d="M4 3.5v4.6h4.6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
-      <button class="round toggle on" id="sound" aria-label="소리" aria-pressed="true">🔊</button>
+      <button class="round carrot" id="feed" aria-label="토끼에게 먹이기">🥕</button>
     </div>
   </nav>
 
   <div class="ghost" id="drag-ghost" hidden aria-hidden="true"></div>
+
+  <section class="overlay" id="gacha" hidden aria-label="카드 뽑기">
+    <div class="overlay-head">
+      <b>🎴 보석 카드 뽑기</b>
+      <span class="hud-pill coins small-pill"><i class="coin-icon" aria-hidden="true"></i><b id="gacha-coins">0</b></span>
+      <button class="icon-button" id="gacha-close" aria-label="닫기">✕</button>
+    </div>
+    <p class="gacha-hint" id="gacha-hint">카드 한 장을 골라 보세요</p>
+    <div class="cards" id="cards"></div>
+    <div class="gacha-result" id="gacha-result" hidden>
+      <b id="gacha-title"></b>
+      <span class="small" id="gacha-sub"></span>
+    </div>
+    <div class="gacha-actions">
+      <button class="primary" id="pull-button">금화 100개로 뽑기</button>
+    </div>
+  </section>
+
+  <section class="overlay" id="book" hidden aria-label="도감">
+    <div class="overlay-head">
+      <b>📖 도감</b>
+      <div class="segmented tabs" id="book-tabs">
+        <button data-tab="rare" class="active">레어 보석</button>
+        <button data-tab="album">작품 앨범</button>
+      </div>
+      <button class="icon-button" id="book-close" aria-label="닫기">✕</button>
+    </div>
+    <p class="small book-count" id="book-count"></p>
+    <div class="book-grid" id="book-rare"></div>
+    <div class="album-grid" id="book-album" hidden></div>
+  </section>
 
   <section class="start" id="start">
     <div class="start-card">
@@ -84,6 +140,10 @@
       <div class="sheet-head">
         <h2 id="sheet-title">설정</h2>
         <button class="icon-button" id="sheet-close" aria-label="닫기">✕</button>
+      </div>
+      <div class="sheet-actions">
+        <button class="chip-button" id="reset"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M4.5 12a7.5 7.5 0 1 0 2.2-5.3" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/><path d="M4 3.5v4.6h4.6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg> 새 젤리</button>
+        <button class="chip-button toggle on" id="sound" aria-pressed="true">🔊 소리 켜짐</button>
       </div>
       <h3>젤리 바탕색</h3>
       <div class="segmented" id="bases">
@@ -111,6 +171,13 @@
         <li>너무 진해지면 '물'을 떨어뜨려 연하게, ↺는 바탕색으로 처음부터</li>
         <li>젤리를 잡아 늘리고, 빈 곳을 한 손가락으로 끌면 접시가 기울어요. 두 손가락은 회전·확대</li>
         <li>보석은 젤리 속에서 함께 출렁이고, 흔들면 이리저리 섞이며 반짝여요</li>
+      </ul>
+      <h3>토끼와 금화</h3>
+      <ul class="small">
+        <li>🐰 주문서 색과 보석을 맞춰 만들고 🥕를 누르면 토끼가 와삭와삭 먹어요. 비슷할수록 ★이 많고 금화도 많이 줘요</li>
+        <li>🎴 금화 100개로 카드 뽑기 — 같은 보석이 또 나오면 글리터 → 금빛 → 무지개빛으로 업그레이드돼요</li>
+        <li>토끼와 친해지면 새 물감과 첨가물(글리터·별사탕)이 생겨요</li>
+        <li>금화·도감 기록은 이 기기에만 저장돼요. Safari 방문 기록·웹사이트 데이터를 지우면 처음부터 다시 시작해요</li>
       </ul>
       <p class="small install" id="install-hint-2" hidden>Safari <b>공유</b> → <b>홈 화면에 추가</b>로 설치할 수 있어요.</p>
       <h3>만든 재료</h3>

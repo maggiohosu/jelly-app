@@ -2,7 +2,7 @@
 // dripping, tap to drop on top), the gem drawer (drag a gem in, or tap), the
 // settings sliders, and persisted per-device settings.
 import { GEM_SHAPES, GEM_COLORS, gemIconSVG } from "../render/gems.js";
-import { PAINTS } from "../core/world.js";
+import { PAINTS, ADDITIVES } from "../core/world.js";
 
 const $ = (id) => document.getElementById(id);
 const STORAGE_KEY = "mallang-jelly-settings-v3";
@@ -13,7 +13,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
   wobble: 0.5,      // 0 short … 1 long      → damping 6 … 1 /s (0.5 ≈ original 3.5)
   slippery: 0.3,    // 0 grippy … 1 icy      → friction ×1.4 … ×0.3
   glow: 1,          // 0 … 2
-  crunch: 0.8, gems: 0.6, boing: 0.6, master: 0.9,
+  crunch: 0.8, gems: 0.6, boing: 0.6, effects: 0.8, master: 0.9,
   texture: "jelly", // 'jelly' | 'slime' (슬랑이)
   gemColor: 0,      // index into GEM_COLORS, -1 = random
   base: "berry",
@@ -106,25 +106,65 @@ function draggable(button, { ghostHTML, onTap, onDrop, onHold }) {
   button.addEventListener("pointercancel", (event) => end(event, true));
 }
 
-export function buildUI({ settings, onSetting, onTexture, onPaintDrop, onPaintTap, onGemDrop, onGemTap, onScatter, onBase }) {
+export function buildUI({ settings, onSetting, onTexture, onPaintDrop, onPaintTap, onAdditiveDrop, onAdditiveTap, onGemDrop, onGemTap, onRareDrop, onRareTap, onScatter, onBase }) {
   const change = (key, value) => { settings[key] = value; saveSettings(settings); onSetting(key, value); };
 
-  // ---- pipette palette ----
+  // ---- pipette palette (paints the player has, then additives) ----
   const paints = $("paints");
-  PAINTS.forEach((p, i) => {
-    const b = document.createElement("button");
-    b.className = "paint" + (p.sigma ? "" : " water");
-    b.style.setProperty("--c", p.hex);
-    b.setAttribute("aria-label", `${p.label} 스포이드`);
-    b.innerHTML = `<i></i><span>${p.label}</span>`;
-    paints.appendChild(b);
-    draggable(b, {
-      ghostHTML: () => pipetteSVG(p.hex, !p.sigma),
-      onTap: () => onPaintTap(i),
-      onDrop: (x, y) => onPaintDrop(i, x, y),
-      onHold: (x, y) => onPaintDrop(i, x, y, true),
-    });
-  });
+  function setPalette(paintIds, additiveIds = [], fresh = []) {
+    paints.textContent = "";
+    // water stays last among the paints
+    const order = [...paintIds.filter((id) => id !== "water"), ...(paintIds.includes("water") ? ["water"] : [])];
+    for (const id of order) {
+      const i = PAINTS.findIndex((p) => p.id === id), p = PAINTS[i];
+      if (!p) continue;
+      const b = document.createElement("button");
+      b.className = "paint" + (p.sigma ? "" : " water") + (p.pearl ? " pearl" : "") + (p.glow ? " glow" : "") + (fresh.includes(id) ? " new" : "");
+      b.style.setProperty("--c", p.hex);
+      b.setAttribute("aria-label", `${p.label} 스포이드`);
+      b.innerHTML = `<i></i><span>${p.label}</span>`;
+      paints.appendChild(b);
+      draggable(b, {
+        ghostHTML: () => pipetteSVG(p.hex, !p.sigma),
+        onTap: () => { b.classList.remove("new"); onPaintTap(i); },
+        onDrop: (x, y) => { b.classList.remove("new"); onPaintDrop(i, x, y); },
+        onHold: (x, y) => onPaintDrop(i, x, y, true),
+      });
+    }
+    for (const id of additiveIds) {
+      const a = ADDITIVES.find((x) => x.id === id);
+      if (!a) continue;
+      const b = document.createElement("button");
+      b.className = `paint additive add-${id}` + (fresh.includes(id) ? " new" : "");
+      b.style.setProperty("--c", a.hex);
+      b.setAttribute("aria-label", a.label);
+      b.innerHTML = `<i></i><span>${a.label}</span>`;
+      paints.appendChild(b);
+      draggable(b, {
+        ghostHTML: () => pipetteSVG(a.hex),
+        onTap: () => { b.classList.remove("new"); onAdditiveTap(id); },
+        onDrop: (x, y) => { b.classList.remove("new"); onAdditiveDrop(id, x, y); },
+      });
+    }
+    if (fresh.length) paints.lastElementChild?.scrollIntoView?.({ behavior: "smooth", inline: "end", block: "nearest" });
+  }
+  setPalette(PAINTS.slice(0, 7).map((p) => p.id));
+
+  // ---- rare gems the player owns (gem drawer) ----
+  const rareRow = $("rare-row"), rareBox = $("rare-gems");
+  function setRareGems(list) {          // [{ index, tier, label, icon (html) }]
+    rareRow.hidden = list.length === 0;
+    rareBox.textContent = "";
+    for (const r of list) {
+      const b = document.createElement("button");
+      b.className = `tier-${r.tier}`;
+      b.setAttribute("aria-label", r.label);
+      b.title = r.label;
+      b.innerHTML = r.icon;
+      rareBox.appendChild(b);
+      draggable(b, { ghostHTML: () => r.icon, onTap: () => onRareTap(r.index, r.tier), onDrop: (x, y) => onRareDrop(r.index, r.tier, x, y) });
+    }
+  }
 
   // ---- texture toggle (toolbar): 젤리 ↔ 슬랑이 ----
   const textureButton = $("texture");
@@ -160,7 +200,8 @@ export function buildUI({ settings, onSetting, onTexture, onPaintDrop, onPaintTa
   slider(fx, { key: "glow", label: "빛 세기", min: 0, max: 2, step: 0.01, value: settings.glow }, change);
   slider(fx, { key: "crunch", label: "크런치 소리", min: 0, max: 1, step: 0.01, value: settings.crunch }, change);
   slider(fx, { key: "gems", label: "보석 소리", min: 0, max: 1, step: 0.01, value: settings.gems }, change);
-  slider(fx, { key: "boing", label: "효과음", min: 0, max: 1, step: 0.01, value: settings.boing }, change);
+  slider(fx, { key: "boing", label: "출렁 소리", min: 0, max: 1, step: 0.01, value: settings.boing }, change);
+  slider(fx, { key: "effects", label: "토끼·금화", min: 0, max: 1, step: 0.01, value: settings.effects }, change);
 
   // ---- gem colours ----
   const colors = $("gem-colors");
@@ -200,4 +241,5 @@ export function buildUI({ settings, onSetting, onTexture, onPaintDrop, onPaintTa
   }
   paintGems();
   $("gem-scatter").addEventListener("click", () => onScatter(settings.gemColor));
+  return { setPalette, setRareGems };
 }

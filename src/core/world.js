@@ -23,6 +23,16 @@ export const PAINTS = Object.freeze([
   { id: "purple", label: "보라", hex: "#9b5de5", sigma: [23, 66, 6.4] },
   { id: "sky", label: "하늘", hex: "#5cc6f2", sigma: [34, 8.2, 1.5] },
   { id: "water", label: "물", hex: "#e6f3fa", sigma: null },
+  // unlocked by the bunny's friendship level (UI decides what is shown)
+  { id: "orange", label: "주황", hex: "#ff9a3c", sigma: [2.2, 22, 74] },
+  { id: "lime", label: "연두", hex: "#9be04a", sigma: [40, 4.0, 70] },
+  { id: "pearl", label: "금펄", hex: "#e8c15a", sigma: [3.5, 9.0, 40], pearl: 1 },
+  { id: "glow", label: "야광", hex: "#b8ff8a", sigma: [26, 2.5, 30], glow: 1 },
+]);
+// Additives dropped like paint (glitter flakes inside, star candies on the surface).
+export const ADDITIVES = Object.freeze([
+  { id: "glitter", label: "글리터", hex: "#ffd76a" },
+  { id: "stars", label: "별사탕", hex: "#ffb3d1" },
 ]);
 // Starting colours (the original flavours, plus an almost clear jelly).
 export const BASES = Object.freeze({ berry: [5, 46, 23], mint: [40, 8, 20], honey: [5, 17, 58], clear: [0.8, 0.5, 0.6] });
@@ -39,6 +49,8 @@ const GEM_WANDER = 0.03;          // m/s random drift at full stirring
 // pulled into (plastic), sags, then slowly rounds back into a blob.
 const SLIME = Object.freeze({ shear: 0.32, damping: 6.5, friction: 1.7, flow: 1.6, recover: 0.13, yieldStrain: 0.2, holdTime: 2.5, awake: 30, beads: 180, beadRadius: 0.0021 });
 const PLASTIC_HZ = 30;
+const RARE_CAPACITY = 4;           // big rare gems per jelly
+const GLITTER_MAX = 360, STARS_MAX = 36;
 
 function makeType() {
   const cage = makeFlowerCage();
@@ -52,7 +64,9 @@ function makeType() {
   let cx = 0, cy = 0, cz = 0;
   const n = cage.pos.length / 3;
   for (let i = 0; i < n; i++) { cx += cage.pos[i * 3]; cy += cage.pos[i * 3 + 1]; cz += cage.pos[i * 3 + 2]; }
-  return { cage, stencils, locator, edges: Int32Array.from(edges), centroid: [cx / n, cy / n, cz / n] };
+  const vertexTri = new Int32Array(stencils.vertexCount).fill(-1);
+  for (let t = 0; t < stencils.indices.length / 3; t++) for (let k = 0; k < 3; k++) if (vertexTri[stencils.indices[t * 3 + k]] < 0) vertexTri[stencils.indices[t * 3 + k]] = t;
+  return { cage, stencils, locator, vertexTri, edges: Int32Array.from(edges), centroid: [cx / n, cy / n, cz / n] };
 }
 
 export class JellyWorld {
@@ -70,7 +84,7 @@ export class JellyWorld {
     this.reset(base);
   }
 
-  reset(base = this.base || "berry") {
+  reset(base = this.base || "berry", lift = 0) {
     const t = this.type;
     const body = new SoftBody({ cage: t.cage, stencils: t.stencils, params: this.bodyParams() });
     body.wallRadius = this.wallRadius;
@@ -81,12 +95,18 @@ export class JellyWorld {
     this.applyTexture();
     this.dye = new Float64Array(body.nodeCount * 3);
     this.shellDye = new Float32Array(t.stencils.vertexCount * 3);
+    this.fx = new Float64Array(body.nodeCount * 2);          // per node: pearl, glow (0..~1)
+    this.shellFx = new Float32Array(t.stencils.vertexCount * 2);
+    this.additives = { glitter: [], stars: [] };
+    this.additiveVersion = (this.additiveVersion || 0) + 1;
+    this.eatenBeads = null;
     this.meanDye = [0, 0, 0];
     this.gems = [];
     this.grabs = new Map(); this.grabbing = false;
     this.falling = [];
     this.accumulator = 0;
     this.setBase(base);
+    if (lift) body.reset(lift);
     this.events.push({ type: "reset" });
   }
 
@@ -94,6 +114,7 @@ export class JellyWorld {
     const sigma = BASES[base] || BASES.berry;
     this.base = BASES[base] ? base : "berry";
     for (let i = 0; i < this.body.nodeCount; i++) this.dye.set(sigma, i * 3);
+    this.fx?.fill(0);
     this.dyeVersion = (this.dyeVersion || 0) + 1;
     this.dyeActive = false;
     this.updateMeanDye();
@@ -143,13 +164,16 @@ export class JellyWorld {
 
   // 4 floats per bead: x, y, z, colour index. Empty unless slime.
   beadStates(out) {
-    const b = this.beads, body = this.body, p = [0, 0, 0], bary = [0, 0, 0, 0];
+    const b = this.beads, body = this.body, p = [0, 0, 0], bary = [0, 0, 0, 0], gone = this.eatenBeads;
+    let n = 0;
     for (let i = 0; i < b.count; i++) {
+      if (gone && gone[i]) continue;
       bary[0] = b.bary[i * 4]; bary[1] = b.bary[i * 4 + 1]; bary[2] = b.bary[i * 4 + 2]; bary[3] = b.bary[i * 4 + 3];
       body.pointInTet(b.tets[i], bary, p);
-      out[i * 4] = p[0]; out[i * 4 + 1] = p[1]; out[i * 4 + 2] = p[2]; out[i * 4 + 3] = b.color[i];
+      out[n * 4] = p[0]; out[n * 4 + 1] = p[1]; out[n * 4 + 2] = p[2]; out[n * 4 + 3] = b.color[i];
+      n++;
     }
-    return out;
+    return n < b.count ? out.subarray(0, n * 4) : out;
   }
 
   // ---------------------------------------------------------------- input
@@ -188,7 +212,10 @@ export class JellyWorld {
       case "bounce": this.bounce(event.strength); break;
       case "texture": this.setTexture(event.texture); break;
       case "nudge": body.nudge(); break;
-      case "reset": this.reset(event.base); break;
+      case "reset": this.reset(event.base, event.lift || 0); break;
+      case "grabNear": this.grabNear(event); break;
+      case "bite": this.bite(event); break;
+      case "additive": this.addAdditive(event); break;
       case "base": this.setBase(event.base); break;
       case "gravity":
         this.gravityVector = event.vector; this.frictionOverride = event.friction;
@@ -223,6 +250,106 @@ export class JellyWorld {
     const v = 0.55 + 0.45 * Math.max(0, Math.min(2, strength));
     this.body.bounce(v, (Math.random() - 0.5) * 0.05, (Math.random() - 0.5) * 0.05);
     this.events.push({ type: "bounced", strength });
+  }
+
+  // ---------------------------------------------------------------- bunny
+  // Grab the surface point nearest to `point` (the bunny's paws).
+  grabNear({ id, point, radius = 0.016, maxForce = 10 }) {
+    // a whole patch of surface (a paw is not a fingertip): every surface
+    // vertex within `radius` of the nearest one, stencil weights combined
+    const P = this.body.positions, st = this.type.stencils;
+    let best = -1, bd = Infinity;
+    for (let v = 0; v < P.length / 3; v++) {
+      const d = (P[v * 3] - point[0]) ** 2 + (P[v * 3 + 1] - point[1]) ** 2 + (P[v * 3 + 2] - point[2]) ** 2;
+      if (d < bd) { bd = d; best = v; }
+    }
+    if (best < 0) return;
+    const c = [P[best * 3], P[best * 3 + 1], P[best * 3 + 2]], map = new Map();
+    let total = 0;
+    for (let v = 0; v < P.length / 3; v++) {
+      const d = Math.hypot(P[v * 3] - c[0], P[v * 3 + 1] - c[1], P[v * 3 + 2] - c[2]);
+      if (d > radius) continue;
+      const wv = 1 - d / radius;
+      for (let k = st.offsets[v]; k < st.offsets[v + 1]; k++) map.set(st.ids[k], (map.get(st.ids[k]) || 0) + st.weights[k] * wv);
+      total += wv;
+    }
+    const list = [...map].filter(([, w]) => w > 1e-8), sum = list.reduce((t, [, w]) => t + w, 0);
+    if (!(sum > 0)) return;
+    const ids = Int32Array.from(list.map((e) => e[0])), weights = Float64Array.from(list.map((e) => e[1] / sum));
+    // the constraint acts on the patch's weighted centre
+    const x = this.body.x, pt = [0, 0, 0];
+    for (let k = 0; k < ids.length; k++) { pt[0] += x[ids[k] * 3] * weights[k]; pt[1] += x[ids[k] * 3 + 1] * weights[k]; pt[2] += x[ids[k] * 3 + 2] * weights[k]; }
+    if (!this.grabs.has(id) && this.grabs.size >= 4) return;
+    this.body.wake();
+    this.grabs.set(id, { ids, weights, target: pt.slice(), point: pt.slice(), lambda: new Float64Array(3), raw: pt.slice(), id, maxForce, stiffness: 320 });
+    this.syncGrabs();
+  }
+
+  // A bite at tray-space `center`: the jelly caves in there, and gems,
+  // glitter, star candies and foam beads inside the bite are eaten.
+  bite({ center, radius = 0.016, factor = 0.2, scale = 0.87 }) {
+    // the whole jelly gets smaller (a bite's worth is gone) and the bitten
+    // side caves in a little more
+    this.body.scaleRest(scale);
+    this.body.shrinkRegion(center, radius, factor);
+    const r2 = (radius * 0.95) ** 2, inside = (p) => (p[0] - center[0]) ** 2 + (p[1] - center[1]) ** 2 + (p[2] - center[2]) ** 2 < r2;
+    const eaten = [];
+    this.gems = this.gems.filter((g) => { if (g.fall || !inside(g.wpos)) return true; eaten.push({ shape: g.shape, rare: g.rare, tier: g.tier }); return false; });
+    const p = [0, 0, 0], bary = [0, 0, 0, 0];
+    const at = (list, i) => { bary[0] = list.bary[i * 4]; bary[1] = list.bary[i * 4 + 1]; bary[2] = list.bary[i * 4 + 2]; bary[3] = list.bary[i * 4 + 3]; return this.body.pointInTet(list.tets[i], bary, p); };
+    for (const kind of ["glitter", "stars"]) this.additives[kind] = this.additives[kind].filter((a) => { bary[0] = a.bary[0]; bary[1] = a.bary[1]; bary[2] = a.bary[2]; bary[3] = a.bary[3]; return !inside(this.body.pointInTet(a.tet, bary, p)); });
+    this.additiveVersion++;
+    if (this.beads) {
+      const gone = this.eatenBeads ||= new Uint8Array(this.beads.count);
+      for (let i = 0; i < this.beads.count; i++) if (!gone[i] && inside(at(this.beads, i))) gone[i] = 1;
+    }
+    this.events.push({ type: "bitten", center: center.slice(), eaten });
+  }
+
+  // ---------------------------------------------------------------- additives
+  // Glitter flakes spread through the jelly around a drop; star candies sit
+  // just under the surface. Both are material points (follow the jelly).
+  addAdditive({ kind, point }) {
+    const list = this.additives[kind];
+    if (!list) return;
+    const max = kind === "glitter" ? GLITTER_MAX : STARS_MAX, add = kind === "glitter" ? 90 : 9;
+    if (list.length >= max) { this.events.push({ type: "additiveFull", kind }); return; }
+    // material-space centre: the rest position of the cage node nearest the drop
+    const x = this.body.x, rest = this.type.cage.pos, L = this.type.locator;
+    let best = 0, bd = Infinity;
+    for (let i = 0; i < this.body.nodeCount; i++) {
+      const d = (x[i * 3] - point[0]) ** 2 + (x[i * 3 + 1] - point[1]) ** 2 + (x[i * 3 + 2] - point[2]) ** 2;
+      if (d < bd) { bd = d; best = i; }
+    }
+    const u0 = [rest[best * 3], rest[best * 3 + 1], rest[best * 3 + 2]];
+    const spread = kind === "glitter" ? 0.02 : 0.016;
+    let added = 0;
+    for (let tries = 0; added < add && list.length < max && tries < add * 30; tries++) {
+      const r = spread * Math.cbrt(Math.random()), th = Math.random() * Math.PI * 2, ph = Math.acos(2 * Math.random() - 1);
+      const u = [u0[0] + r * Math.sin(ph) * Math.cos(th), u0[1] + r * Math.cos(ph), u0[2] + r * Math.sin(ph) * Math.sin(th)];
+      if (kind === "glitter" ? !this.gemFits(u, 0.0008) : (!this.gemFits(u, 0.0014) || this.gemFits(u, 0.0042))) continue;
+      const e = L.locate(u[0], u[1], u[2]);
+      if (e < 0) continue;
+      list.push({ tet: e, bary: L.bary.slice(), variant: Math.floor(Math.random() * (kind === "glitter" ? 4 : 5)), spin: Math.random() });
+      added++;
+    }
+    this.additiveVersion++;
+    this.body.wake();
+    this.events.push({ type: "additive", kind, count: added, point: point.slice() });
+  }
+
+  // 5 floats per additive: x, y, z, kind (0 glitter, 1 star), variant + spin/10.
+  additiveCount() { return this.additives.glitter.length + this.additives.stars.length; }
+  additiveStates(out) {
+    const p = [0, 0, 0], bary = [0, 0, 0, 0];
+    let o = 0;
+    for (const [kind, list] of [[0, this.additives.glitter], [1, this.additives.stars]]) for (const a of list) {
+      bary[0] = a.bary[0]; bary[1] = a.bary[1]; bary[2] = a.bary[2]; bary[3] = a.bary[3];
+      this.body.pointInTet(a.tet, bary, p);
+      out[o] = p[0]; out[o + 1] = p[1]; out[o + 2] = p[2]; out[o + 3] = kind; out[o + 4] = a.variant + a.spin * 0.1;
+      o += 5;
+    }
+    return out;
   }
 
   // ---------------------------------------------------------------- simulation
@@ -297,6 +424,9 @@ export class JellyWorld {
         if (w[i] < 1e-12 * W) continue;
         const k = dose * w[i] / W / m[i];
         for (let c = 0; c < 3; c++) d[i * 3 + c] = Math.min(SIGMA_MAX, d[i * 3 + c] + p.sigma[c] * k);
+        // pearl / glow paints: their effect amount travels with the pigment
+        if (p.pearl) this.fx[i * 2] = Math.min(4, this.fx[i * 2] + p.pearl * k / PAINT_STRENGTH * 40);
+        if (p.glow) this.fx[i * 2 + 1] = Math.min(4, this.fx[i * 2 + 1] + p.glow * k / PAINT_STRENGTH * 40);
       }
     } else {
       // water: dilute locally (removes pigment, the jelly gets lighter)
@@ -304,6 +434,7 @@ export class JellyWorld {
       for (let i = 0; i < n; i++) {
         const f = Math.min(0.75, dose * w[i] / W / m[i]);
         for (let c = 0; c < 3; c++) d[i * 3 + c] *= 1 - f;
+        this.fx[i * 2] *= 1 - f; this.fx[i * 2 + 1] *= 1 - f;
       }
     }
     // The drop's impact: a little downward kick around the landing point.
@@ -341,6 +472,12 @@ export class JellyWorld {
         d[i * 3 + c] += flux / m[i]; d[j * 3 + c] -= flux / m[j];
         if (Math.abs(diff) > spread) spread = Math.abs(diff);
       }
+      for (let c = 0; c < 2; c++) {
+        const diff = this.fx[j * 2 + c] - this.fx[i * 2 + c];
+        if (diff === 0) continue;
+        const flux = diff * mij;
+        this.fx[i * 2 + c] += flux / m[i]; this.fx[j * 2 + c] -= flux / m[j];
+      }
     }
     this.dyeVersion++;
     if (spread < 0.25) this.dyeActive = false;
@@ -353,6 +490,17 @@ export class JellyWorld {
       let a = 0, b = 0, c = 0;
       for (let k = offsets[i]; k < offsets[i + 1]; k++) { const j = ids[k] * 3, w = weights[k]; a += d[j] * w; b += d[j + 1] * w; c += d[j + 2] * w; }
       out[i * 3] = a; out[i * 3 + 1] = b; out[i * 3 + 2] = c;
+    }
+    return out;
+  }
+
+  // Shell-vertex (pearl, glow) for rendering.
+  computeShellFx() {
+    const { vertexCount, offsets, ids, weights } = this.type.stencils, f = this.fx, out = this.shellFx;
+    for (let i = 0; i < vertexCount; i++) {
+      let a = 0, b = 0;
+      for (let k = offsets[i]; k < offsets[i + 1]; k++) { const j = ids[k] * 2, w = weights[k]; a += f[j] * w; b += f[j + 1] * w; }
+      out[i * 2] = a; out[i * 2 + 1] = b;
     }
     return out;
   }
@@ -386,34 +534,38 @@ export class JellyWorld {
     return false;
   }
 
-  makeGem(shape, color, radius, u) {
-    return { id: this.nextGemId++, shape, color, radius, u, wpos: [0, 0, 0], prev: [0, 0, 0], vel: null, quat: [0, 0, 0, 1], qLocal: randomQuat(), glow: 0, rattle: 0, contacts: new Set(), fresh: true };
+  get rareCount() { let n = 0; for (const g of this.gems) if (g.rare) n++; return n; }
+
+  makeGem(shape, color, radius, u, rare = null) {
+    return { id: this.nextGemId++, shape, color, radius, u, rare: Boolean(rare), tier: rare ? rare.tier : 0, wpos: [0, 0, 0], prev: [0, 0, 0], vel: null, quat: [0, 0, 0, 1], qLocal: randomQuat(), glow: 0, rattle: 0, contacts: new Set(), fresh: true };
   }
 
-  addGemAtSurface({ a, b, c, bary, shape, color, radius = 0.0034 }) {
+  addGemAtSurface({ a, b, c, bary, shape, color, radius = 0.0034, rare = null }) {
     if (this.gems.length >= this.gemCapacity) { this.events.push({ type: "gemFull" }); return; }
+    if (rare && this.rareCount >= RARE_CAPACITY) { this.events.push({ type: "rareFull" }); return; }
     const u = [0, 0, 0], st = this.type.stencils, pos = this.type.cage.pos;
     for (const [v, w] of [[a, bary[0]], [b, bary[1]], [c, bary[2]]]) {
       for (let k = st.offsets[v]; k < st.offsets[v + 1]; k++) { const j = st.ids[k] * 3, ww = st.weights[k] * w; u[0] += pos[j] * ww; u[1] += pos[j + 1] * ww; u[2] += pos[j + 2] * ww; }
     }
     const inside = this.pullInside(u, radius);
     if (!inside) { this.events.push({ type: "gemFull" }); return; }
-    const gem = this.makeGem(shape, color, radius, inside);
+    const gem = this.makeGem(rare ? rare.index : shape, color, radius, inside, rare);
     this.gems.push(gem);
-    this.events.push({ type: "gemIn", gem: gem.id });
+    this.events.push({ type: "gemIn", gem: gem.id, rare: Boolean(rare) });
   }
 
   // 한 줌 쏟기: gems appear in the air above the jelly, fall, and stick in.
   // Each reserves its final spot (undeformed coords) up front, so capacity and
   // spacing hold; while falling it flies free in tray space.
-  scatterGems({ count = 5, shape = -1, color = -1, radius = 0.0034, shapes = 9, colors = 6 }) {
+  scatterGems({ count = 5, shape = -1, color = -1, radius = 0.0034, shapes = 9, colors = 6, rare = null }) {
     const bnd = this.type.locator.bounds;
     let added = 0;
+    if (rare && this.rareCount >= RARE_CAPACITY) { this.events.push({ type: "rareFull" }); return; }
     for (let n = 0; n < count && this.gems.length < this.gemCapacity; n++) {
       for (let tries = 0; tries < 60; tries++) {
         const u = [bnd[0] + Math.random() * (bnd[3] - bnd[0]), bnd[1] + (0.45 + 0.45 * Math.random()) * (bnd[4] - bnd[1]), bnd[2] + Math.random() * (bnd[5] - bnd[2])];
         if (!this.gemFits(u, radius) || this.overlapsGem(u, radius)) continue;
-        const gem = this.makeGem(shape >= 0 ? shape : Math.floor(Math.random() * shapes), color >= 0 ? color : Math.floor(Math.random() * colors), radius, u);
+        const gem = this.makeGem(rare ? rare.index : shape >= 0 ? shape : Math.floor(Math.random() * shapes), color >= 0 ? color : Math.floor(Math.random() * colors), radius, u, rare);
         const e = this.type.locator.locate(u[0], u[1], u[2]), T = [0, 0, 0];
         this.body.pointInTet(e, this.type.locator.bary, T);
         const top = this.body.bounds[4];
@@ -550,7 +702,7 @@ export class JellyWorld {
     const n = this.gems.length;
     for (let i = 0; i < n; i++) {
       const g = this.gems[i], o = i * 10;
-      out[o] = g.shape; out[o + 1] = g.color;
+      out[o] = g.shape; out[o + 1] = g.rare ? 100 + g.tier : g.color;   // ≥ 100: rare gem, tier = value − 100
       out[o + 2] = g.wpos[0]; out[o + 3] = g.wpos[1]; out[o + 4] = g.wpos[2];
       out[o + 5] = g.quat[0]; out[o + 6] = g.quat[1]; out[o + 7] = g.quat[2]; out[o + 8] = g.quat[3];
       out[o + 9] = g.glow;
