@@ -19,17 +19,16 @@
 // API: see the class doc below.
 import * as THREE from "three/webgpu";
 import { float, length, smoothstep, uniform, uv, vec3 } from "three/tsl";
-import { BONE_STRIDE, createCandyMaterial, createFurMaterial } from "./rabbit-fur.js";
+import { BONE_STRIDE, createBlobMaterial, createCandyMaterial, createFurMaterial } from "./rabbit-fur.js";
 
 // ---------------------------------------------------------------------------
 // Tunables
 // ---------------------------------------------------------------------------
 
 const SHELLS = Object.freeze({ high: 14, medium: 7, low: 0 });
-const HOLD_MAX_R = 0.057;      // paw targets stay within this of the tray centre (spec: 0.06)
-const HOLD_Y = 0.052;          // hold height of the paws / jelly centre (spec: 0.05–0.12)
+const HOLD_MAX_R = 0.057;      // carried jelly centre stays within this of the tray centre (spec: 0.06)
+const HOLD_Y = 0.052;          // carry height of the jelly's centre of mass (spec: 0.05–0.12)
 const BITE_SHRINK = 0.87;      // the app shrinks the jelly ~13 % (linear) per bite
-const HOLD_SQUEEZE = 0.92;     // paws hold the jelly's sides a little inside (a hug)
 
 const T_ARRIVE = 1.2, T_REACH = 0.55, T_LIFT = 0.6, T_BITE = 0.72, T_FINISH = 0.45, T_REACT = 1.25, T_LEAVE = 1.05;
 const BITE_CONTACT = 0.26, BITE_CHEW = 0.4;
@@ -65,7 +64,9 @@ const COLORS = {
   tooth: display("#fbf6ee"),
   arc: display("#3a2523"),
   blush: display("#f39aa6"),
+  tongue: display("#ee8296"),
   heart: display("#ff7aa2"),
+  sparkle: display("#fff1b8"),
 };
 
 // ---------------------------------------------------------------------------
@@ -282,6 +283,7 @@ function rigLayout() {
   add("muzzle", "head", v3(0, 0.0425, 0.019));
   add("jaw", "head", v3(0, 0.042, 0.012));
   add("mouth", "head", v3(0, 0.0428, 0.0236));
+  add("tongue", "head", v3(0, 0.0412, 0.0232));
   add("nose", "head", v3(0, 0.0447, 0.0232));
   for (const [s, side] of [[1, "L"], [-1, "R"]]) {
     const e = eye(s);
@@ -441,6 +443,12 @@ function buildGeometry(rig) {
     }), () => ({ b0: B("mouth"), len: 0, gloss: 0.25, color: C.tooth }));
   }
 
+  // Tongue for the "bleh" (collapsed inside the mouth until shown).
+  pb.add(sphereGeometry(16, 10, (x, y, z) => {
+    const tip = Math.max(0, z);
+    return v3(x * 0.0024 * (1 - 0.2 * tip), 0.0398 + y * 0.0009 - 0.0012 * tip, 0.0246 + z * 0.0033);
+  }), () => ({ b0: B("tongue"), len: 0, gloss: 0.4, color: C.tongue }));
+
   // Bead eyes (glossy black) and the happy ^ ^ arcs (hidden until happy).
   for (const s of [1, -1]) {
     const e = rig.eye(s);
@@ -548,6 +556,22 @@ function heartGeometry() {
   return g;
 }
 
+// Four-point twinkle star for the special celebration.
+function sparkleGeometry() {
+  const s = new THREE.Shape();
+  const pts = 8;
+  for (let i = 0; i <= pts; i += 1) {
+    const a = (i / pts) * Math.PI * 2 + Math.PI / 2;
+    const r = i % 2 === 0 ? 1 : 0.28;
+    if (i === 0) s.moveTo(Math.cos(a) * r, Math.sin(a) * r); else s.lineTo(Math.cos(a) * r, Math.sin(a) * r);
+  }
+  const g = new THREE.ExtrudeGeometry(s, { depth: 0.12, bevelEnabled: true, bevelThickness: 0.14, bevelSize: 0.1, bevelSegments: 2 });
+  g.deleteAttribute("uv");
+  g.center();
+  g.computeVertexNormals();
+  return g;
+}
+
 // ---------------------------------------------------------------------------
 // Ear spring (2 segments × pitch/roll), driven by head acceleration.
 // ---------------------------------------------------------------------------
@@ -577,25 +601,69 @@ class EarSpring {
 // Rabbit
 // ---------------------------------------------------------------------------
 
+const SPIT_AT = 0.25;            // s into the "spit" segment when the chunk leaves the mouth
+const SPIT_TURN = 0.62;          // rad the head turns to the bunny's right before spitting
+const CHUNK_R = 0.0055;          // spat-out chunk radius (m)
+
+// Segment timeline per outcome. Every segment: { name, t0, t1, dur, ...extra }.
+function buildTimeline(outcome, bites, mood) {
+  const segs = [];
+  let t = 0;
+  const add = (name, dur, extra = {}) => { const seg = { name, t0: t, t1: t + dur, dur, ...extra }; segs.push(seg); t += dur; return seg; };
+  add("arrive", T_ARRIVE);
+  const reach = add("grab", T_REACH);
+  add("lift", T_LIFT);
+  const T = { grab: reach.t1 };
+  if (outcome === "eat") {
+    for (let i = 0; i < bites; i += 1) add("bite", T_BITE, { index: i, count: bites, chew: true });
+    T.holdEnd = t;
+    add("finish", T_FINISH);
+    add("react", T_REACT + (mood === "special" ? 0.6 : 0));
+  } else if (outcome === "refuse") {
+    add("bite", BITE_CHEW, { index: 0, count: 1, chew: false });
+    add("ponder", 0.7);
+    T.holdEnd = add("putDown", 0.6).t1;
+    add("refuse", 1.2);
+  } else {
+    add("bite", BITE_CHEW, { index: 0, count: 1, chew: false });
+    add("chew", 0.4);
+    add("scrunch", 0.35);
+    T.holdEnd = add("putDown", 0.6).t1;
+    add("spit", 0.85);
+    add("grumpy", 1.1);
+  }
+  const leave = add("leave", T_LEAVE);
+  T.leave = leave.t0;
+  T.done = leave.t1;
+  return { segs, T };
+}
+
 /**
- * Plush bunny that eats the jelly.
+ * Plush bunny that comes to taste the jelly.
  *
  *   const rabbit = new Rabbit(tray, { quality: "high" });   // hidden until play()
  *   rabbit.play({ position: [x, 0, z], faceTo: [x, y, z], jelly: { center, width, height },
- *                 bites: 4, mood: "happy" | "ok" | "sad", onEvent(type, data) {} });
- *   // every frame:
- *   const { paws, mouth } = rabbit.update(dt, { center, bounds } | null);
- *   //   paws: null | [[x,y,z] left paw, [x,y,z] right paw]  (tray space; rabbit's left/right)
- *   //   mouth: [x,y,z]  (tray space)
+ *                 outcome: "eat" | "refuse" | "spit", bites: 4,
+ *                 mood: "happy" | "ok" | "sad" | "special", jellyColor: "#rrggbb",
+ *                 onEvent(type, data) {} });
+ *   // every frame (jelly = the app's current jelly, or null):
+ *   const { hold, paws, mouth, phase } = rabbit.update(dt, { center, bounds });
+ *   //   hold:  null | [x,y,z]  target for the jelly's centre of mass while carried (tray space)
+ *   //   paws:  null | [[x,y,z] left, [x,y,z] right]  where the paws are (cosmetic; they hug
+ *   //          the jelly's actual sides from `bounds`)
+ *   //   mouth: [x,y,z]
  *   rabbit.skip();      // fast-forward to leaving, emitting the remaining key events in order
  *   rabbit.setQuality("high" | "medium" | "low");  rabbit.busy;  rabbit.dispose();
+ *   await rabbit.precompile(renderer, camera, scene);   // optional, avoids a first-play hitch
  *
- * Events (type, data), times for bites = 4:
- *   arrive 0.00 {position}            hop 0.38/0.88 {phase:"arrive", index}
- *   grab   1.75 {paws}                lift 1.75 {hold}
- *   bite   2.61 + 0.72·i {index, count, mouth}   chew 2.75 + 0.72·i {index, count, duration}
- *   finish 5.23 {}                    react 5.68 {mood}      leave 6.93 {}
- *   hop (leave) …                     done 7.98 {}
+ * Events (type, data); see the timeline in buildTimeline(). For outcome "eat", bites = 4:
+ *   arrive 0 · hop 0.38/0.88 · grab 1.75 {paws, hold} · lift 1.75 {hold}
+ *   bite 2.61+0.72i {index,count,mouth} · chew 2.75+0.72i {index,count,duration}
+ *   finish 5.23 · react 5.68 {mood} · leave 6.93 (+0.6 if special) · hop ×2 · done 7.98 (8.58)
+ * "refuse": … lift · bite 2.61 · chew 2.75 · taste 3.45 · putDown 3.45 {to} · release 4.05
+ *           · refuse 4.05 {mood} · leave 5.25 · done 6.30
+ * "spit":   … lift · bite 2.61 · chew 2.75 · putDown 3.50 {to} · release 4.10
+ *           · spit 4.35 {from, velocity} · react 4.95 {mood:"grumpy"} · leave 6.05 · done 7.10
  */
 export class Rabbit {
   constructor(parent, { quality = "high" } = {}) {
@@ -615,12 +683,11 @@ export class Rabbit {
     this.root.add(this.mesh);
 
     // Soft contact shadow (one transparent quad; the stage has no shadow maps).
-    this.shadowOpacity = uniform(0.42);
+    this.shadowOpacity = uniform(0.5);
     const shadowMaterial = new THREE.MeshBasicNodeMaterial({ transparent: true, depthWrite: false });
     const r = length(uv().sub(0.5)).mul(2);
     shadowMaterial.colorNode = vec3(0.24, 0.19, 0.18);
     shadowMaterial.opacityNode = float(1).sub(smoothstep(0.0, 1.0, r)).pow(1.6).mul(this.shadowOpacity);
-    shadowMaterial.fog = true;
     const quad = new THREE.PlaneGeometry(1, 1);
     quad.rotateX(-Math.PI / 2);
     this.shadow = new THREE.Mesh(quad, shadowMaterial);
@@ -629,12 +696,22 @@ export class Rabbit {
     this.shadow.frustumCulled = false;
     this.root.add(this.shadow);
 
-    // Hearts for the happy reaction (one instanced draw).
-    this.hearts = new THREE.InstancedMesh(heartGeometry(), createCandyMaterial(this.fur, COLORS.heart), 3);
+    // Hearts (happy 3, special 6) and twinkles (special): one instanced draw each, only while shown.
+    this.hearts = new THREE.InstancedMesh(heartGeometry(), createCandyMaterial(this.fur, COLORS.heart), 6);
     this.hearts.name = "RabbitHearts";
-    this.hearts.frustumCulled = false;
-    this.hearts.visible = false;
-    this.root.add(this.hearts);
+    this.sparkles = new THREE.InstancedMesh(sparkleGeometry(), createCandyMaterial(this.fur, COLORS.sparkle, { glow: 0.9 }), 10);
+    this.sparkles.name = "RabbitSparkles";
+    for (const m of [this.hearts, this.sparkles]) { m.frustumCulled = false; m.visible = false; this.root.add(m); }
+
+    // Spat-out chunk: tray space (it stays where it lands while the bunny leaves).
+    this.blob = createBlobMaterial(this.fur);
+    this.chunk = new THREE.Mesh(new THREE.SphereGeometry(1, 20, 14), this.blob.material);
+    this.chunk.name = "RabbitSpitChunk";
+    this.chunk.visible = false;
+    this.chunk.frustumCulled = false;
+    this.chunk.renderOrder = 2;
+    parent.add(this.chunk);
+    this.chunkSim = null;
 
     this.ears = [new EarSpring(), new EarSpring()];
     this.state = null;
@@ -657,15 +734,19 @@ export class Rabbit {
 
   get busy() { return this.state !== null; }
 
-  /** Optional: compile the bunny's pipelines ahead of the first play() (avoids a hitch). */
+  /** Optional: compile every pipeline the bunny can use ahead of the first play() (avoids a hitch). */
   async precompile(renderer, camera, scene) {
-    const was = [this.root.visible, this.hearts.visible];
-    this.root.visible = true; this.hearts.visible = true;
-    try { await renderer.compileAsync(this.root, camera, scene); } finally { [this.root.visible, this.hearts.visible] = was; }
+    const parts = [this.root, this.hearts, this.sparkles, this.chunk];
+    const was = parts.map((o) => o.visible);
+    for (const o of parts) o.visible = true;
+    try {
+      await renderer.compileAsync(this.root, camera, scene);
+      await renderer.compileAsync(this.chunk, camera, scene);
+    } finally { parts.forEach((o, i) => { o.visible = was[i]; }); }
   }
 
   // -------------------------------------------------------------------------
-  play({ position = [0, 0, -0.105], faceTo = [0, 0.02, 0], jelly = null, bites = 4, mood = "happy", onEvent = null } = {}) {
+  play({ position = [0, 0, -0.111], faceTo = [0, 0.02, 0], jelly = null, bites = 4, mood = "happy", outcome = "eat", jellyColor = "#ff8fb1", onEvent = null } = {}) {
     if (this.state) this._finish();
     const P = v3(position[0], 0, position[2]);
     const face = v3(faceTo[0], 0, faceTo[2]);
@@ -679,22 +760,14 @@ export class Rabbit {
     outward.normalize();
     const side = v3(outward.z, 0, -outward.x);
     const j = jelly || { center: [0, 0.018, 0], width: 0.072, height: 0.036 };
-    bites = Math.max(1, Math.min(8, Math.round(bites)));
-    mood = mood === "ok" || mood === "sad" ? mood : "happy";
-
-    const t = {};
-    t.arrive = 0;
-    t.reach = T_ARRIVE;
-    t.grab = t.reach + T_REACH;
-    t.lift = t.grab;
-    t.bites = t.lift + T_LIFT;
-    t.finish = t.bites + bites * T_BITE;
-    t.react = t.finish + T_FINISH;
-    t.leave = t.react + T_REACT;
-    t.done = t.leave + T_LEAVE;
+    outcome = outcome === "refuse" || outcome === "spit" ? outcome : "eat";
+    mood = mood === "ok" || mood === "sad" || mood === "special" ? mood : "happy";
+    bites = outcome === "eat" ? Math.max(1, Math.min(8, Math.round(bites))) : 1;
+    try { this.blob.color.value.set(jellyColor); } catch { this.blob.color.value.set("#ff8fb1"); }
+    const { segs, T } = buildTimeline(outcome, bites, mood);
 
     this.state = {
-      t: 0, times: t, bites, mood, onEvent,
+      t: 0, segs, T, outcome, bites, mood, onEvent,
       seat: P, F, X, yaw: Math.atan2(F.x, F.z), outward, side,
       start: P.clone().addScaledVector(outward, 0.072).addScaledVector(side, 0.03),
       mid: P.clone().addScaledVector(outward, 0.035).addScaledVector(side, 0.012),
@@ -703,31 +776,30 @@ export class Rabbit {
       faceTo: v3(faceTo[0], faceTo[1] ?? 0.02, faceTo[2]),
       jelly0: { center: v3(...j.center), width: j.width ?? 0.072, height: j.height ?? 0.036 },
       jellyNow: null,
-      plan: null,
-      emitted: new Set(),
-      events: [],
-      bitesDone: 0,
-      sizeScale: 1, refDepth: 0,
+      liftFrom: null, holdPoint: null, tall: 0,
+      emitted: new Set(), events: [],
+      bitesDone: 0, sizeScale: 1,
       skipped: false, blendFrom: null, blendT: 1,
       blink: { next: 1.4 + Math.random() * 1.5 },
       twitch: { next: 0.6 },
       prevHead: null, prevVel: v3(), accel: v3(),
-      lastPose: null,
+      lastPose: null, pawsTray: null,
     };
     this._buildEvents();
     for (const e of this.ears) e.reset();
     this.root.visible = true;
     this.hearts.visible = false;
+    this.sparkles.visible = false;
     this.update(0, null);
   }
 
   skip() {
     const s = this.state;
-    if (!s || s.t >= s.times.leave) return;
-    if (!s.plan) this._makePlan();
+    if (!s || s.t >= s.T.leave) return;
+    this._ensureGrab();
     // Emit everything that would have happened before leaving, in order.
     for (const e of s.events) {
-      if (e.t < s.times.leave && !s.emitted.has(e.id)) {
+      if (e.t < s.T.leave && !s.emitted.has(e.id)) {
         s.emitted.add(e.id);
         if (e.type === "hop") continue; // cosmetic, not a key event
         const data = e.make(true);
@@ -739,16 +811,16 @@ export class Rabbit {
     s.skipped = true;
     s.blendFrom = s.lastPose ? clonePose(s.lastPose) : null;
     s.blendT = 0;
-    s.t = s.times.leave;
+    s.t = s.T.leave;
   }
 
   dispose() {
     this.state = null;
     this.root.removeFromParent();
+    this.chunk.removeFromParent();
     this.geometry.dispose();
     this.fur.material.dispose();
-    this.shadow.geometry.dispose(); this.shadow.material.dispose();
-    this.hearts.geometry.dispose(); this.hearts.material.dispose();
+    for (const m of [this.shadow, this.hearts, this.sparkles, this.chunk]) { m.geometry.dispose(); m.material.dispose(); }
   }
 
   // -------------------------------------------------------------------------
@@ -756,145 +828,199 @@ export class Rabbit {
     try { this.state?.onEvent?.(type, data); } catch (error) { console.error(error); }
   }
 
+  _seg(t) {
+    const segs = this.state.segs;
+    for (const seg of segs) if (t < seg.t1) return seg;
+    return segs[segs.length - 1];
+  }
+
   _buildEvents() {
-    const s = this.state, t = s.times;
+    const s = this.state, T = s.T;
     const ev = (id, time, type, make) => s.events.push({ id, t: time, type, make });
     ev("arrive", 0, "arrive", () => ({ position: toArr(s.seat) }));
     ev("hop-a0", HOP.crouch + HOP.air, "hop", () => ({ phase: "arrive", index: 0 }));
     ev("hop-a1", 0.5 + HOP.crouch + HOP.air, "hop", () => ({ phase: "arrive", index: 1 }));
-    ev("grab", t.grab, "grab", () => ({ paws: this._pawTargets(t.grab).map(toArr) }));
-    ev("lift", t.lift + 1e-4, "lift", () => ({ hold: toArr(s.plan.hold) }));
-    for (let i = 0; i < s.bites; i += 1) {
-      const t0 = t.bites + i * T_BITE;
-      ev(`bite${i}`, t0 + BITE_CONTACT, "bite", (skipped) => ({ index: i, count: s.bites, mouth: skipped ? toArr(this._biteTarget(i)) : this._mouthTray() }));
-      ev(`chew${i}`, t0 + BITE_CHEW, "chew", () => ({ index: i, count: s.bites, duration: T_BITE - BITE_CHEW }));
+    ev("grab", T.grab, "grab", () => ({ paws: this._jellySides(T.grab).map(toArr), hold: toArr(s.liftFrom) }));
+    ev("lift", T.grab + 1e-4, "lift", () => ({ hold: toArr(s.holdPoint) }));
+    for (const seg of s.segs) {
+      if (seg.name === "bite") {
+        const i = seg.index;
+        ev(`bite${i}`, seg.t0 + BITE_CONTACT, "bite", (skipped) => ({ index: i, count: seg.count, mouth: skipped ? toArr(this._biteTarget(i)) : this._mouthTray() }));
+        if (seg.chew) ev(`chew${i}`, seg.t0 + BITE_CHEW, "chew", () => ({ index: i, count: seg.count, duration: T_BITE - BITE_CHEW }));
+      } else if (seg.name === "ponder" || seg.name === "chew") {
+        ev("chew0", seg.t0, "chew", () => ({ index: 0, count: 1, duration: seg.dur }));
+        if (seg.name === "ponder") ev("taste", seg.t1, "taste", () => ({}));
+      } else if (seg.name === "putDown") {
+        ev("putDown", seg.t0, "putDown", () => ({ to: toArr(s.liftFrom) }));
+        ev("release", seg.t1, "release", () => ({ at: toArr(s.liftFrom) }));
+      } else if (seg.name === "refuse") {
+        ev("refuse", seg.t0, "refuse", () => ({ mood: s.mood }));
+      } else if (seg.name === "spit") {
+        ev("spit", seg.t0 + SPIT_AT, "spit", () => this._launchChunk());
+      } else if (seg.name === "grumpy") {
+        ev("react", seg.t0, "react", () => ({ mood: "grumpy" }));
+      } else if (seg.name === "finish") {
+        ev("finish", seg.t0, "finish", () => ({}));
+      } else if (seg.name === "react") {
+        ev("react", seg.t0, "react", () => ({ mood: s.mood }));
+      } else if (seg.name === "leave") {
+        ev("leave", seg.t0, "leave", () => ({}));
+        ev("hop-l0", seg.t0 + 0.05 + HOP.crouch + HOP.air, "hop", () => ({ phase: "leave", index: 0 }));
+        ev("hop-l1", seg.t0 + 0.55 + HOP.crouch + HOP.air, "hop", () => ({ phase: "leave", index: 1 }));
+        ev("done", seg.t1, "done", () => ({}));
+      }
     }
-    ev("finish", t.finish, "finish", () => ({}));
-    ev("react", t.react, "react", () => ({ mood: s.mood }));
-    ev("leave", t.leave, "leave", () => ({}));
-    ev("hop-l0", t.leave + 0.05 + HOP.crouch + HOP.air, "hop", () => ({ phase: "leave", index: 0 }));
-    ev("hop-l1", t.leave + 0.55 + HOP.crouch + HOP.air, "hop", () => ({ phase: "leave", index: 1 }));
-    ev("done", t.done, "done", () => ({}));
-    s.events.sort((a, b) => a.t - b.t);
+    s.events.sort((a, b) => a.t - b.t); // stable: same-time events keep this order
   }
 
-  // Jelly measurements in the bunny's frame (from bounds if available).
-  _measureJelly() {
-    const s = this.state;
-    const j = s.jellyNow;
-    const F = s.F, X = s.X;
+  // Jelly in the bunny's frame: centre (bounds centre), half extents along the
+  // bunny's left (hw), facing (hd) and up (hh). Elliptic support of the AABB, so
+  // round shapes seen diagonally are not overestimated. Falls back to the plan.
+  _measureJelly(t = this.state.t) {
+    const s = this.state, j = s.jellyNow, X = s.X, F = s.F;
     if (j && j.bounds) {
       const b = j.bounds;
       const ex = (b[3] - b[0]) / 2, ey = (b[4] - b[1]) / 2, ez = (b[5] - b[2]) / 2;
       return {
         center: v3((b[0] + b[3]) / 2, (b[1] + b[4]) / 2, (b[2] + b[5]) / 2),
-        hw: Math.abs(X.x) * ex + Math.abs(X.z) * ez,
-        hd: Math.abs(F.x) * ex + Math.abs(F.z) * ez,
-        hh: ey,
+        hw: Math.hypot(X.x * ex, X.z * ez), hd: Math.hypot(F.x * ex, F.z * ez), hh: ey,
       };
     }
-    if (j && j.center) {
-      const w = s.jelly0.width / 2 * s.sizeScale;
-      return { center: v3(...j.center), hw: w, hd: w, hh: s.jelly0.height / 2 * s.sizeScale };
-    }
-    const w = s.jelly0.width / 2;
-    return { center: s.jelly0.center.clone(), hw: w, hd: w, hh: s.jelly0.height / 2 };
-  }
-
-  _makePlan() {
-    const s = this.state;
-    const m = this._measureJelly();
-    const X = s.X;
-    // Paws touch the jelly's left/right sides (relative to the bunny's facing) at mid-height.
-    const contactL = m.center.clone().addScaledVector(X, m.hw);
-    const contactR = m.center.clone().addScaledVector(X, -m.hw);
-    s.plan = { contactL, contactR, hw: m.hw, hd: m.hd, hh: m.hh, hold: this._holdCenter(1) };
-  }
-
-  // Hold centre (tray) for jelly scale k: on the facing line, as close to the
-  // bunny as allowed while BOTH paws stay within HOLD_MAX_R of the tray centre.
-  _holdCenter(k) {
-    const s = this.state, P = s.seat, F = s.F, X = s.X, p = s.plan;
-    const a = (p ? p.hw : s.jelly0.width / 2) * HOLD_SQUEEZE * k;
-    const pf = P.x * F.x + P.z * F.z, px = Math.abs(P.x * X.x + P.z * X.z);
-    const c = P.x * P.x + P.z * P.z + a * a + 2 * a * px - HOLD_MAX_R * HOLD_MAX_R;
-    const disc = pf * pf - c;
-    const d = Math.max(0.03, disc >= 0 ? -pf - Math.sqrt(disc) : -pf);
-    return P.clone().addScaledVector(F, d).setY(HOLD_Y);
-  }
-
-  // Planned paw targets (tray space) at time t: [left, right].
-  _pawTargets(t) {
-    const s = this.state, p = s.plan, T = s.times;
-    if (!p) return null;
-    const X = s.X, F = s.F;
     const k = s.sizeScale;
-    const hold = this._holdCenter(k);
-    const a = p.hw * HOLD_SQUEEZE * k;
-    const holdL = hold.clone().addScaledVector(X, a);
-    const holdR = hold.clone().addScaledVector(X, -a);
-    if (t <= T.lift) return [p.contactL.clone(), p.contactR.clone()];
-    const u = (t - T.lift) / T_LIFT;
-    let out;
-    if (u < 1) {
-      const hz = easeInOut(u), vy = easeOut(Math.min(1, u * 1.3));
-      const bump = 0.0025 * Math.sin(Math.PI * clamp01(u * 1.1));
-      out = [[p.contactL, holdL], [p.contactR, holdR]].map(([from, to]) => {
-        const q = from.clone().lerp(to, hz);
-        q.y = lerp(from.y, to.y, vy) + bump;
-        return q;
-      });
-    } else {
-      // Biting: tug toward the mouth at contact, pull away while tearing.
-      let tug = 0, lift = 0;
-      if (t < T.finish) {
-        const bt = (t - T.bites) % T_BITE;
-        tug = -0.003 * pulse(bt, 0.12, BITE_CONTACT + 0.03) + 0.0025 * pulse(bt, BITE_CONTACT, BITE_CHEW + 0.08);
-        lift = 0.002 * pulse(bt, BITE_CONTACT, BITE_CHEW + 0.12);
-      }
-      out = [holdL, holdR].map((q) => q.addScaledVector(F, tug).setY(q.y + lift));
+    const hold = this._holdAt(t);
+    const center = hold || (j && j.center ? v3(...j.center) : (s.liftFrom || s.jelly0.center).clone());
+    return { center, hw: (s.jelly0.width / 2) * k, hd: (s.jelly0.width / 2) * k, hh: (s.jelly0.height / 2) * k };
+  }
+
+  // Grab bookkeeping: where the jelly is lifted from and where it is held.
+  _ensureGrab() {
+    const s = this.state;
+    if (s.liftFrom) return;
+    const j = s.jellyNow;
+    s.liftFrom = j && j.center ? v3(...j.center) : j && j.bounds ? this._measureJelly().center : s.jelly0.center.clone();
+    s.holdPoint = this._holdCenter();
+    s.tall = clamp01((this._measureJelly().hh - 0.019) / 0.011);
+  }
+
+  // Hold point (tray): on the facing line, as close to the bunny as allowed
+  // while staying within HOLD_MAX_R of the tray centre, at HOLD_Y.
+  _holdCenter() {
+    const s = this.state, P = s.seat, F = s.F;
+    const pf = P.x * F.x + P.z * F.z;
+    const disc = pf * pf - (P.x * P.x + P.z * P.z - HOLD_MAX_R * HOLD_MAX_R);
+    const d = Math.max(0.03, disc >= 0 ? -pf - Math.sqrt(disc) : -pf);
+    const h = P.clone().addScaledVector(F, d).setY(HOLD_Y);
+    const r = Math.hypot(h.x, h.z);
+    if (r > HOLD_MAX_R) { h.x *= HOLD_MAX_R / r; h.z *= HOLD_MAX_R / r; }
+    return h;
+  }
+
+  // Carry target for the jelly's centre of mass at time t (tray), or null.
+  _holdAt(t) {
+    const s = this.state, T = s.T;
+    if (!s.liftFrom || s.skipped || t < T.grab || t >= T.holdEnd) return null;
+    const seg = this._seg(t), H = s.holdPoint, from = s.liftFrom;
+    const u = (t - seg.t0) / seg.dur;
+    const out = H.clone();
+    if (seg.name === "grab") return from.clone();
+    if (seg.name === "lift") {
+      out.copy(from).lerp(H, easeInOut(u));
+      out.y = lerp(from.y, H.y, easeOut(Math.min(1, u * 1.3))) + 0.0025 * Math.sin(Math.PI * u);
+      return out;
     }
-    // Hard guarantee for the app: within HOLD_MAX_R horizontally, y in [0.05, 0.12].
-    for (const q of out) {
-      const r = Math.hypot(q.x, q.z);
-      if (r > HOLD_MAX_R + 1e-6 && t >= T.lift + T_LIFT) { q.x *= HOLD_MAX_R / r; q.z *= HOLD_MAX_R / r; }
-      if (t >= T.lift + T_LIFT) q.y = Math.min(0.12, Math.max(0.05, q.y));
+    if (seg.name === "putDown") {
+      out.copy(H).lerp(from, easeInOut(sstep(0, 0.75, u)));
+      out.y = lerp(H.y, from.y, easeInOut(sstep(0.2, 1, u)));
+      return out;
     }
+    if (seg.name === "bite") {
+      const bt = t - seg.t0;
+      out.addScaledVector(s.F, -0.003 * pulse(bt, 0.12, BITE_CONTACT + 0.03) + 0.0025 * pulse(bt, BITE_CONTACT, BITE_CHEW + 0.08));
+      out.y += 0.002 * pulse(bt, BITE_CONTACT, BITE_CHEW + 0.12);
+    } else if (seg.name === "ponder") {
+      out.addScaledVector(s.X, 0.003 * Math.sin(u * Math.PI * 2) * sstep(0, 0.2, u));
+      out.y += 0.002 * Math.sin(u * Math.PI);
+    } else if (seg.name === "scrunch") {
+      out.addScaledVector(s.F, 0.003 * sstep(0, 0.5, u)); // holds it a bit away, unsure
+    }
+    const r = Math.hypot(out.x, out.z);
+    if (r > HOLD_MAX_R) { out.x *= HOLD_MAX_R / r; out.z *= HOLD_MAX_R / r; }
+    out.y = Math.min(0.12, Math.max(0.05, out.y));
     return out;
+  }
+
+  // Where the paws hug the jelly (tray): its actual left/right sides, slightly
+  // below the middle and toward the bunny.
+  _jellySides(t = this.state.t) {
+    const s = this.state, m = this._measureJelly(t);
+    const y = Math.max(0.008, m.center.y - 0.12 * m.hh);
+    const a = m.hw + 0.0025, back = -0.1 * m.hd;
+    return [1, -1].map((k) => m.center.clone().addScaledVector(s.X, k * a).addScaledVector(s.F, back).setY(y));
   }
 
   // Mouth target for bite i (tray): the near top edge of the jelly, a little inside.
   _biteTarget(i) {
-    const s = this.state, p = s.plan;
+    const s = this.state;
     const m = s.jellyNow && s.jellyNow.bounds ? this._measureJelly() : null;
     const k = Math.pow(BITE_SHRINK, i);
-    const c = m ? m.center : this._holdCenter(k);
-    const hd = m ? m.hd : p.hd * k, hh = m ? m.hh : p.hh * k;
+    const c = m ? m.center : (s.holdPoint || this._holdCenter());
+    const hd = m ? m.hd : (s.jelly0.width / 2) * k, hh = m ? m.hh : (s.jelly0.height / 2) * k;
     return c.clone().addScaledVector(s.F, -hd * 0.86 + 0.0035).setY(c.y + hh * 0.42);
+  }
+
+  // Spit: launch the chunk from the mouth, to the bunny's right and forward.
+  _launchChunk() {
+    const s = this.state;
+    const from = v3(...this._mouthTray());
+    const a = s.yaw - SPIT_TURN;
+    const velocity = v3(Math.sin(a) * 0.6, 0.32, Math.cos(a) * 0.6); // lands ~6 cm from the tray centre
+    this.chunkSim = { p: from.clone(), v: velocity.clone(), phase: "fly", t: 0, ts: 0, spin: v3(7, 3, 5), rot: new THREE.Euler() };
+    this.blob.opacity.value = 1;
+    this.chunk.visible = true;
+    this._updateChunk(0);
+    return { from: toArr(from), velocity: toArr(velocity) };
+  }
+
+  _updateChunk(dt) {
+    const c = this.chunkSim;
+    if (!c) return;
+    const mesh = this.chunk;
+    c.t += dt;
+    if (c.phase === "fly") {
+      c.v.y -= 9.81 * dt;
+      c.p.addScaledVector(c.v, dt);
+      c.rot.x += c.spin.x * dt; c.rot.y += c.spin.y * dt; c.rot.z += c.spin.z * dt;
+      mesh.position.copy(c.p);
+      mesh.rotation.copy(c.rot);
+      const wob = 1 + 0.12 * Math.sin(c.t * 40);
+      mesh.scale.set(CHUNK_R * wob, CHUNK_R / wob, CHUNK_R);
+      if (c.p.y <= CHUNK_R * 0.45 && c.v.y < 0) { c.phase = "splat"; c.ts = 0; c.p.y = 0; }
+    } else {
+      // Squash-splat on the tray, wobble, then fade out ~1 s later.
+      c.ts += dt;
+      const w = c.ts;
+      const flat = 0.38 + 0.62 * Math.exp(-w * 18) * Math.cos(w * 26) * 0.6 + 0.12 * Math.exp(-w * 5) * Math.sin(w * 30);
+      const spread = 1 / Math.sqrt(Math.max(0.2, flat));
+      mesh.rotation.set(0, c.rot.y, 0);
+      mesh.scale.set(CHUNK_R * spread * 1.1, CHUNK_R * flat, CHUNK_R * spread);
+      mesh.position.set(c.p.x, CHUNK_R * flat * 0.55, c.p.z);
+      this.blob.opacity.value = 1 - sstep(1.0, 1.45, w);
+      if (w > 1.45) { this.chunkSim = null; mesh.visible = false; }
+    }
   }
 
   // -------------------------------------------------------------------------
   update(dt, jelly = null) {
-    const s = this.state;
-    if (!s) return { paws: null, mouth: this._mouthTray(), phase: "idle" };
     dt = Math.min(Math.max(dt || 0, 0), 0.1);
+    this._updateChunk(dt);
+    const s = this.state;
+    if (!s) return { hold: null, paws: null, mouth: this._mouthTray(), phase: "idle" };
     if (jelly && (jelly.center || jelly.bounds)) s.jellyNow = jelly;
     s.t += dt;
-    const t = s.t, T = s.times;
+    const t = s.t, T = s.T;
 
-    if (!s.plan && t >= T.reach) this._makePlan();
-
-    // Size of the (shrinking) jelly while held: planned 13 % per bite, checked
-    // against the measured depth along the facing (not constrained by paws).
-    const planned = Math.pow(BITE_SHRINK, s.bitesDone);
-    let target = planned;
-    if (s.plan && t >= T.bites && s.jellyNow && s.jellyNow.bounds) {
-      const m = this._measureJelly();
-      if (!s.refDepth) s.refDepth = m.hd / Math.max(0.3, planned);
-      const measured = m.hd / s.refDepth;
-      target = Math.min(Math.max(measured, planned * 0.85), Math.min(1.02, planned * 1.15));
-    }
-    s.sizeScale += (target - s.sizeScale) * (1 - Math.exp(-dt / 0.09));
+    if (!s.liftFrom && t >= T.grab) this._ensureGrab();
+    s.sizeScale += (Math.pow(BITE_SHRINK, s.bitesDone) - s.sizeScale) * (1 - Math.exp(-dt / 0.09));
 
     const pose = this._samplePose(t);
     let finalPose = pose;
@@ -905,170 +1031,243 @@ export class Rabbit {
     s.lastPose = finalPose;
     this._applyPose(finalPose, dt);
 
-    // Events crossing this frame.
+    // Events crossing this frame ("done" waits for a flying/splatted chunk).
     for (const e of s.events) {
       if (e.t <= t && !s.emitted.has(e.id)) {
+        if (e.type === "done" && this.chunkSim) break;
         s.emitted.add(e.id);
         const data = e.make(false);
         if (e.type === "bite") s.bitesDone = Math.max(s.bitesDone, data.index + 1);
         this._emit(e.type, data);
-        if (!this.state) break;
+        if (this.state !== s) break;
       }
     }
-    if (this.state && t >= T.done) this._finish(true);
+    if (this.state === s && s.emitted.has("done")) this._finish();
 
-    const holding = this.state && s.plan && t >= T.grab && t < T.finish && !s.skipped;
-    const paws = holding ? this._pawTargets(t).map(toArr) : null;
-    return { paws, mouth: this._mouthTray(), phase: this.state ? phaseOf(s) : "idle" };
+    const live = this.state === s;
+    const hold = live ? this._holdAt(t) : null;
+    const touching = live && !s.skipped && t >= T.grab && t < T.holdEnd;
+    return {
+      hold: hold ? toArr(hold) : null,
+      paws: touching && s.pawsTray ? s.pawsTray.map(toArr) : null,
+      mouth: this._mouthTray(),
+      phase: live ? this._seg(t).name : "idle",
+    };
   }
 
   _finish() {
     this.state = null;
     this.root.visible = false;
     this.hearts.visible = false;
+    this.sparkles.visible = false;
   }
 
   // -------------------------------------------------------------------------
-  // Pose sampling: pure function of time (plus the plan).
+  // Pose sampling: a function of time, the segment timeline and the live jelly.
   _samplePose(t) {
-    const s = this.state, T = s.times;
+    const s = this.state, T = s.T;
     const pose = defaultPose();
     pose.pos.copy(s.seat);
     pose.yaw = s.yaw;
-
-    // Idle: breathing, nose twitch, blink, tail.
     pose.breath = Math.sin(t * 2 * Math.PI * 1.1);
     pose.look.copy(s.faceTo);
+    const seg = this._seg(t);
+    const u = t - seg.t0, k = clamp01(u / seg.dur);
+    // Hold posture: sits up tall with the jelly at the mouth (e = 0..1); taller
+    // jellies (up to ~60 mm) make it stretch up more so its face stays above them.
+    const tall = s.tall || 0;
+    const holdPose = (e) => {
+      pose.headUp = (0.009 + 0.006 * tall) * e; pose.rise = (0.004 + 0.004 * tall) * e;
+      pose.stretch = 1 + (0.1 + 0.06 * tall) * e;
+      pose.leanExtra = 0.02 * e; pose.headPitch = (0.12 - 0.04 * tall) * e;
+    };
+    const hugJelly = (amount = 1) => {
+      const sides = this._jellySides(t);
+      pose.pawMode = amount;
+      pose.pawL.copy(sides[0]); pose.pawR.copy(sides[1]);
+      pose.look.copy(sides[0]).lerp(sides[1], 0.5);
+    };
 
-    if (t < T.reach) {
-      // ---- arrive: two hops in ----
-      const legs = [[s.start, s.mid], [s.mid, s.seat]];
-      const hopIndex = t < 0.5 ? 0 : 1;
-      const u = t - hopIndex * 0.5;
-      const [a, b] = legs[hopIndex];
-      const h = hopShape(u, hopIndex === 0 ? 0.022 : 0.018);
-      pose.pos.copy(a).lerp(b, easeInOut(h.k));
-      if (t >= 1.0) pose.pos.copy(s.seat);
-      pose.hopY = h.y; pose.squash = h.s;
-      const travel = Math.atan2(b.x - a.x, b.z - a.z);
-      pose.yaw = hopIndex === 0 ? travel : angleLerp(travel, s.yaw, easeInOut((u - 0.05) / 0.4));
-      if (t >= 1.0) pose.yaw = s.yaw;
-      pose.appear = lerp(0.35, 1, easeOutBack(t / 0.32));
-      pose.earPerk = h.k > 0 && h.k < 1 ? -0.15 : 0.1;
-      pose.pawTuck = h.y > 0 ? 1 : 0;
-      pose.headPitch = -0.08 * Math.sin(Math.PI * clamp01(h.k));
-      pose.look.copy(s.faceTo);
-      if (t > 1.0) { pose.earPerk = 0.25 * sstep(1.0, 1.15, t); pose.headRoll = 0.12 * pulse(t, 1.0, 1.2); }
-    } else if (t < T.finish) {
-      const p = s.plan;
-      const paws = this._pawTargets(Math.max(t, T.grab));
-      pose.look.copy(p.hold);
-      if (t < T.grab) {
-        // ---- reach over the rim ----
-        const u = (t - T.reach) / T_REACH;
-        const reach = easeInOut(sstep(0.05, 1, u));
-        pose.pawMode = reach;
-        pose.pawL.copy(paws[0]); pose.pawR.copy(paws[1]);
-        pose.look.copy(p.contactL).lerp(p.contactR, 0.5);
+    switch (seg.name) {
+      case "arrive": {
+        const legs = [[s.start, s.mid], [s.mid, s.seat]];
+        const hi = t < 0.5 ? 0 : 1;
+        const hu = t - hi * 0.5;
+        const [a, b] = legs[hi];
+        const h = hopShape(hu, hi === 0 ? 0.022 : 0.018);
+        pose.pos.copy(a).lerp(b, easeInOut(h.k));
+        if (t >= 1.0) pose.pos.copy(s.seat);
+        pose.hopY = h.y; pose.squash = h.s;
+        const travel = Math.atan2(b.x - a.x, b.z - a.z);
+        pose.yaw = hi === 0 ? travel : angleLerp(travel, s.yaw, easeInOut((hu - 0.05) / 0.4));
+        if (t >= 1.0) pose.yaw = s.yaw;
+        pose.appear = lerp(0.35, 1, easeOutBack(t / 0.32));
+        pose.earPerk = h.k > 0 && h.k < 1 ? -0.15 : 0.1;
+        pose.pawTuck = h.y > 0 ? 1 : 0;
+        pose.headPitch = -0.08 * Math.sin(Math.PI * clamp01(h.k));
+        if (t > 1.0) { pose.earPerk = 0.25 * sstep(1.0, 1.15, t); pose.headRoll = 0.12 * pulse(t, 1.0, 1.2); }
+        break;
+      }
+      case "grab": {
+        hugJelly(easeInOut(sstep(0.05, 1, k)));
+        pose.look.copy(this._measureJelly(t).center);
         pose.earPerk = 0.45; pose.earSplay = -0.1;
         pose.eyesWide = 0.4;
-        pose.mouthOpen = 0.12 * sstep(0.6, 1, u);
-      } else if (t < T.bites) {
-        // ---- lift toward the mouth ----
-        const u = (t - T.lift) / T_LIFT;
-        pose.pawMode = 1;
-        pose.pawL.copy(paws[0]); pose.pawR.copy(paws[1]);
-        const e = easeInOut(u);
-        pose.headUp = 0.009 * e; pose.rise = 0.004 * e;
-        pose.stretch = 1 + 0.1 * e;
-        pose.leanExtra = 0.02 * e;
-        pose.headPitch = 0.12 * e;
-        pose.mouthOpen = 0.12 + 0.35 * sstep(0.6, 1, u);
-        pose.earPerk = 0.45 + 0.2 * pulse(u, 0, 1);
-        pose.squash = 1 - 0.06 * pulse(u, 0, 0.4);
-        pose.eyesWide = 0.5;
-      } else {
-        // ---- bites ----
-        const i = Math.min(s.bites - 1, Math.floor((t - T.bites) / T_BITE));
-        const u = t - T.bites - i * T_BITE;
-        pose.pawMode = 1;
-        pose.pawL.copy(paws[0]); pose.pawR.copy(paws[1]);
-        pose.headUp = 0.009; pose.rise = 0.004; pose.stretch = 1.1; pose.leanExtra = 0.02;
-        pose.headPitch = 0.12;
-        pose.biteTarget.copy(this._biteTarget(i));
-        if (u < 0.16) {
-          const w = easeOut(u / 0.16);
-          pose.mouthOpen = lerp(i === 0 ? 0.47 : 0.15, 1, w);
-          pose.lunge = -0.25 * w;
-          pose.headPitch = 0.12 - 0.08 * w;
-          pose.eyesWide = 0.7 * w;
-          pose.earPerk = 0.55;
-        } else if (u < BITE_CONTACT) {
-          const w = easeIn((u - 0.16) / (BITE_CONTACT - 0.16));
-          pose.lunge = lerp(-0.25, 1, w);
-          pose.headPitch = lerp(0.04, 0.2, w);
-          pose.mouthOpen = 1 - 0.55 * sstep(0.7, 1, w);
-          pose.eyesWide = 0.7;
-          pose.earPerk = 0.55;
-          pose.squash = 1 - 0.03 * w;
-        } else if (u < BITE_CHEW) {
-          const w = (u - BITE_CONTACT) / (BITE_CHEW - BITE_CONTACT);
-          pose.lunge = 1 - easeOut(w);
-          pose.headPitch = 0.2 - 0.14 * easeOut(w);
-          pose.mouthOpen = 0.45 * (1 - sstep(0, 0.35, w));
-          pose.cheekPuff = 0.35 * sstep(0.2, 1, w);
-          pose.squint = 0.5 * sstep(0.1, 0.6, w);
-          pose.earPerk = 0.4;
-          pose.earWobble = 1;
-          pose.squash = 1 + 0.04 * pulse(w, 0, 1);
-        } else {
-          const w = (u - BITE_CHEW) / (T_BITE - BITE_CHEW);
-          const chew = Math.sin((u - BITE_CHEW) * 2 * Math.PI * 7);
-          pose.chew = chew;
-          pose.mouthOpen = 0.16 * Math.max(0, chew);
-          pose.cheekPuff = 0.35 + 0.12 * chew;
-          pose.squint = 0.55 * (1 - sstep(0.75, 1, w));
-          pose.headPitch = 0.06 + 0.03 * chew;
-          pose.headRoll = 0.06 * Math.sin(u * 2 * Math.PI * 3.5);
-          pose.earPerk = 0.35;
-          pose.earWobble = 0.7 * Math.sin(u * 2 * Math.PI * 7);
-          pose.blush = 0.25;
-        }
+        pose.mouthOpen = 0.12 * sstep(0.6, 1, k);
+        break;
       }
-    } else if (t < T.react) {
-      // ---- finish: paws come together, satisfied ----
-      const u = (t - T.finish) / T_FINISH;
-      pose.pawMode = 0;
-      pose.pawTogether = easeOut(u / 0.4);
-      pose.headUp = 0.009 * (1 - easeInOut(u)); pose.rise = 0.004 * (1 - easeInOut(u));
-      pose.stretch = 1.1 - 0.1 * easeInOut(u);
-      pose.cheekPuff = 0.3 * (1 - easeInOut(u));
-      pose.chew = Math.sin(u * T_FINISH * 2 * Math.PI * 6) * (1 - u);
-      pose.mouthOpen = 0.1 * Math.max(0, pose.chew);
-      pose.squint = 0.5;
-      pose.squash = 1 - 0.05 * pulse(u, 0.25, 0.6);
-      pose.earPerk = 0.3;
-      pose.blush = 0.3;
-    } else if (t < T.leave) {
-      this._reactPose(pose, t - T.react);
-    } else {
-      // ---- leave: turn and hop away, shrinking out ----
-      const u = t - T.leave;
-      const legs = [[s.seat, s.exitA], [s.exitA, s.exitB]];
-      const away = Math.atan2(s.exitA.x - s.seat.x, s.exitA.z - s.seat.z);
-      const hi = u < 0.55 ? 0 : 1;
-      const hu = u - 0.05 - hi * 0.5;
-      const [a, b] = legs[hi];
-      const sad = s.mood === "sad" ? 0.6 : 1;
-      const h = hopShape(hu, (hi === 0 ? 0.02 : 0.024) * sad);
-      pose.pos.copy(a).lerp(b, easeInOut(h.k));
-      pose.hopY = h.y; pose.squash = h.s;
-      pose.yaw = angleLerp(s.yaw, away, easeInOut(u / 0.2));
-      pose.appear = 1 - easeIn((u - 0.55) / (T_LEAVE - 0.55));
-      pose.pawTuck = h.y > 0 ? 1 : 0;
-      pose.earPerk = s.mood === "sad" ? -0.4 : 0.1;
-      pose.earDroop = s.mood === "sad" ? 0.6 : 0;
-      pose.look.copy(s.exitB).setY(0.03);
+      case "lift": {
+        hugJelly();
+        holdPose(easeInOut(k));
+        pose.mouthOpen = 0.12 + 0.35 * sstep(0.6, 1, k);
+        pose.earPerk = 0.45 + 0.2 * pulse(k, 0, 1);
+        pose.squash = 1 - 0.06 * pulse(k, 0, 0.4);
+        pose.eyesWide = 0.5;
+        break;
+      }
+      case "bite": {
+        hugJelly();
+        holdPose(1);
+        this._bitePose(pose, seg, u);
+        break;
+      }
+      case "ponder": {
+        // Thoughtful chew: slow munching, head tilted, looking up, one ear flops.
+        hugJelly();
+        holdPose(1);
+        const chew = Math.sin(u * 2 * Math.PI * 4.5);
+        pose.chew = chew;
+        pose.mouthOpen = 0.12 * Math.max(0, chew);
+        pose.cheekPuff = 0.25 + 0.07 * chew;
+        const think = easeOut(k / 0.35);
+        pose.headRoll = 0.24 * think;
+        pose.headYaw = 0.12 * think;
+        pose.headPitch = 0.12 - 0.26 * think;
+        pose.earTilt = think;
+        pose.squint = 0.25;
+        pose.earPerk = 0.2;
+        break;
+      }
+      case "chew": {
+        hugJelly();
+        holdPose(1);
+        const chew = Math.sin(u * 2 * Math.PI * 7);
+        pose.chew = chew;
+        pose.mouthOpen = 0.16 * Math.max(0, chew);
+        pose.cheekPuff = 0.35 + 0.12 * chew;
+        pose.squint = 0.4 * sstep(0.1, 0.4, k);
+        pose.headPitch = 0.06 + 0.03 * chew;
+        pose.earPerk = 0.3;
+        pose.earWobble = 0.5 * Math.sin(u * 2 * Math.PI * 7);
+        break;
+      }
+      case "scrunch": {
+        // Yuck: face scrunches (> <), ears back, cheeks puff, a shiver.
+        hugJelly();
+        holdPose(1);
+        const e = easeOut(k / 0.4);
+        pose.scrunch = sstep(0, 0.3, k);
+        pose.cheekPuff = 0.35 + 0.35 * e;
+        pose.earDroop = 0.45 * e; pose.earPerk = -0.5 * e;
+        pose.headPitch = 0.12 - 0.08 * e;
+        pose.shudder = 0.6 * pulse(k, 0.1, 0.9);
+        pose.squash = 1 - 0.04 * e;
+        break;
+      }
+      case "putDown": {
+        hugJelly();
+        holdPose(1 - easeInOut(k));
+        if (s.outcome === "spit") {
+          pose.scrunch = 1; pose.cheekPuff = 0.7; pose.earDroop = 0.45; pose.earPerk = -0.5;
+        } else {
+          pose.squint = 0.2; pose.earPerk = 0.1; pose.headRoll = 0.1 * (1 - k);
+        }
+        break;
+      }
+      case "refuse": {
+        // "No thanks": head shake, one paw waving in front of the face, ears a bit flat.
+        hugJelly(1 - easeOut(k / 0.2));
+        const env = sstep(0, 0.12, k) * (1 - sstep(0.85, 1, k));
+        pose.look.copy(s.faceTo);
+        pose.headYaw = 0.36 * Math.sin(u * 2 * Math.PI * 2.3) * env;
+        pose.headPitch = 0.03;
+        pose.pawWave = env; pose.wave = u;
+        pose.earDroop = 0.3 * env; pose.earPerk = -0.25 * env;
+        pose.squint = 0.35 * env;
+        pose.squash = 1 - 0.03 * pulse(k, 0, 0.15);
+        break;
+      }
+      case "spit": {
+        // Turns the head aside, puffs and spits, then "bleh" with a shudder.
+        hugJelly(1 - easeOut(k / 0.2));
+        pose.look.copy(s.faceTo);
+        const turn = easeOut(u / 0.2);
+        pose.headYaw = -SPIT_TURN * turn * (1 - 0.75 * sstep(SPIT_AT + 0.04, SPIT_AT + 0.2, u)); // turns back for the "bleh"
+        const spat = u >= SPIT_AT;
+        pose.cheekPuff = spat ? 0.85 * (1 - sstep(SPIT_AT, SPIT_AT + 0.08, u)) : 0.7 + 0.15 * sstep(0, SPIT_AT, u);
+        pose.headPitch = spat ? 0.08 * pulse(u, SPIT_AT, SPIT_AT + 0.2) : -0.06 * sstep(0, SPIT_AT, u);
+        pose.lunge = 0;
+        pose.tongue = sstep(0.3, 0.38, u) * (1 - sstep(0.72, 0.82, u));
+        pose.mouthOpen = Math.max(0.8 * pulse(u, SPIT_AT - 0.03, SPIT_AT + 0.14), 0.42 * pose.tongue);
+        pose.shudder = pulse(u, 0.3, 0.62);
+        pose.scrunch = 1 - sstep(0.7, 0.85, u);
+        pose.earDroop = 0.35; pose.earPerk = -0.3;
+        pose.earWobble = 0.8 * pulse(u, 0.3, 0.62) * Math.sin(u * 60);
+        pose.leanExtra = -0.06 * pulse(u, SPIT_AT, 0.6);
+        break;
+      }
+      case "grumpy": {
+        // "흥": turns away, nose up, eyes half-lidded, arms crossed.
+        const e = easeOut(k / 0.25);
+        pose.look.copy(s.faceTo);
+        pose.yawExtra = 0.5 * e;
+        pose.headYaw = 0.35 * e;
+        pose.headPitch = -0.18 * e;
+        pose.squint = 0.65 * e;
+        pose.pawCross = easeOut(u / 0.22);
+        pose.earDroop = 0.25 * e; pose.earPerk = -0.15;
+        pose.cheekPuff = 0.5 * pulse(u, 0.05, 0.45);
+        pose.squash = 1 - 0.05 * pulse(u, 0.05, 0.25);
+        break;
+      }
+      case "finish": {
+        if (k < 0.35) hugJelly(1 - easeOut(k / 0.35));
+        pose.look.copy(s.faceTo);
+        pose.pawTogether = easeOut(k / 0.4);
+        holdPose(1 - easeInOut(k));
+        pose.headPitch = 0;
+        pose.cheekPuff = 0.3 * (1 - easeInOut(k));
+        pose.chew = Math.sin(u * 2 * Math.PI * 6) * (1 - k);
+        pose.mouthOpen = 0.1 * Math.max(0, pose.chew);
+        pose.squint = 0.5;
+        pose.squash = 1 - 0.05 * pulse(k, 0.25, 0.6);
+        pose.earPerk = 0.3;
+        pose.blush = 0.3;
+        break;
+      }
+      case "react": {
+        this._reactPose(pose, u);
+        break;
+      }
+      default: { // leave
+        const legs = [[s.seat, s.exitA], [s.exitA, s.exitB]];
+        const away = Math.atan2(s.exitA.x - s.seat.x, s.exitA.z - s.seat.z);
+        const hi = u < 0.55 ? 0 : 1;
+        const hu = u - 0.05 - hi * 0.5;
+        const [a, b] = legs[hi];
+        const low = s.mood === "sad" && s.outcome === "eat" ? 0.6 : 1;
+        const h = hopShape(hu, (hi === 0 ? 0.02 : 0.024) * low);
+        pose.pos.copy(a).lerp(b, easeInOut(h.k));
+        pose.hopY = h.y; pose.squash = h.s;
+        const startYaw = s.outcome === "spit" ? s.yaw + 0.5 : s.yaw;
+        pose.yaw = angleLerp(startYaw, away, easeInOut(u / 0.2));
+        pose.appear = 1 - easeIn((u - 0.55) / (T_LEAVE - 0.55));
+        pose.pawTuck = h.y > 0 ? 1 : 0;
+        const droopy = s.mood === "sad" && s.outcome === "eat";
+        pose.earPerk = droopy ? -0.4 : 0.1;
+        pose.earDroop = droopy ? 0.6 : 0;
+        pose.look.copy(s.exitB).setY(0.03);
+      }
     }
 
     // Idle overlays.
@@ -1084,13 +1283,59 @@ export class Rabbit {
       pose.noseTwitch = Math.sin(nt * 2 * Math.PI * 9) * pulse(nt, 0, 0.45);
       if (nt > 0.45) tw.next = t + 1.2 + Math.random() * 1.6;
     }
+    if (T.holdEnd !== undefined && t >= T.holdEnd) s.pawsTray = null;
+    else if (pose.pawMode > 0) s.pawsTray = [pose.pawL.clone(), pose.pawR.clone()];
     return pose;
+  }
+
+  // One bite: wind-up, lunge to the jelly's near top edge (contact), tear back,
+  // then (eat) happy chewing.
+  _bitePose(pose, seg, u) {
+    const i = seg.index;
+    pose.biteTarget.copy(this._biteTarget(i));
+    if (u < 0.16) {
+      const w = easeOut(u / 0.16);
+      pose.mouthOpen = lerp(i === 0 ? 0.47 : 0.15, 1, w);
+      pose.lunge = -0.25 * w;
+      pose.headPitch = 0.12 - 0.08 * w;
+      pose.eyesWide = 0.7 * w;
+      pose.earPerk = 0.55;
+    } else if (u < BITE_CONTACT) {
+      const w = easeIn((u - 0.16) / (BITE_CONTACT - 0.16));
+      pose.lunge = lerp(-0.25, 1, w);
+      pose.headPitch = lerp(0.04, 0.2, w);
+      pose.mouthOpen = 1 - 0.55 * sstep(0.7, 1, w);
+      pose.eyesWide = 0.7;
+      pose.earPerk = 0.55;
+      pose.squash = 1 - 0.03 * w;
+    } else if (u < BITE_CHEW || !seg.chew) {
+      const w = clamp01((u - BITE_CONTACT) / (BITE_CHEW - BITE_CONTACT));
+      pose.lunge = 1 - easeOut(w);
+      pose.headPitch = 0.2 - 0.14 * easeOut(w);
+      pose.mouthOpen = 0.45 * (1 - sstep(0, 0.35, w));
+      pose.cheekPuff = 0.35 * sstep(0.2, 1, w);
+      pose.squint = 0.5 * sstep(0.1, 0.6, w);
+      pose.earPerk = 0.4;
+      pose.earWobble = 1;
+      pose.squash = 1 + 0.04 * pulse(w, 0, 1);
+    } else {
+      const w = (u - BITE_CHEW) / (T_BITE - BITE_CHEW);
+      const chew = Math.sin((u - BITE_CHEW) * 2 * Math.PI * 7);
+      pose.chew = chew;
+      pose.mouthOpen = 0.16 * Math.max(0, chew);
+      pose.cheekPuff = 0.35 + 0.12 * chew;
+      pose.squint = 0.55 * (1 - sstep(0.75, 1, w));
+      pose.headPitch = 0.06 + 0.03 * chew;
+      pose.headRoll = 0.06 * Math.sin(u * 2 * Math.PI * 3.5);
+      pose.earPerk = 0.35;
+      pose.earWobble = 0.7 * Math.sin(u * 2 * Math.PI * 7);
+      pose.blush = 0.25;
+    }
   }
 
   _reactPose(pose, u) {
     const s = this.state;
     pose.look.copy(s.faceTo);
-    pose.pawMode = 0;
     if (s.mood === "happy") {
       const h = hopShape(u - 0.04, 0.024);
       pose.hopY = h.y;
@@ -1104,6 +1349,26 @@ export class Rabbit {
       pose.mouthOpen = 0.35 * pulse(u, 0.1, 0.7);
       pose.tailWag = 1;
       pose.hearts = u;
+    } else if (s.mood === "special") {
+      // ★4: twirl jump, more hops, flapping ears, hearts and twinkles.
+      const h = hopShape(u - 0.04, 0.032);
+      pose.hopY = h.y; pose.squash = h.s;
+      pose.yawExtra = h.k > 0 ? Math.PI * 2 * easeInOut(h.k) : 0;
+      for (const [t0, height] of [[0.62, 0.014], [0.98, 0.012], [1.34, 0.008]]) {
+        if (u > t0) { const h2 = hopShape(u - t0, height); pose.hopY = h2.y; pose.squash = h2.s; }
+      }
+      const flap = sstep(0.5, 0.65, u) * (1 - sstep(1.6, 1.8, u));
+      pose.happyEyes = sstep(0.05, 0.15, u) * (1 - sstep(1.6, 1.75, u));
+      pose.earPerk = 0.8; pose.earSplay = 0.2 + 2.6 * Math.sin(u * 2 * Math.PI * 5) * flap;
+      pose.earWobble = 0.5 * flap;
+      pose.blush = 1.2;
+      pose.pawCheer = sstep(0.0, 0.2, u) * (1 - sstep(1.6, 1.85, u));
+      pose.pawClap = flap;
+      pose.headRoll = 0.16 * Math.sin(u * 2 * Math.PI * 1.8) * sstep(0.6, 0.8, u);
+      pose.mouthOpen = 0.45 * pulse(u, 0.1, 0.8) + 0.3 * pulse(u, 0.9, 1.5);
+      pose.tailWag = 1;
+      pose.hearts = u;
+      pose.sparkles = u;
     } else if (s.mood === "ok") {
       const nod = 0.24 * (pulse(u, 0.12, 0.42) + pulse(u, 0.52, 0.82));
       pose.headPitch = nod;
@@ -1139,7 +1404,7 @@ export class Rabbit {
 
     // Root (tray space).
     this.root.position.copy(pose.pos);
-    this.root.rotation.set(0, pose.yaw, 0);
+    this.root.rotation.set(0, pose.yaw + pose.yawExtra, 0);
     this.root.scale.setScalar(Math.max(1e-4, pose.appear));
     this.root.updateMatrix();
     this.root.updateMatrixWorld(true);
@@ -1152,21 +1417,28 @@ export class Rabbit {
       b.scale.set(1, 1, 1);
     }
 
-    // Paw targets in rig space.
+    // Paw targets in rig space: an idle/gesture pose, blended toward the jelly's sides.
     const pawL = v3(), pawR = v3();
-    const restL = v3(0.0118, 0.025, 0.03), restR = v3(-0.0118, 0.025, 0.03);
-    const together = pose.pawTogether, cheer = pose.pawCheer;
-    const idleL = restL.clone(), idleR = restR.clone();
+    const idleL = v3(0.0118, 0.025, 0.03), idleR = v3(-0.0118, 0.025, 0.03);
     if (pose.pawTuck) { idleL.add(v3(-0.002, 0.004, 0.002)); idleR.add(v3(0.002, 0.004, 0.002)); }
-    if (together > 0) {
+    if (pose.pawTogether > 0) {
       const low = pose.pawLow ? -0.007 : 0;
       const pat = pose.pawPat * 0.003;
-      idleL.lerp(v3(0.0058, 0.031 + low + pat, 0.027), together);
-      idleR.lerp(v3(-0.0058, 0.031 + low + pat, 0.027), together);
+      idleL.lerp(v3(0.0058, 0.031 + low + pat, 0.027), pose.pawTogether);
+      idleR.lerp(v3(-0.0058, 0.031 + low + pat, 0.027), pose.pawTogether);
     }
-    if (cheer > 0) {
-      idleL.lerp(v3(0.0105, 0.037, 0.03), cheer);
-      idleR.lerp(v3(-0.0105, 0.037, 0.03), cheer);
+    if (pose.pawCheer > 0) {
+      const clap = pose.pawClap * 0.005 * (0.5 + 0.5 * Math.cos(t * 2 * Math.PI * 4));
+      idleL.lerp(v3(0.0105 - clap, 0.037, 0.03), pose.pawCheer);
+      idleR.lerp(v3(-0.0105 + clap, 0.037, 0.03), pose.pawCheer);
+    }
+    if (pose.pawWave > 0) {
+      idleR.lerp(v3(-0.011 + 0.011 * Math.sin(pose.wave * 2 * Math.PI * 2.8), 0.042, 0.037), pose.pawWave);
+      idleL.lerp(v3(0.008, 0.028, 0.029), pose.pawWave);
+    }
+    if (pose.pawCross > 0) {
+      idleL.lerp(v3(-0.0068, 0.033, 0.031), pose.pawCross);
+      idleR.lerp(v3(0.0068, 0.0365, 0.029), pose.pawCross);
     }
     if (pose.pawMode > 0) {
       pawL.copy(pose.pawL).applyMatrix4(this._rootInv);
@@ -1174,7 +1446,7 @@ export class Rabbit {
       pawL.lerp(idleL, 1 - pose.pawMode); pawR.lerp(idleR, 1 - pose.pawMode);
     } else { pawL.copy(idleL); pawR.copy(idleR); }
 
-    // Body reach effort from how far forward the paws go.
+    // Body reach effort from how far forward / low the paws go.
     const reachZ = Math.max(pawL.z, pawR.z), reachLow = Math.max(0, 0.034 - Math.min(pawL.y, pawR.y));
     const far = clamp01((reachZ - 0.064) / 0.036);
     const effort = clamp01(far + reachLow * 12 * clamp01((reachZ - 0.064) / 0.02));
@@ -1189,7 +1461,7 @@ export class Rabbit {
     if (pose.hopY > 0) { R.footL.position.y += 0.002; R.footR.position.y += 0.002; }
     R.hips.position.z += slide;
     R.hips.position.y += rise;
-    R.hips.rotation.x = lean;
+    R.hips.rotation.set(lean, 0, pose.shudder * 0.05 * Math.sin(t * 2 * Math.PI * 16));
     const breath = 1 + 0.011 * pose.breath;
     R.body.scale.set(breath, stretch * (1 + 0.006 * pose.breath), breath);
     R.chest.position.y += (stretch - 1) * 0.034 + 0.0003 * pose.breath;
@@ -1203,7 +1475,7 @@ export class Rabbit {
     const yawLook = Math.max(-0.5, Math.min(0.5, Math.atan2(toLook.x, Math.max(0.01, toLook.z))));
     const pitchLook = Math.max(-0.35, Math.min(0.45, -Math.atan2(toLook.y - 0.01, Math.hypot(toLook.x, toLook.z))));
     const headPitch = 0.4 * pitchLook + pose.headPitch - lean * 0.55 + 0.12 * pose.lookDown;
-    R.neck.rotation.set(headPitch, yawLook * 0.6, pose.headRoll, "YXZ");
+    R.neck.rotation.set(headPitch, yawLook * 0.6 + pose.headYaw, pose.headRoll, "YXZ");
     R.neck.position.y += pose.headUp;
     R.neck.position.z += 0.002 * pose.headUp / 0.007;
 
@@ -1214,24 +1486,27 @@ export class Rabbit {
       R.neck.position.add(this._chestDelta(pose, pose.lunge));
     }
 
-    // Face.
-    // Eyes: squint/half-close by squashing the bead; a full blink or the happy
-    // face swaps the bead for an arc ("∪" closed, "∩" happy ^ ^).
-    const happy = pose.happyEyes;
+    // Eyes: squint/half-close by squashing the bead; a full blink, the happy
+    // face or a scrunch swaps the bead for an arc ("∪" closed, "∩" happy, "> <").
+    const happy = pose.happyEyes, scrunch = pose.scrunch;
     const closed = sstep(0.55, 0.7, pose.blink);
-    const arc = Math.max(happy, closed);
+    const arc = Math.max(happy, scrunch, closed);
     const open = Math.max(0.25, 1 - Math.max(pose.blink * 0.8, pose.squint * 0.5)) * (1 + 0.1 * pose.eyesWide);
     for (const e of [R.eyeL, R.eyeR]) e.scale.set(1 + 0.05 * pose.eyesWide, Math.max(0.02, open * (1 - arc)), Math.max(0.02, 1 - arc));
     R.eyeL.position.y -= 0.0006 * pose.lookDown; R.eyeR.position.y -= 0.0006 * pose.lookDown;
-    for (const h of [R.happyL, R.happyR]) {
+    for (const [h, side] of [[R.happyL, 1], [R.happyR, -1]]) {
       h.scale.setScalar(Math.max(1e-3, arc));
-      if (closed > happy) h.quaternion.multiply(this._q.setFromAxisAngle(v3(0, 0, 1), Math.PI));
+      const turn = happy >= Math.max(scrunch, closed) ? 0 : scrunch >= closed ? side * Math.PI / 2 : Math.PI;
+      if (turn) h.quaternion.multiply(this._q.setFromAxisAngle(v3(0, 0, 1), turn));
     }
     const mouthOpen = clamp01(pose.mouthOpen);
     const shown = sstep(0, 0.1, mouthOpen); // fully hidden when closed
     R.mouth.scale.set(Math.max(0.02, (0.7 + 0.3 * mouthOpen) * shown), Math.max(0.02, mouthOpen), Math.max(0.02, shown));
     R.jaw.rotation.x = 0.35 * mouthOpen;
     R.jaw.position.x += 0.0004 * pose.chew;
+    R.tongue.scale.setScalar(Math.max(1e-3, pose.tongue));
+    R.tongue.rotation.x = 0.35 * pose.tongue;
+    R.tongue.position.z += 0.0022 * pose.tongue;
     R.muzzle.position.y += 0.0003 * pose.chew;
     R.muzzle.position.x += 0.0003 * pose.chew;
     const puff = 1 + pose.cheekPuff * 0.42;
@@ -1241,7 +1516,7 @@ export class Rabbit {
     R.nose.position.y += 0.00035 * pose.noseTwitch;
     R.nose.scale.set(1 + 0.08 * pose.noseTwitch, 1 - 0.1 * Math.abs(pose.noseTwitch), 1);
     R.tail.rotation.y = pose.tailWag * 0.35 * Math.sin(t * 2 * Math.PI * 4);
-    this.fur.u.blush.value = 0.3 + 0.45 * pose.blush;
+    this.fur.u.blush.value = 0.3 + 0.45 * Math.min(1.2, pose.blush);
 
     // Ears: springs around an expressive target, driven by head acceleration.
     this.rig.skel.updateMatrixWorld(true);
@@ -1256,6 +1531,7 @@ export class Rabbit {
     this._uploadBones();
     this._updateShadow(pose);
     this._updateHearts(pose);
+    this._updateSparkles(pose);
     this._updateSun();
   }
 
@@ -1267,7 +1543,6 @@ export class Rabbit {
       ? v3(0, 0.004, -0.008).multiplyScalar(-amount)
       : pose.biteTarget.clone().applyMatrix4(this._rootInv).sub(mouth).multiplyScalar(amount);
     if (delta.length() > 0.022) delta.setLength(0.022);
-    // Into chest space (rotation + scale of the chest).
     const m = this._m.copy(R.chest.matrixWorld).setPosition(0, 0, 0).invert();
     return delta.applyMatrix4(m);
   }
@@ -1293,7 +1568,7 @@ export class Rabbit {
 
   _earDynamics(pose, dt) {
     const s = this.state, R = this.rig.bones;
-    // Head acceleration in tray space → head-local-ish (rig yaw only).
+    // Head acceleration in tray space → bunny frame (yaw only).
     const head = v3().setFromMatrixPosition(R.head.matrixWorld).applyMatrix4(this.root.matrix);
     if (s.prevHead && dt > 0) {
       const vel = head.clone().sub(s.prevHead).divideScalar(dt);
@@ -1303,7 +1578,7 @@ export class Rabbit {
       s.prevVel.copy(vel);
     }
     s.prevHead = head;
-    const local = s.accel.clone().applyAxisAngle(v3(0, 1, 0), -pose.yaw);
+    const local = s.accel.clone().applyAxisAngle(v3(0, 1, 0), -(pose.yaw + pose.yawExtra));
     const G = 20; // rad/s² per m/s² of head acceleration
     const forcePitch = (local.z * 0.8 + local.y * 0.55) * G;
     const perk = pose.earPerk, droop = pose.earDroop;
@@ -1311,10 +1586,11 @@ export class Rabbit {
     for (let i = 0; i < 2; i += 1) {
       const side = i === 0 ? 1 : -1;
       const idle = 0.035 * Math.sin(s.t * 1.7 + i * 1.3);
+      const tilt = i === 0 ? pose.earTilt : -0.3 * pose.earTilt; // one ear flops, the other perks
       const target = [
-        -0.14 * perk + 0.55 * droop + idle,
-        -0.12 * pose.earSplay + 0.85 * droop + 0.02 * Math.sin(s.t * 1.1 + i),
-        -0.1 * perk + 0.7 * droop,
+        -0.14 * perk + 0.55 * droop + idle + 0.45 * tilt,
+        -0.12 * pose.earSplay + 0.85 * droop + 0.02 * Math.sin(s.t * 1.1 + i) + 0.35 * Math.max(0, tilt),
+        -0.1 * perk + 0.7 * droop + 0.5 * Math.max(0, tilt),
         0.45 * droop,
       ];
       const forceOut = (-local.x * side + 0.3 * local.y) * G;
@@ -1352,25 +1628,46 @@ export class Rabbit {
   }
 
   _updateHearts(pose) {
-    const u = pose.hearts;
-    if (!(u >= 0) || !this.state || this.state.mood !== "happy") { this.hearts.visible = false; return; }
+    const u = pose.hearts, s = this.state;
+    if (!(u >= 0) || !s || (s.mood !== "happy" && s.mood !== "special")) { this.hearts.visible = false; return; }
     this.hearts.visible = true;
+    const special = s.mood === "special";
     const m = this._m, q = this._q, pos = v3(), scl = v3();
-    const R = this.rig.bones;
-    const top = v3().setFromMatrixPosition(R.head.matrixWorld);
-    for (let i = 0; i < 3; i += 1) {
-      const t0 = 0.12 + i * 0.14;
-      const k = (u - t0) / 0.95;
-      const side = [0, 1, -1][i];
-      if (k <= 0 || k >= 1) { m.makeScale(0, 0, 0); this.hearts.setMatrixAt(i, m); continue; }
-      pos.set(top.x + side * 0.016 + 0.004 * Math.sin(k * 9 + i), top.y + 0.026 + 0.045 * easeOut(k) + (i === 0 ? 0.006 : 0), top.z + 0.008);
+    const top = v3().setFromMatrixPosition(this.rig.bones.head.matrixWorld);
+    for (let i = 0; i < 6; i += 1) {
+      const t0 = special ? 0.12 + i * 0.13 : 0.12 + i * 0.14;
+      const k = (u - t0) / (special ? 1.1 : 0.95);
+      const side = [0, 1, -1, 0.55, -0.55, 0.2][i];
+      if (k <= 0 || k >= 1 || (!special && i >= 3)) { m.makeScale(0, 0, 0); this.hearts.setMatrixAt(i, m); continue; }
+      const spread = special ? 0.024 : 0.016;
+      pos.set(top.x + side * spread + 0.004 * Math.sin(k * 9 + i), top.y + 0.026 + (special ? 0.06 : 0.045) * easeOut(k) + (i % 3 === 0 ? 0.006 : 0), top.z + 0.008);
       const sc = 0.0105 * easeOutBack(Math.min(1, k * 4)) * (1 - sstep(0.7, 1, k)) * (i === 0 ? 1.15 : 0.9);
-      q.setFromEuler(new THREE.Euler(0, Math.sin(k * 5 + i) * 0.6, side * -0.25));
+      q.setFromEuler(this._e.set(0, Math.sin(k * 5 + i) * 0.6, side * -0.25));
       scl.setScalar(Math.max(1e-4, sc));
       m.compose(pos, q, scl);
       this.hearts.setMatrixAt(i, m);
     }
     this.hearts.instanceMatrix.needsUpdate = true;
+  }
+
+  _updateSparkles(pose) {
+    const u = pose.sparkles;
+    if (!(u >= 0)) { this.sparkles.visible = false; return; }
+    this.sparkles.visible = true;
+    const m = this._m, q = this._q, pos = v3(), scl = v3();
+    for (let i = 0; i < 10; i += 1) {
+      const t0 = 0.08 + (i % 5) * 0.16 + Math.floor(i / 5) * 0.75;
+      const k = (u - t0) / 0.5;
+      if (k <= 0 || k >= 1) { m.makeScale(0, 0, 0); this.sparkles.setMatrixAt(i, m); continue; }
+      const a = i * 2.39996 + 0.4;
+      const r = 0.036 + 0.012 * ((i * 0.618) % 1);
+      pos.set(Math.sin(a) * r, 0.025 + 0.075 * ((i * 0.37) % 1) + 0.008 * k, Math.cos(a) * r * 0.7 + 0.01);
+      q.setFromEuler(this._e.set(0, 0, k * 2.5 + i));
+      scl.setScalar(Math.max(1e-4, 0.0055 * Math.sin(Math.PI * k) * (0.8 + 0.4 * ((i * 0.53) % 1))));
+      m.compose(pos, q, scl);
+      this.sparkles.setMatrixAt(i, m);
+    }
+    this.sparkles.instanceMatrix.needsUpdate = true;
   }
 
   _updateSun() {
@@ -1405,28 +1702,18 @@ export class Rabbit {
   }
 }
 
-function phaseOf(s) {
-  const t = s.t, T = s.times;
-  if (t < T.reach) return "arrive";
-  if (t < T.grab) return "grab";
-  if (t < T.bites) return "lift";
-  if (t < T.finish) return "bite";
-  if (t < T.react) return "finish";
-  if (t < T.leave) return "react";
-  return "leave";
-}
-
 function defaultPose() {
   return {
-    pos: v3(), yaw: 0, appear: 1, hopY: 0, squash: 1,
-    stretch: 1, leanExtra: 0, rise: 0, breath: 0,
-    look: v3(), headPitch: 0, headRoll: 0, headUp: 0, lookDown: 0,
+    pos: v3(), yaw: 0, yawExtra: 0, appear: 1, hopY: 0, squash: 1,
+    stretch: 1, leanExtra: 0, rise: 0, breath: 0, shudder: 0,
+    look: v3(), headPitch: 0, headYaw: 0, headRoll: 0, headUp: 0, lookDown: 0,
     lunge: 0, biteTarget: v3(),
-    pawMode: 0, pawL: v3(), pawR: v3(), pawTuck: 0, pawTogether: 0, pawCheer: 0, pawPat: 0, pawLow: 0,
-    earPerk: 0, earSplay: 0, earDroop: 0, earWobble: 0,
-    blink: 0, squint: 0, eyesWide: 0, happyEyes: 0,
-    mouthOpen: 0, chew: 0, cheekPuff: 0, blush: 0, noseTwitch: 0, tailWag: 0,
-    hearts: -1,
+    pawMode: 0, pawL: v3(), pawR: v3(), pawTuck: 0, pawTogether: 0, pawCheer: 0, pawClap: 0, pawPat: 0, pawLow: 0,
+    pawWave: 0, wave: 0, pawCross: 0,
+    earPerk: 0, earSplay: 0, earDroop: 0, earWobble: 0, earTilt: 0,
+    blink: 0, squint: 0, eyesWide: 0, happyEyes: 0, scrunch: 0,
+    mouthOpen: 0, chew: 0, cheekPuff: 0, blush: 0, noseTwitch: 0, tailWag: 0, tongue: 0,
+    hearts: -1, sparkles: -1,
   };
 }
 
@@ -1441,8 +1728,8 @@ function lerpPose(a, b, t) {
   for (const [k, v] of Object.entries(b)) {
     const from = a[k];
     if (v && v.isVector3) o[k] = from.clone().lerp(v, t);
-    else if (k === "yaw") o[k] = angleLerp(from, v, t);
-    else if (k === "hearts") o[k] = v;
+    else if (k === "yaw" || k === "yawExtra") o[k] = angleLerp(from, v, t);
+    else if (k === "hearts" || k === "sparkles" || k === "wave") o[k] = v;
     else o[k] = lerp(from, v, t);
   }
   return o;

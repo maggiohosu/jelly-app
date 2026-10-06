@@ -42,9 +42,10 @@ export const COLOR_NAMES = Object.freeze([
 
 const paintIndex = (id) => PAINTS.findIndex((p) => p.id === id);
 
-/** Mean σ after dropping `drops` ({paintId: count}) into `base`, water last. */
+/** Mean σ after dropping `drops` ({paintId: count}) into `base` (a BASES id
+ *  or a σ triple, e.g. a shape's signature colour), water last. */
 export function mixSigma(base, drops) {
-  const s = (BASES[base] || BASES.berry).slice();
+  const s = (Array.isArray(base) ? base : BASES[base] || BASES.berry).slice();
   let water = 0;
   for (const [id, n] of Object.entries(drops)) {
     const p = PAINTS[paintIndex(id)];
@@ -97,14 +98,21 @@ export function nameColor(sigma) {
 /**
  * A new order. `paints` = ids of paints the player has unlocked; `level` =
  * bunny friendship level (orders get a little harder); `random` = RNG.
- * { id, base, drops (the hidden recipe), sigma, hex, name, gems: null | {shape, count}, texture: null | "slime", text }
+ * `shapes` = unlocked shape ids ([{id,label}]), `shape` = the jelly's current
+ * shape id, `shapeBase(id)` = that shape's signature mean σ or null (plain
+ * shapes take the jelly's base colour). Shape orders ("곰젤리 모양으로!") only
+ * appear once a second shape is unlocked.
+ * { id, base, drops (the hidden recipe), sigma, hex, name, gems: null | {shape, count}, texture: null | "slime", shape: null | id, text }
  */
-export function makeOrder({ paints, level = 1, random = Math.random, id = Date.now() }) {
+export function makeOrder({ paints, level = 1, random = Math.random, id = Date.now(), shapes = [], shape = "flower", shapeBase = () => null }) {
   const usable = paints.filter((p) => PAINTS[paintIndex(p)]?.sigma);
   const pick = (list) => list[Math.floor(random() * list.length)];
   const bases = ["berry", "mint", "honey", "clear", "clear", "clear"];
+  const others = shapes.filter((s) => s.id !== "flower");
   for (let attempt = 0; attempt < 40; attempt++) {
-    const base = pick(bases);
+    const orderShape = others.length && random() < 0.3 ? pick(others) : null;
+    const signature = shapeBase(orderShape ? orderShape.id : shape);
+    const base = signature ? signature.slice() : pick(bases);
     const kinds = 1 + Math.floor(random() * Math.min(3, 1 + level / 3));
     const drops = {};
     let total = 0;
@@ -121,18 +129,20 @@ export function makeOrder({ paints, level = 1, random = Math.random, id = Date.n
     const gems = level >= 2 && random() < 0.6 ? { shape: Math.floor(random() * GEM_SHAPE_LABELS.length), count: 1 + Math.floor(random() * Math.min(3, level)) } : null;
     const texture = level >= 4 && random() < 0.3 ? "slime" : null;
     const name = nameColor(sigma);
-    const parts = [`${name}색 ${texture ? "슬랑이" : "젤리"}`];
+    const parts = [`${orderShape ? orderShape.label + " 모양 " : ""}${name}색 ${texture ? "슬랑이" : "젤리"}`];
     if (gems) parts.push(`${GEM_SHAPE_LABELS[gems.shape]} 보석 ${gems.count}개`);
-    return Object.freeze({ id, base, drops, sigma, hex: sigmaToHex(sigma), name, gems, texture, text: parts.join("에 ") + "!" });
+    return Object.freeze({ id, base, drops, sigma, hex: sigmaToHex(sigma), name, gems, texture, shape: orderShape ? orderShape.id : null, text: parts.join("에 ") + "!" });
   }
   const sigma = mixSigma("clear", { pink: 2 });
-  return Object.freeze({ id, base: "clear", drops: { pink: 2 }, sigma, hex: sigmaToHex(sigma), name: "딸기우유", gems: null, texture: null, text: "딸기우유색 젤리!" });
+  return Object.freeze({ id, base: "clear", drops: { pink: 2 }, sigma, hex: sigmaToHex(sigma), name: "딸기우유", gems: null, texture: null, shape: null, text: "딸기우유색 젤리!" });
 }
 
 /**
  * How happy the bunny is with what it gets.
- * jelly = { sigma: meanDye, gems: [shapeIndex…] (normal gems), rareCount, texture }
- * → { stars 1..3, score 0..1, colorScore, extraScore, dE, mood }
+ * jelly = { sigma: meanDye, gems: [shapeIndex…] (normal gems), rareCount, texture, shape }
+ * → { stars 1..4, base 1..3, bonus (rare gem ★+1), score 0..1, colorScore, extraScore, dE, mood }
+ * Any rare gem adds one star even if the order did not ask for it; a ★3 work
+ * with a rare gem becomes ★4 "special".
  */
 export function scoreOrder(order, jelly) {
   const dE = deltaE(order.sigma, jelly.sigma);
@@ -143,8 +153,23 @@ export function scoreOrder(order, jelly) {
     checks.push(Math.min(1, have / order.gems.count));
   }
   if (order.texture) checks.push(jelly.texture === order.texture ? 1 : 0);
+  if (order.shape) checks.push((jelly.shape || "flower") === order.shape ? 1 : 0);
   const extraScore = checks.length ? checks.reduce((a, b) => a + b, 0) / checks.length : 1;
   const score = 0.7 * colorScore + 0.3 * extraScore;
-  const stars = score >= 0.85 ? 3 : score >= 0.6 ? 2 : 1;
-  return { stars, score, colorScore, extraScore, dE, mood: stars === 3 ? "happy" : stars === 2 ? "ok" : "sad" };
+  // the wrong shape can never be a perfect order
+  const wrongShape = order.shape && (jelly.shape || "flower") !== order.shape;
+  const base = Math.min(wrongShape ? 2 : 3, score >= 0.85 ? 3 : score >= 0.6 ? 2 : 1);
+  const bonus = (jelly.rareCount || 0) > 0 ? 1 : 0;
+  const stars = Math.min(4, base + bonus);
+  return { stars, base, bonus, score, colorScore, extraScore, dE, mood: stars === 4 ? "special" : stars === 3 ? "happy" : stars === 2 ? "ok" : "sad" };
+}
+
+/**
+ * ★1 only: 1/20 the bunny spits it out (퉤), 1/5 it shakes its head and hands
+ * it back after one bite, otherwise it eats it. Exclusive bands of one roll.
+ */
+export function rollOutcome(stars, random = Math.random) {
+  if (stars !== 1) return "eat";
+  const r = random();
+  return r < 0.05 ? "spit" : r < 0.25 ? "refuse" : "eat";
 }

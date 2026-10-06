@@ -14,7 +14,9 @@ import { createRareGemLibrary, RareGemLayer, RARE_GEMS, RARE_SIZE, rareGemIconSV
 import { createThumbnailer } from "../render/thumbnail.js";
 import { PAINTS } from "../core/world.js";
 import { Progress } from "./progress.js";
-import { makeOrder, scoreOrder, nameColor, sigmaToHex } from "./orders.js";
+import { makeOrder, scoreOrder, rollOutcome, nameColor, sigmaToHex } from "./orders.js";
+import { SHAPES, signatureSigma } from "../core/shapes.js";
+import { DecorLayer } from "../render/decor.js";
 import { createGameUI } from "./game-ui.js";
 import { JellyAudio } from "./audio.js";
 import { QualityGovernor } from "./quality.js";
@@ -65,6 +67,9 @@ async function boot() {
   }
   const { renderer, camera, isWebGPU, tray } = stage;
   const settings = loadSettings();
+  // progress (coins, friendship…) — also decides which shapes may be used
+  const progress = new Progress();
+  if (!progress.shapes().includes(settings.shape)) settings.shape = "flower";
 
   // ---- workers ----
   const sim = new Worker(new URL("../workers/sim-worker.js", import.meta.url), { type: "module" });
@@ -72,7 +77,7 @@ async function boot() {
   let ready;
   try {
     const simReady = once(sim, "ready");
-    sim.postMessage({ type: "init", wallRadius: TRAY_RADIUS, base: settings.base, texture: settings.texture });
+    sim.postMessage({ type: "init", wallRadius: TRAY_RADIUS, base: settings.base, texture: settings.texture, shape: settings.shape });
     ready = await simReady;
     const opticsReady = once(optics, "ready");
     optics.postMessage({ type: "init", size: 192 });
@@ -88,6 +93,7 @@ async function boot() {
   const gemLayer = new GemLayer(tray, gemLibrary);
   gemLayer.setGlowScale(settings.glow);
   const beadLayer = new BeadLayer(tray);
+  const decorLayer = new DecorLayer(tray);
   const additiveLayer = new AdditiveLayer(tray);
   const rareLibrary = createRareGemLibrary({ quality: "high" });
   const rareLayer = new RareGemLayer(tray, rareLibrary);
@@ -95,7 +101,6 @@ async function boot() {
   const coinShower = new CoinShower(tray, camera);
   const rabbit = new Rabbit(tray, { quality: "high" });
   const thumbnailer = createThumbnailer(renderer);
-  const progress = new Progress();
   const audio = new JellyAudio();
   audio.setVolumes({ master: settings.master, crunch: settings.crunch, gems: settings.gems, boing: settings.boing, effects: settings.effects });
   audio.setTexture(settings.texture);
@@ -126,7 +131,7 @@ async function boot() {
   const pendingEvents = [];
   const freeBuffers = [];
   const opticsPool = [];
-  let topologySent = false;
+  let topologySent = false, opticsBody = 0;    // a new optics body per surface topology (shape)
   let simBusy = false, pendingDt = 0;
   let opticsBusy = false, opticsClock = 1, opticsDirty = true, causticClock = 1;
   let started = false, needsRender = true, running = false, frameId = 0;
@@ -168,10 +173,17 @@ async function boot() {
   // ---- sim worker ----
   sim.onmessage = ({ data }) => {
     if (data.type === "error") { console.error(data.message); simBusy = false; return; }
+    if (data.type === "topology") {
+      // the jelly changed shape: new surface topology for the view, shadow and caustics
+      view.setTopology(data);
+      opticsBody++; topologySent = false; opticsDirty = true; needsRender = true;
+      return;
+    }
     if (data.type !== "frame") return;
     simBusy = false;
     view.sync(data, (buffer) => freeBuffers.push(buffer));
     splitGems(data.gems, data.gemCount);
+    if (data.decor && !view.hidden) { decorLayer.update(data.decor, data.decorCount || 0); needsRender = true; }
     if (data.additives && !view.hidden) { additiveLayer.update(data.additives); if (data.additives.length) freeBuffers.push(data.additives.buffer); needsRender = true; }
     if (data.beads && !view.hidden) { beadLayer.update(data.beads); if (data.beads.length) freeBuffers.push(data.beads.buffer); needsRender = true; }
     if (data.gems) freeBuffers.push(data.gems.buffer);
@@ -242,13 +254,13 @@ async function boot() {
     const positions = takeOpticsBuffer(position.byteLength, Float32Array) || new Float32Array(position.length);
     const normals = takeOpticsBuffer(normal.byteLength, Float32Array) || new Float32Array(normal.length);
     positions.set(position); normals.set(normal);
-    const body = { id: 0, positions, normals };
+    const body = { id: opticsBody, positions, normals };
     if (!topologySent) { body.indices = view.geometry.index.array; topologySent = true; }
     const shadowBytes = takeOpticsBuffer(192 * 192 * 4, Uint8Array) || undefined;
     const transfer = [positions.buffer, normals.buffer];
     if (shadowBytes) transfer.push(shadowBytes.buffer);
     const tc = stage.syncTrayCamera();
-    optics.postMessage({ type: "update", camera: [tc.position.x, tc.position.y, tc.position.z], bodies: [body], keep: [0], shadowBytes }, transfer);
+    optics.postMessage({ type: "update", camera: [tc.position.x, tc.position.y, tc.position.z], bodies: [body], keep: [opticsBody], shadowBytes }, transfer);
     opticsBusy = true;
     opticsDirty = false;
   }
@@ -336,6 +348,13 @@ async function boot() {
     onGemTap: (shape, color) => pendingEvents.push({ type: "gemScatter", count: 1, shape, color, radius: gemRadius(shape) }),
     onScatter: (color) => pendingEvents.push({ type: "gemScatter", count: 6, shape: -1, color, radius: gemRadius(-1), shapes: GEM_SHAPES.length }),
     onBase: (base) => { pendingEvents.push({ type: "base", base }); needsRender = true; },
+    onShape: (id, info) => {
+      if (!id) { toast(`🐰 토끼와 Lv${info.level}까지 친해지면 '${info.label}' 모양이 열려요`); return; }
+      if (eating) return;
+      pendingEvents.push({ type: "shape", shape: id, base: settings.base });
+      toast(`${info.label} 모양 젤리가 나왔어요`);
+      dismissHint();
+    },
   });
   function rareRadius(index) {
     const r = rareLibrary.gems?.[index]?.radius || RARE_SIZE / 2;
@@ -348,6 +367,7 @@ async function boot() {
   }
 
   $("gems").addEventListener("click", () => {
+    $("shape-drawer").hidden = true; $("shape-button").classList.remove("on");
     const drawer = $("gem-drawer"), open = drawer.hidden;
     drawer.hidden = !open;
     $("gems").setAttribute("aria-pressed", String(open));
@@ -390,7 +410,7 @@ async function boot() {
   for (const type of ["pointerdown", "touchend", "click"]) document.addEventListener(type, kickAudio, { capture: true, passive: true });
 
   // ---- the bunny game: orders, feeding, coins, cards, book ----
-  let eating = false, lastFrame = null;
+  let eating = false, lastFrame = null, carrying = false;
   const thumbCache = new Map();
   function rareThumb(index, tier) {
     const key = `${index}:${tier}`;
@@ -406,7 +426,7 @@ async function boot() {
     rareIcon: (i, t) => rareGemIconSVG(i, t),
     rareThumb,
     onPull: () => { const r = progress.pull(); if (r) refreshRareDrawer(); return r; },
-    sounds: { cardFlip: () => audio.cardFlip?.(), cardShake: () => audio.cardShake?.(), reveal: (k) => audio.reveal?.(k), levelUp: () => audio.levelUp?.() },
+    sounds: { cardFlip: () => audio.cardFlip?.(), cardShake: () => audio.cardShake?.(), reveal: (k) => audio.reveal?.(k), levelUp: () => audio.levelUp?.(), coinLoss: (n) => audio.coinLoss?.(n) },
   });
   function refreshRareDrawer() {
     const owned = progress.ownedRare();
@@ -419,8 +439,13 @@ async function boot() {
     }));
   }
   function refreshPalette(fresh = []) { ui.setPalette(progress.paints(), progress.additives(), fresh); }
+  // A shape's signature colour (mean σ of its look) — the starting colour of
+  // orders for that shape; null for plain shapes (they take the base colour).
+  // a shape's signature colour (mean σ) is an order's starting colour
+  const shapeBase = (id) => signatureSigma(id);
   function newOrder() {
-    const order = makeOrder({ paints: progress.paints(), level: progress.level.level, id: Date.now() });
+    const shapes = progress.shapes().map((id) => SHAPES.find((x) => x.id === id)).filter(Boolean);
+    const order = makeOrder({ paints: progress.paints(), level: progress.level.level, id: Date.now(), shapes, shape: settings.shape, shapeBase });
     progress.setOrder(order);
     gameUI.showOrder(order);
     return order;
@@ -446,50 +471,90 @@ async function boot() {
     input.cancel();
     dismissHint();
     $("gem-drawer").hidden = true; $("gems").classList.remove("on");
+    $("shape-drawer").hidden = true; $("shape-button").classList.remove("on");
     const order = progress.order || newOrder();
     const sigma = view.state.meanDye.slice();
-    const result = scoreOrder(order, { sigma, gems: jellyGems.shapes, texture: settings.texture });
     const rareCount = jellyGems.rareCount;
-    const thumb = await captureWork();
-    const card = { id: Date.now(), date: Date.now(), stars: result.stars, name: nameColor(sigma), hex: sigmaToHex(sigma), texture: settings.texture, thumb, gems: jellyGems.shapes.length + rareCount };
+    const result = scoreOrder(order, { sigma, gems: jellyGems.shapes, texture: settings.texture, rareCount, shape: settings.shape });
+    // ★1 only: 1/20 퉤 (coins taken), 1/5 a head-shake after one bite (a few coins)
+    // (?outcome=refuse|spit|eat forces an outcome — for testing the animations)
+    const forced = params.get("outcome");
+    const outcome = ["eat", "refuse", "spit"].includes(forced) ? forced : rollOutcome(result.stars);
+    const thumb = outcome === "eat" ? await captureWork() : null;
+    const shapeInfo = SHAPES.find((x) => x.id === settings.shape);
+    const card = { id: Date.now(), date: Date.now(), stars: result.stars, name: nameColor(sigma), hex: sigmaToHex(sigma), texture: settings.texture, shape: settings.shape, shapeLabel: settings.shape !== "flower" ? shapeInfo?.label : "", thumb, gems: jellyGems.shapes.length + rareCount };
     // the bunny sits behind the jelly, a little to the side, facing the camera
     const toCam = tray.worldToLocal(camera.position.clone()).setY(0).normalize();
     const side = new THREE.Vector3(-toCam.z, 0, toCam.x);
     const seat = toCam.clone().multiplyScalar(-0.108).addScaledVector(side, 0.024);   // clear of the rim
     const b = lastFrame.bounds, jc = lastFrame.center.slice();
     let reward = null;
+    carrying = false;
     rabbit.play({
       position: [seat.x, 0, seat.z],
       faceTo: [toCam.x * 0.3, 0.04, toCam.z * 0.3],
       jelly: { center: lastFrame.center.slice(), width: b[3] - b[0], height: b[4] - b[1] },
-      bites: 4, mood: result.mood,
+      bites: outcome === "eat" ? 4 : 1, mood: result.mood, outcome,
+      jellyColor: sigmaToHex(sigma),
       onEvent: (type, data = {}) => {
         needsRender = true;
         switch (type) {
           case "arrive": audio.squeak?.("happy"); break;
           case "grab":
-            pendingEvents.push({ type: "grabNear", id: "pawL", point: data.paws[0] }, { type: "grabNear", id: "pawR", point: data.paws[1] });
-            audio.squelch(0.5);
+            // held as a whole (no stretching): the bunny's hold point drives the jelly's centre
+            carrying = true;
+            if (data.hold) pendingEvents.push({ type: "carry", target: data.hold });
+            audio.squelch(0.4);
             break;
-          case "bite":
-            {
-              // bite a little into the jelly from where the mouth is
-              const m = data.mouth, c = lastFrame.center;
-              pendingEvents.push({ type: "bite", center: [m[0] + (c[0] - m[0]) * 0.3, m[1] + (c[1] - m[1]) * 0.3, m[2] + (c[2] - m[2]) * 0.3] });
-            }
-            audio.munch ? audio.munch(0.9) : audio.crunch(1);
+          case "bite": {
+            // bite a little into the jelly from where the mouth is
+            const m = data.mouth, c = lastFrame.center;
+            pendingEvents.push({ type: "bite", center: [m[0] + (c[0] - m[0]) * 0.3, m[1] + (c[1] - m[1]) * 0.3, m[2] + (c[2] - m[2]) * 0.3] });
+            audio.munch(0.9);
             view.pulse(0.5);
             break;
-          case "chew": audio.chew ? audio.chew(0.4) : audio.crunch(0.3); break;
-          case "finish":
-            pendingEvents.push({ type: "grabEnd", id: "pawL" }, { type: "grabEnd", id: "pawR" });
-            view.setHidden(true); hideCarried(true);
-            pendingEvents.push({ type: "reset", base: order.base, lift: 0.4 }, { type: "pause", paused: true });
+          }
+          case "chew": audio.chew(data.duration || 0.4); break;
+          case "release":
+            carrying = false;
+            pendingEvents.push({ type: "carry", target: null });
             break;
+          case "finish":
+            carrying = false;
+            pendingEvents.push({ type: "carry", target: null });
+            view.setHidden(true); hideCarried(true);
+            pendingEvents.push({ type: "reset", base: Array.isArray(order.base) ? settings.base : order.base, lift: 0.4 }, { type: "pause", paused: true });
+            break;
+          case "refuse": {
+            audio.squeak?.("no");
+            reward = progress.refuse();
+            gameUI.showReward({ kind: "refuse", coins: reward.coins, xp: reward.xp, levelUps: reward.levelUps });
+            coinShower.pour({
+              count: reward.coins, at: [jc[0], 0.04, jc[2]],
+              collectAt: () => gameUI.coinCounterNDC(),
+              onCollect: () => { gameUI.addCoin(1); audio.coin(0.3, 7); },
+              onDone: () => gameUI.renderHud(),
+            });
+            break;
+          }
+          case "spit": {
+            {
+              // 퉤 now, splat when the chunk lands (ballistic time to the tray)
+              const from = data.from, v = data.velocity;
+              const land = from && v ? Math.max(0.15, Math.min(1.5, (v[1] + Math.sqrt(v[1] * v[1] + 2 * 9.81 * Math.max(0, from[1]))) / 9.81)) : 0.35;
+              audio.spit(0.8, land);
+            }
+            const lost = progress.spit();
+            gameUI.showReward({ kind: "spit", coins: lost.lost });
+            if (lost.lost > 0) gameUI.loseCoins(lost.lost);
+            break;
+          }
           case "react": {
-            audio.squeak?.(result.mood);
+            if (outcome !== "eat") { audio.squeak?.("grumpy"); break; }
+            audio.squeak?.(result.mood === "special" ? "happy" : result.mood);
+            if (result.stars === 4) audio.special?.();
             reward = progress.feed({ stars: result.stars, rareCount, card });
-            gameUI.showReward({ ...result, coins: reward.coins, xp: reward.xp, levelUps: reward.levelUps });
+            gameUI.showReward({ kind: "eat", ...result, coins: reward.coins, xp: reward.xp, levelUps: reward.levelUps });
             const per = Math.max(1, Math.round(reward.coins / 14)), n = Math.ceil(reward.coins / per);
             let collected = 0;
             coinShower.pour({
@@ -502,11 +567,17 @@ async function boot() {
             break;
           }
           case "done": {
-            if (reward?.levelUps.length) refreshPalette(reward.levelUps.map((u) => u.reward?.id).filter(Boolean));
-            // a fresh jelly drops in for the next order
-            const next = newOrder();
-            pendingEvents.push({ type: "pause", paused: false }, { type: "reset", base: next.base, lift: 0.06 });
-            view.setHidden(false); hideCarried(false);
+            carrying = false;
+            if (reward?.levelUps?.length) applyLevelUps(reward.levelUps);
+            if (outcome === "eat") {
+              // a fresh jelly drops in for the next order
+              const next = newOrder();
+              pendingEvents.push({ type: "pause", paused: false }, { type: "reset", base: Array.isArray(next.base) ? settings.base : next.base, lift: 0.06 });
+              view.setHidden(false); hideCarried(false);
+            } else {
+              // refused / spat out: the (bitten) jelly stays — fix it and try again
+              pendingEvents.push({ type: "carry", target: null });
+            }
             eating = false; $("feed").disabled = false;
             gameUI.renderHud();
             break;
@@ -515,9 +586,15 @@ async function boot() {
       },
     });
   }
+  function applyLevelUps(levelUps) {
+    const fresh = levelUps.flatMap((u) => u.rewards.map((r) => r.id));
+    refreshPalette(fresh);
+    ui.setShapes(progress.shapes(), fresh);
+  }
   function hideCarried(hidden) {
     for (const m of gemLayer.meshes) if (hidden) m.visible = false;
     rareLayer.setHidden?.(hidden);
+    decorLayer.setHidden(hidden);
     beadLayer.mesh.visible = !hidden && beadLayer.mesh.count > 0;
     additiveLayer.glitter.visible = !hidden && additiveLayer.glitter.count > 0;
     additiveLayer.stars.visible = !hidden && additiveLayer.stars.count > 0;
@@ -539,6 +616,7 @@ async function boot() {
     $("hud").hidden = false; $("brand").hidden = true;
     $("gacha-button").hidden = false; $("book-button").hidden = false;
     gameUI.renderHud();
+    ui.setShapes(progress.shapes());
     gameUI.showOrder(progress.order || newOrder());
     if (progress.state.feeds === 0 && progress.state.pulls === 0) setTimeout(() => toast("🐰 토끼 주문서대로 젤리를 만들고 🥕를 눌러 보세요! 첫 카드 뽑기 금화도 드려요", 4200), 900);
     $("hint").hidden = false;
@@ -572,9 +650,7 @@ async function boot() {
     if (view.updateDrops(dt)) needsRender = true;
     if (rabbit.busy && lastFrame) {
       const r = rabbit.update(dt, { center: lastFrame.center, bounds: lastFrame.bounds });
-      if (r?.paws) {
-        pendingEvents.push({ type: "target", id: "pawL", point: r.paws[0] }, { type: "target", id: "pawR", point: r.paws[1] });
-      }
+      if (carrying && r?.hold) pendingEvents.push({ type: "carry", target: r.hold });
       needsRender = true;
     }
     if (coinShower.update(dt)) needsRender = true;

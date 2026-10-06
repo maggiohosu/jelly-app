@@ -47,22 +47,28 @@ function makeMaterial(glow) {
 
 export function createJellyView(stage, init, { caustics = true } = {}) {
   const { camera, sun, benchMaterial, benchTexture, isWebGPU, tray } = stage;
-  const vertexCount = init.positions.length / 3;
-
-  const geometry = new THREE.BufferGeometry();
-  const position = new THREE.BufferAttribute(new Float32Array(init.positions), 3).setUsage(THREE.DynamicDrawUsage);
-  const normal = new THREE.BufferAttribute(new Float32Array(vertexCount * 3), 3).setUsage(THREE.DynamicDrawUsage);
-  const thickness = new THREE.BufferAttribute(new Float32Array(vertexCount).fill(0.03), 1).setUsage(THREE.DynamicDrawUsage);
-  const dye = new THREE.BufferAttribute(new Float32Array(vertexCount * 3), 3).setUsage(THREE.DynamicDrawUsage);
-  const fxAttr = new THREE.BufferAttribute(new Float32Array(vertexCount * 2), 2).setUsage(THREE.DynamicDrawUsage);
-  geometry.setAttribute("position", position);
-  geometry.setAttribute("normal", normal);
-  geometry.setAttribute("opticalThickness", thickness);
-  geometry.setAttribute("dye", dye);
-  geometry.setAttribute("fx", fxAttr);
-  geometry.setIndex(new THREE.BufferAttribute(init.indices, 1));
-  geometry.boundingBox = new THREE.Box3();
-  geometry.boundingSphere = new THREE.Sphere();
+  // The surface topology changes with the jelly's shape: everything sized by
+  // it is (re)built here.
+  let geometry, position, normal, thickness, dye, fxAttr;
+  function buildGeometry(init) {
+    const vertexCount = init.positions.length / 3;
+    geometry = new THREE.BufferGeometry();
+    position = new THREE.BufferAttribute(new Float32Array(init.positions), 3).setUsage(THREE.DynamicDrawUsage);
+    normal = new THREE.BufferAttribute(new Float32Array(vertexCount * 3), 3).setUsage(THREE.DynamicDrawUsage);
+    thickness = new THREE.BufferAttribute(new Float32Array(vertexCount).fill(0.03), 1).setUsage(THREE.DynamicDrawUsage);
+    dye = new THREE.BufferAttribute(new Float32Array(vertexCount * 3), 3).setUsage(THREE.DynamicDrawUsage);
+    fxAttr = new THREE.BufferAttribute(new Float32Array(vertexCount * 2), 2).setUsage(THREE.DynamicDrawUsage);
+    geometry.setAttribute("position", position);
+    geometry.setAttribute("normal", normal);
+    geometry.setAttribute("opticalThickness", thickness);
+    geometry.setAttribute("dye", dye);
+    geometry.setAttribute("fx", fxAttr);
+    geometry.setIndex(new THREE.BufferAttribute(init.indices, 1));
+    geometry.boundingBox = new THREE.Box3();
+    geometry.boundingSphere = new THREE.Sphere();
+    return geometry;
+  }
+  buildGeometry(init);
 
   const glow = uniform(0);
   const jelly = new THREE.Mesh(geometry, makeMaterial(glow));
@@ -125,18 +131,33 @@ export function createJellyView(stage, init, { caustics = true } = {}) {
   const raycaster = new THREE.Raycaster(), ndc = new THREE.Vector2();
 
   return {
-    jelly, geometry, state,
+    jelly, state,
+    get geometry() { return geometry; },
+    // New jelly shape: new surface topology (worker "topology" message).
+    setTopology(next) {
+      const old = geometry;
+      jelly.geometry = buildGeometry(next);
+      old.dispose();
+      if (field) {
+        field = new GPUCausticField({ positions: position.array, indices: next.indices, geometry });
+        field.setCamera(stage.trayCamera);
+        if (causticsOn) { benchMaterial.emissiveNode = causticEmission(); benchMaterial.needsUpdate = true; }
+      }
+    },
     get causticsOn() { return causticsOn; },
     get hasCaustics() { return field !== null; },
 
     sync(frame, recycle) {
+      // (frames from before a shape change can still arrive: skip mismatched sizes)
       if (frame.positions) {
-        position.array.set(frame.positions); normal.array.set(frame.normals);
-        position.needsUpdate = true; normal.needsUpdate = true;
+        if (frame.positions.length === position.array.length) {
+          position.array.set(frame.positions); normal.array.set(frame.normals);
+          position.needsUpdate = true; normal.needsUpdate = true;
+        }
         recycle(frame.positions.buffer); recycle(frame.normals.buffer);
       }
-      if (frame.dye) { dye.array.set(frame.dye); dye.needsUpdate = true; recycle(frame.dye.buffer); }
-      if (frame.fx) { fxAttr.array.set(frame.fx); fxAttr.needsUpdate = true; recycle(frame.fx.buffer); }
+      if (frame.dye) { if (frame.dye.length === dye.array.length) { dye.array.set(frame.dye); dye.needsUpdate = true; } recycle(frame.dye.buffer); }
+      if (frame.fx) { if (frame.fx.length === fxAttr.array.length) { fxAttr.array.set(frame.fx); fxAttr.needsUpdate = true; } recycle(frame.fx.buffer); }
       const b = frame.bounds;
       geometry.boundingBox.min.set(b[0], b[1], b[2]); geometry.boundingBox.max.set(b[3], b[4], b[5]);
       geometry.boundingBox.getBoundingSphere(geometry.boundingSphere);

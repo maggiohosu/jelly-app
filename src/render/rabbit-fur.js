@@ -202,19 +202,42 @@ export function createFurMaterial(boneCount) {
   return { material, bones, u };
 }
 
-// Unlit-with-own-lighting material for the little hearts (same light model).
-export function createCandyMaterial(fur, hex) {
+// Unlit-with-own-lighting material for the hearts / sparkles (same light model).
+export function createCandyMaterial(fur, color, { glow = 0 } = {}) {
   const N = normalize(normalWorld);
   const V = normalize(cameraPosition.sub(positionWorld));
   const L = fur.u.sunDir;
-  const base = vec3(uniform(new THREE.Color(hex)));
+  const base = vec3(uniform(new THREE.Color(color)));
   const diffuse = clamp(dot(N, L).add(0.4).div(1.4), 0, 1);
   const hemi = mix(vec3(fur.u.ground), vec3(fur.u.sky), N.y.mul(0.5).add(0.5));
   const R = reflect(V.negate(), N);
   const studio = smoothstep(0.82, 0.9, dot(R, normalize(cameraWorldMatrix.mul(vec4(-0.42, 0.55, 0.72, 0)).xyz)));
   const rim = pow(clamp(dot(N, V).oneMinus(), 0, 1), 3).mul(0.35);
   const material = new THREE.MeshBasicNodeMaterial();
-  material.name = "RabbitHeart";
-  material.colorNode = base.mul(vec3(fur.u.sunColor).mul(diffuse).add(hemi.mul(0.9))).add(studio.mul(1.4)).add(rim);
+  material.name = "RabbitCandy";
+  material.colorNode = base.mul(vec3(fur.u.sunColor).mul(diffuse).add(hemi.mul(0.9)).add(glow)).add(studio.mul(1.4)).add(rim);
   return material;
+}
+
+// Glossy jelly blob (the spat-out chunk): tinted by the jelly colour, fakes a
+// little translucency (soft inner glow + bright Fresnel rim) and fades out.
+export function createBlobMaterial(fur) {
+  const color = uniform(new THREE.Color("#ff8fb1"));
+  const opacity = uniform(1);
+  const N = normalize(normalWorld);
+  const V = normalize(cameraPosition.sub(positionWorld));
+  const L = fur.u.sunDir;
+  const NdV = clamp(dot(N, V), 0, 1);
+  const diffuse = clamp(dot(N, L).add(0.6).div(1.6), 0, 1);
+  const hemi = mix(vec3(fur.u.ground), vec3(fur.u.sky), N.y.mul(0.5).add(0.5));
+  const R = reflect(V.negate(), N);
+  const studio = smoothstep(0.86, 0.93, dot(R, normalize(cameraWorldMatrix.mul(vec4(-0.42, 0.55, 0.72, 0)).xyz)));
+  const sunSpec = pow(clamp(dot(N, normalize(L.add(V))), 0, 1), 90);
+  const fresnel = pow(NdV.oneMinus(), 3);
+  const body = vec3(color).mul(vec3(fur.u.sunColor).mul(diffuse).mul(0.7).add(hemi.mul(0.65)).add(NdV.mul(0.35)));
+  const material = new THREE.MeshBasicNodeMaterial({ transparent: true });
+  material.name = "RabbitSpitBlob";
+  material.colorNode = body.add(vec3(fur.u.sky).mul(fresnel).mul(0.45)).add(studio.mul(1.6)).add(vec3(fur.u.sunColor).mul(sunSpec).mul(1.2));
+  material.opacityNode = opacity.mul(mix(0.82, 1, fresnel));
+  return { material, color, opacity };
 }

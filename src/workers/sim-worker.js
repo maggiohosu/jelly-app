@@ -16,6 +16,8 @@ let tickCount = 0;
 let dyeSent = 0;
 let sentOnce = false;
 let beadsSent = false;
+let decorSent = false;
+let layersDirty = false;   // a reset / shape change: resend (or clear) beads and decorations
 let additivesSent = -1;
 const pool = new Map(); // byteLength → [ArrayBuffer]
 
@@ -57,11 +59,22 @@ function frame(steps, elapsed, stepped) {
     world.additiveStates(a); out.additives = a; transfer.push(a.buffer);
     additivesSent = world.additiveVersion;
   } else if (!additives && additivesSent !== world.additiveVersion) { out.additives = new Float32Array(0); additivesSent = world.additiveVersion; }
-  if (world.texture === "slime" && world.beads && (stepped || !beadsSent)) {
-    const b = take(world.beads.count * 4);
-    world.beadStates(b); out.beads = b; transfer.push(b.buffer);
+  // foam beads (slime) + pearls (shape looks)
+  const beadCount = world.beadCount();
+  if (beadCount && (stepped || !beadsSent || layersDirty)) {
+    const b = take(beadCount * 4);
+    const states = world.beadStates(b); out.beads = states; transfer.push(b.buffer);
     beadsSent = true;
-  } else if (world.texture !== "slime" && beadsSent) { out.beads = new Float32Array(0); beadsSent = false; }
+  } else if (!beadCount && (beadsSent || layersDirty)) { out.beads = new Float32Array(0); beadsSent = false; }
+  // face / cherry / beak decorations follow the jelly
+  const decorCount = world.decorCount();
+  out.decorCount = decorCount;
+  if (decorCount && (stepped || !decorSent || layersDirty)) {
+    const d = take(decorCount * 12);
+    world.decorStates(d); out.decor = d; transfer.push(d.buffer);
+    decorSent = true;
+  } else if (!decorCount && (decorSent || layersDirty)) { out.decor = new Float32Array(0); decorSent = false; }
+  layersDirty = false;
   out.grab = body.grab ? { point: body.grab.point.slice(), target: body.grab.target.slice() } : null;
   out.impact = body.impact; out.wallImpact = body.wallImpact;
   body.impact = 0; body.wallImpact = 0;
@@ -74,7 +87,7 @@ function frame(steps, elapsed, stepped) {
 self.onmessage = ({ data }) => {
   try {
     if (data.type === "init") {
-      world = new JellyWorld({ wallRadius: data.wallRadius, base: data.base, texture: data.texture });
+      world = new JellyWorld({ wallRadius: data.wallRadius, base: data.base, texture: data.texture, shape: data.shape });
       world.events.length = 0;
       self.postMessage({ type: "ready", indices: world.type.stencils.indices.slice(), positions: world.body.positions.slice() });
     } else if (data.type === "tick") {
@@ -85,7 +98,13 @@ self.onmessage = ({ data }) => {
       }
       for (const event of data.events || []) {
         if (event.type === "pause") { paused = Boolean(event.paused); if (paused) world.handle({ type: "grabEnd" }); world.accumulator = 0; continue; }
-        if (event.type === "reset") { sentOnce = false; beadsSent = false; }
+        if (event.type === "reset") { sentOnce = false; layersDirty = true; }
+        if (event.type === "shape") {
+          world.handle(event);
+          sentOnce = false; layersDirty = true; additivesSent = -1; dyeSent = -1;
+          self.postMessage({ type: "topology", shape: world.shape, indices: world.type.stencils.indices.slice(), positions: world.body.positions.slice() });
+          continue;
+        }
         if (event.type === "bite") beadsSent = false;
         if (event.type === "texture") sentOnce = false;
         world.handle(event);

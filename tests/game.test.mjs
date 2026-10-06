@@ -1,6 +1,6 @@
 // Orders (colour model, solvability, scoring) and progress (coins, friendship,
 // gacha upgrades, storage).
-import { makeOrder, scoreOrder, mixSigma, deltaE, nameColor, COLOR_NAMES, sigmaToHex } from "../src/app/orders.js";
+import { makeOrder, scoreOrder, rollOutcome, mixSigma, deltaE, nameColor, COLOR_NAMES, sigmaToHex } from "../src/app/orders.js";
 import { Progress, PULL_COST, WELCOME_COINS, LEVEL_REWARDS, RARE_COUNT, levelForXp } from "../src/app/progress.js";
 import { JellyWorld, PAINTS } from "../src/core/world.js";
 
@@ -50,7 +50,7 @@ function rng(a) { return () => { a |= 0; a = (a + 0x6d2b79f5) | 0; let t = Math.
   const f2 = p.feed({ stars: 1 });
   check("⭐1 still pays 30 coins (sad bunny)", f2.coins === 30 && p.coins === 100);
   check("two meals ≈ one pull", p.canPull);
-  check("friendship levels up and unlocks the orange paint", p.level.level >= 2 && p.paints().includes("orange") && [...f1.levelUps, ...f2.levelUps].some((u) => u.reward?.id === "orange"));
+  check("friendship levels up and unlocks the orange paint + pudding shape", p.level.level >= 2 && p.paints().includes("orange") && p.shapes().includes("pudding") && [...f1.levelUps, ...f2.levelUps].some((u) => u.rewards.some((r) => r.id === "orange")));
   // upgrades: force the same gem
   const q = new Progress(storage, () => 0.5);
   q.state.coins = 1000;
@@ -60,12 +60,40 @@ function rng(a) { return () => { a |= 0; a = (a + 0x6d2b79f5) | 0; let t = Math.
   check("progress survives a reload", reloaded.coins === q.coins && reloaded.state.rare.join() === q.state.rare.join());
   const broken = new Progress({ getItem: () => "{oops", setItem: () => { throw new Error("quota"); } });
   check("corrupted storage starts fresh, full storage does not crash", broken.coins === WELCOME_COINS && (broken.feed({ stars: 2 }), true));
-  check("all rewards are reachable by level 8", levelForXp(700).level >= 8 && Object.keys(LEVEL_REWARDS).every((l) => Number(l) <= 8));
+  check("all rewards are reachable by level 10", levelForXp(1080).level >= 10 && Object.keys(LEVEL_REWARDS).every((l) => Number(l) <= 10));
   check("25 rare gems", RARE_COUNT === 25);
   // album cap
   const a = new Progress(storage, rng(9));
   for (let i = 0; i < 70; i++) a.feed({ stars: 2, card: { id: i, hex: sigmaToHex(mixSigma("berry", {})) } });
   check("album keeps the latest 60 works", a.state.album.length === 60 && a.state.album[59].id === 69);
+}
+
+// 4) v7 rules: rare gem ★+1 (★4 special), ★1 refuse / spit, shape orders
+{
+  const o = makeOrder({ paints: ["red", "yellow", "blue", "pink", "purple", "sky", "water"], level: 3, random: rng(5), id: 1 });
+  const perfect = { sigma: mixSigma(o.base, o.drops), gems: o.gems ? Array(o.gems.count).fill(o.gems.shape) : [], texture: o.texture || "jelly" };
+  check("a rare gem turns ★3 into ★4 special", scoreOrder(o, { ...perfect, rareCount: 1 }).stars === 4 && scoreOrder(o, { ...perfect, rareCount: 1 }).mood === "special");
+  const bad = { sigma: [120, 4, 120], gems: [], texture: "jelly" };
+  check("a rare gem lifts ★1 to ★2 (no refusal then)", scoreOrder(o, bad).stars === 1 && scoreOrder(o, { ...bad, rareCount: 3 }).stars === 2);
+  const counts = { eat: 0, refuse: 0, spit: 0 }, r = rng(11);
+  for (let i = 0; i < 20000; i++) counts[rollOutcome(1, r)]++;
+  check("★1 outcomes ≈ 5 % spit, 20 % refuse", Math.abs(counts.spit / 20000 - 0.05) < 0.008 && Math.abs(counts.refuse / 20000 - 0.2) < 0.015, JSON.stringify(counts));
+  check("★2+ is always eaten", [2, 3, 4].every((s) => Array.from({ length: 200 }, () => rollOutcome(s, r)).every((x) => x === "eat")));
+  const store = new Map(), storage = { getItem: (k) => store.get(k) ?? null, setItem: (k, v) => store.set(k, String(v)) };
+  const p = new Progress(storage, rng(4));
+  const ref = p.refuse();
+  check("refusal pays 1–10 coins", ref.coins >= 1 && ref.coins <= 10 && p.coins === WELCOME_COINS + ref.coins);
+  p.state.coins = 20;
+  const sp = p.spit();
+  check("spit takes 1–100 coins but never below 0", sp.rolled >= 1 && sp.rolled <= 100 && p.coins === Math.max(0, 20 - sp.rolled) && p.coins >= 0, JSON.stringify(sp));
+  check("★4 pays 80 coins", p.feed({ stars: 4 }).coins === 80);
+  const shapes = [{ id: "flower", label: "꽃" }, { id: "bear", label: "곰젤리" }];
+  const purple = [30, 70, 10];
+  const sOrders = Array.from({ length: 80 }, (_, i) => makeOrder({ paints: ["red", "yellow", "blue", "pink", "water"], level: 6, random: rng(100 + i), id: i, shapes, shape: "flower", shapeBase: (id) => (id === "bear" ? purple : null) }));
+  const bearOrders = sOrders.filter((x) => x.shape === "bear");
+  check("shape orders appear once a shape is unlocked", bearOrders.length > 10 && bearOrders.every((x) => x.text.startsWith("곰젤리 모양")), `${bearOrders.length}/80`);
+  check("shape orders start from the shape's signature colour (solvable)", bearOrders.every((x) => scoreOrder(x, { sigma: mixSigma(purple, x.drops), gems: x.gems ? Array(x.gems.count).fill(x.gems.shape) : [], texture: x.texture || "jelly", shape: "bear" }).stars === 3));
+  check("wrong shape lowers the score", bearOrders.every((x) => scoreOrder(x, { sigma: mixSigma(purple, x.drops), gems: x.gems ? Array(x.gems.count).fill(x.gems.shape) : [], texture: x.texture || "jelly", shape: "flower" }).stars < 3));
 }
 
 console.log(failures ? `\n${failures} FAILED` : "\nALL GAME CHECKS PASSED");

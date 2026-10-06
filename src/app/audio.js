@@ -5,8 +5,10 @@
 //   • boing()/drip() the jelly squish and paint drops
 //   • clink()        glassy gem "ting"s (C-major pentatonic, C6–C7)
 //   • munch()/chew() a bunny biting (와삭!) and chewing (냠냠) the jelly
-//   • squeak()       the bunny itself: 뀨! / 뀽 / 흐응…
-//   • coin()/coinShower(), cardShake()/cardFlip(), reveal(), levelUp()
+//   • squeak()       the bunny itself: 뀨! / 뀽 / 흐응… / 흥흥 / 흥!
+//   • spit()/splat() the bunny spitting a bite out (퉤!) and the chunk landing
+//   • coin()/coinShower()/coinLoss(), cardShake()/cardFlip(), reveal(),
+//     special(), levelUp()
 //                    gold coins, gacha cards and their fanfares (C-major pentatonic)
 //
 // iOS rules: the AudioContext must be created/resumed synchronously inside a
@@ -79,6 +81,8 @@ const COIN_LEVELS = [1, 0.55, 0.8, 0.5, 0.45];
 const COIN_TAUS = [0.12, 0.12, 0.07, 0.048, 0.048];
 const COIN_GROUPS = [[0, 1], [2], [3, 4]];                // modes sharing an envelope
 const FLIP_LEVEL = 0.2, SHAKE_LEVEL = 0.16;
+const SPIT_LEVEL = 0.16, SPLAT_LEVEL = 0.16, WHOOP_LEVEL = 0.05;
+const SPECIAL_CASCADE = [108, 105, 103, 100, 98, 96, 93, 91, 88, 86, 84];   // C8→C6, falling
 const SPARKLE_PITCHES = [96, 98, 100, 103, 105, 108];   // C7–C8 pentatonic
 // Tonal fx timbres: partial ratios / levels / decay taus (s); `beat` adds a
 // slightly detuned twin of the fundamental for shimmer.
@@ -158,6 +162,7 @@ export class JellyAudio {
     this._lastShower = -1e9; this._showerSeed = 0;
     this._lastFlip = -1e9; this._lastShake = -1e9; this._shakeVoice = null;
     this._lastReveal = -1e9; this._lastLevelUp = -1e9;
+    this._lastSpit = -1e9; this._lastSplat = -1e9; this._lastSpecial = -1e9; this._lastLoss = -1e9;
     if (options.context) {
       this.ctx = options.context;
       this._ownsContext = false;
@@ -463,8 +468,10 @@ export class JellyAudio {
 
   /**
    * Tiny bunny voice: 'happy' 뀨뀨! (two bright rising chirps), 'ok' 뀽 (short,
-   * neutral), 'sad' 흐응… (breathy, falling, with a little vibrato). < 0.6 s,
-   * fundamental 600–1600 Hz. ≥ 0.2 s apart; a new squeak cuts the previous one.
+   * neutral), 'sad' 흐응… (breathy, falling, with a little vibrato), all < 0.6 s
+   * with the fundamental in 600–1600 Hz; 'no' 흥흥 (two short descending nasal
+   * grunts, ~0.45 s) and 'grumpy' 흥! (one, ~0.2 s), 500–800 Hz.
+   * ≥ 0.2 s apart; a new squeak cuts the previous one.
    */
   squeak(mood = "happy") {
     if (!this._ready()) return false;
@@ -483,6 +490,16 @@ export class JellyAudio {
       this._syllable(v, t + 0.16, 0.28, [900 * p, 830 * p, 640 * p], L * 0.65, 2200, 1000, 0, 0.03);
     } else if (mood === "ok") {
       this._syllable(v, t, 0.17, [880 * p, 1020 * p, 930 * p], L * 0.85, 3000, 1500, 0.7, 0);
+    } else if (mood === "no") {
+      // 흥흥: a puff of breath, then a short nasal grunt falling away — twice, the second lower
+      this._breath(v, t, 0.035, L * 0.1);
+      this._syllable(v, t + 0.02, 0.14, [720 * p, 700 * p, 560 * p], L * 0.8, 1500, 950, 0, 0);
+      this._breath(v, t + 0.22, 0.035, L * 0.09);
+      this._syllable(v, t + 0.24, 0.15, [650 * p, 620 * p, 500 * p], L * 0.7, 1400, 900, 0, 0);
+    } else if (mood === "grumpy") {
+      // 흥!: one firmer nasal grunt
+      this._breath(v, t, 0.035, L * 0.12);
+      this._syllable(v, t + 0.02, 0.15, [790 * p, 770 * p, 600 * p], L * 0.9, 1700, 1000, 0, 0);
     } else {
       this._syllable(v, t, 0.1, [820 * p, 1300 * p, 1240 * p], L, 3600, 2300, 1, 0);
       this._syllable(v, t + 0.135, 0.13, [930 * p, 1490 * p, 1430 * p], L * 1.05, 3800, 2400, 1, 0);
@@ -712,6 +729,138 @@ export class JellyAudio {
     }
     this._flushFx(now);
     this.stats.reveals++;
+    return true;
+  }
+
+  /**
+   * ★4 'special' rating (~1.7 s): a magical chime cascade falling C8→C6 (where
+   * reveal('rainbow') rises) into a warm double bell (C5 + C6) blooming on a
+   * C6/9 pentatonic chord (C G C E G A D), with sparkles and shimmer. Grander
+   * than reveal('gold'). ≥ 0.3 s apart; a new one replaces the previous.
+   */
+  special() {
+    if (!this._ready()) return false;
+    const now = this._now();
+    if (now - this._lastSpecial < 0.3) return false;
+    this._lastSpecial = now;
+    this._stopTag("special", now);
+    const rnd = this._random, t0 = now + 0.004, tag = "special";
+    const note = (dt, midi, amp, type, o = {}) => this._schedule(t0 + dt, tag, (t) => this._toneNote(t, midi, amp, type, { tag, ...o }));
+    const last = SPECIAL_CASCADE.length - 1;
+    SPECIAL_CASCADE.forEach((m, i) => {
+      const u = i / last;
+      note(0.4 * Math.pow(u, 1.15), m, 0.05 + 0.02 * u, i & 1 ? "tink" : "pluck", { ring: i & 1 ? 1.6 : 0.5, decays: 4.6, pan: (i & 1 ? 0.45 : -0.45) * (1 - 0.6 * u) });
+    });
+    const B = 0.42;                                       // the bloom
+    note(B, 72, 0.11, "bell", { keep: true, ring: 0.85 });
+    note(B + 0.003, 84, 0.07, "bell", { keep: true, ring: 0.7 });
+    [[60, 0.045], [67, 0.035], [72, 0.035], [76, 0.03], [79, 0.028], [81, 0.026], [86, 0.02]].forEach(([m, a], i) => {
+      note(B + 0.004 * i, m, a, "pad", { keep: true, attack: 0.07, hold: 0.5, rel: 0.2, pan: (i / 6 - 0.5) * 0.9 });
+    });
+    for (let i = 0; i < 10; i++) {
+      note(B + 0.08 + 0.85 * rnd(), SPARKLE_PITCHES[Math.floor(rnd() * SPARKLE_PITCHES.length)], 0.03 * (0.6 + 0.4 * rnd()), "tink", { pan: (rnd() - 0.5) * 1.4 });
+    }
+    this._schedule(t0 + 0.05, tag, (t) => this._shimmer(t, 1.4, 0.035, tag, 9500));
+    this._flushFx(now);
+    return true;
+  }
+
+  /**
+   * Coins taken away (~0.9 s): `count` (1..20) clinks falling a fifth in pitch
+   * and getting softer, drifting off to one side, over a little 'whoop' down.
+   * ≥ 0.4 s apart.
+   */
+  coinLoss(count = 10) {
+    if (!this._ready()) return false;
+    const now = this._now();
+    if (now - this._lastLoss < 0.4) return false;
+    const n = Math.round(clamp(+count || 0, 0, 20));
+    if (n < 1) return false;
+    this._lastLoss = now;
+    const rnd = this._random, t0 = now + 0.004, tag = "coinloss";
+    const base = (this._showerSeed = (this._showerSeed + 0x9e3779b1) | 0);
+    for (let k = 0; k < n; k++) {
+      const u = n > 1 ? k / (n - 1) : 0;
+      const t = t0 + 0.58 * Math.pow(u, 0.85) + (k ? (rnd() - 0.5) * 0.012 : 0);
+      const pitch = Math.pow(2, (-7 * u) / 12);
+      const s = 0.8 - 0.45 * u;
+      const h = (hash32(base + k * 7919) & ~1023) | 512;     // same coin, only the fall changes its pitch
+      const pan = 0.35 - 0.7 * u;
+      this._schedule(t, tag, (tt) => this._coinNote(tt, s, h, pan, tag, pitch));
+    }
+    this._schedule(t0, tag, (t) => this._whoop(t, 0.42, tag));
+    this._flushFx(now);
+    return true;
+  }
+
+  /**
+   * Spitting a bite out '퉤!' (~0.25 s): a lip pop and burst, a tiny voiced
+   * 'weh' and a wet spray of droplets. Unless `landDelay` ≤ 0 the chunk then
+   * lands `landDelay` s later (0..3) as splat(0.7·strength); pass 0 and call
+   * splat() yourself to sync it with the visuals. ≥ 0.3 s apart.
+   */
+  spit(strength = 0.8, landDelay = 0.35) {
+    if (!this._ready()) return false;
+    const now = this._now();
+    if (now - this._lastSpit < 0.3) return false;
+    const s = clamp(+strength || 0, 0, 1);
+    if (s < 0.03) return false;
+    this._lastSpit = now;
+    const rnd = this._random, t = now + 0.003, L = SPIT_LEVEL * (0.4 + 0.6 * s);
+    const v = this._openVoice(this._beds, BED_VOICES, t, (rnd() - 0.5) * 0.3, "spit");
+    // lips: a little pressure pop and a bright burst
+    this._partial(v, t, 140, L * 0.25, 0.01, 0.001, 5.75);
+    const burst = this._noiseSource(v, t, t + 0.05);
+    const bbp = this._filter(v, "bandpass", 2200, 0.8);
+    const bg = this._gain(v, 0);
+    bg.gain.setValueAtTime(0, t);
+    bg.gain.linearRampToValueAtTime(L * 2.6, t + 0.0008);
+    bg.gain.setTargetAtTime(0, t + 0.0008, 0.006);
+    burst.connect(bbp); bbp.connect(bg); bg.connect(v.gain);
+    // spray: a short wet hiss…
+    const spray = this._noiseSource(v, t, t + 0.3);
+    const sbp = this._filter(v, "bandpass", 5200, 0.9);
+    sbp.frequency.setValueAtTime(5200, t + 0.01);
+    sbp.frequency.exponentialRampToValueAtTime(3000, t + 0.2);
+    const sg = this._gain(v, 0);
+    sg.gain.setValueAtTime(0, t + 0.004);
+    sg.gain.linearRampToValueAtTime(L * 0.85, t + 0.015);
+    sg.gain.setTargetAtTime(0, t + 0.03, 0.06);
+    spray.connect(sbp); sbp.connect(sg); sg.connect(v.gain);
+    // …full of droplets
+    const drops = this._noiseSource(v, t, t + 0.3);
+    const dbp = this._filter(v, "bandpass", 3000, 2.5);
+    const dg = this._gain(v, 0);
+    dg.gain.setValueAtTime(0, t);
+    let td = t + 0.012;
+    for (let i = 0; i < 9; i++) {
+      dg.gain.setValueAtTime(L * 0.8 * (1.1 - i * 0.1) * (0.5 + 0.5 * rnd()), td);
+      dg.gain.setTargetAtTime(0, td, 0.0015 + 0.002 * rnd());
+      td += 0.008 + 0.022 * rnd();
+    }
+    drops.connect(dbp); dbp.connect(dg); dg.connect(v.gain);
+    this._closeVoice(this._beds, v);
+    // the voiced 'weh'
+    const w = this._openVoice(this._fx, FX_VOICES, t + 0.012, 0, "spit");
+    this._syllable(w, t + 0.012, 0.09, [760, 820, 640], SQUEAK_LEVEL * 0.3, 2600, 1300, 0, 0);
+    this._closeVoice(this._fx, w);
+    const d = +landDelay;
+    if (d > 0 && d <= 3) {
+      const ss = 0.7 * s;
+      this._schedule(t + d, "spit", (tt) => this._splat(tt, ss));
+      this._flushFx(now);
+    }
+    return true;
+  }
+
+  /** A small wet splat (~0.2 s): a chunk of jelly landing. Texture-aware. ≥ 0.08 s apart. */
+  splat(strength = 0.6) {
+    if (!this._ready()) return false;
+    const now = this._now();
+    if (now - this._lastSplat < 0.08) return false;
+    const s = clamp(+strength || 0, 0, 1);
+    if (s < 0.03) return false;
+    this._splat(now + 0.002, s);
     return true;
   }
 
@@ -1526,10 +1675,10 @@ export class JellyAudio {
   // Gold coin: struck-disc modes (inharmonic, one beating pair), a sharp
   // chink, and two little bounce re-hits ('ching-ch-ch'). Modes with similar
   // decay share one envelope (3 automated gains per coin, not 5).
-  _coinNote(t, s, h, pan, tag) {
+  _coinNote(t, s, h, pan, tag, pitch = 1) {
     const ctx = this.ctx, fMax = Math.min(16000, ctx.sampleRate * 0.45);
     const v = this._openVoice(this._fx, FX_VOICES, t, pan, tag);
-    const f = COIN_BASE * (0.93 + 0.15 * ((h & 1023) / 1023));
+    const f = COIN_BASE * (0.93 + 0.15 * ((h & 1023) / 1023)) * pitch;
     const ring = 0.85 + 0.3 * (((h >>> 10) & 255) / 255);
     const b1 = 0.035 + 0.03 * (((h >>> 18) & 63) / 63);
     const b2 = b1 + 0.025 + 0.02 * (((h >>> 24) & 63) / 63);
@@ -1622,6 +1771,62 @@ export class JellyAudio {
     g.gain.linearRampToValueAtTime(amp, t + dur * 0.45);
     g.gain.linearRampToValueAtTime(0, t + dur);
     src.connect(bp); bp.connect(g); g.connect(v.gain);
+  }
+
+  // Splat: a soft low plop, a wet low-passed squish and a few droplets.
+  _splat(t, s) {
+    this._lastSplat = t;
+    const rnd = this._random, slime = this.texture === "slime", L = SPLAT_LEVEL * (0.3 + 0.7 * s);
+    const v = this._openVoice(this._beds, BED_VOICES, t, (rnd() - 0.5) * 0.5, "splat");
+    const f = slime ? 150 : 190;
+    const o = this._source(v, this.ctx.createOscillator(), t, t + 0.2);
+    o.frequency.setValueAtTime(f * 1.4, t);
+    o.frequency.exponentialRampToValueAtTime(f * 0.6, t + 0.08);
+    const og = this._gain(v, 0);
+    og.gain.setValueAtTime(0, t);
+    og.gain.linearRampToValueAtTime(L * 0.8, t + 0.003);
+    og.gain.setTargetAtTime(0, t + 0.003, 0.025);
+    o.connect(og); og.connect(v.gain);
+    const wet = this._noiseSource(v, t, t + 0.25);
+    const lp = this._filter(v, "lowpass", slime ? 900 : 1400, 0.9);
+    lp.frequency.setValueAtTime(slime ? 900 : 1400, t);
+    lp.frequency.exponentialRampToValueAtTime(slime ? 400 : 650, t + 0.12);
+    const ng = this._gain(v, 0);
+    ng.gain.setValueAtTime(0, t);
+    ng.gain.linearRampToValueAtTime(L * 1.4, t + 0.002);
+    ng.gain.setTargetAtTime(0, t + 0.002, 0.035);
+    wet.connect(lp); lp.connect(ng); ng.connect(v.gain);
+    const drops = this._noiseSource(v, t, t + 0.25);
+    const dbp = this._filter(v, "bandpass", slime ? 1800 : 2400, 2.5);
+    const dg = this._gain(v, 0);
+    dg.gain.setValueAtTime(0, t);
+    let td = t + 0.008;
+    for (let i = 0; i < 5; i++) {
+      dg.gain.setValueAtTime(L * (0.9 - i * 0.12) * (0.5 + 0.5 * rnd()), td);
+      dg.gain.setTargetAtTime(0, td, 0.002);
+      td += 0.01 + 0.02 * rnd();
+    }
+    drops.connect(dbp); dbp.connect(dg); dg.connect(v.gain);
+    this._closeVoice(this._beds, v);
+  }
+
+  // A soft slide-whistle 'whoop' falling ~2 octaves (coins leaving).
+  _whoop(t, dur, tag) {
+    const v = this._openVoice(this._fx, FX_VOICES, t, 0, tag);
+    const o = this._source(v, this.ctx.createOscillator(), t, t + dur + 0.02);
+    o.setPeriodicWave(this._waves.voice);
+    o.frequency.setValueAtTime(1100, t);
+    o.frequency.exponentialRampToValueAtTime(260, t + dur);
+    const lp = this._filter(v, "lowpass", 2400, 0.7);
+    lp.frequency.setValueAtTime(2400, t);
+    lp.frequency.exponentialRampToValueAtTime(700, t + dur);
+    const g = this._gain(v, 0);
+    g.gain.setValueAtTime(0, t);
+    g.gain.linearRampToValueAtTime(WHOOP_LEVEL, t + 0.02);
+    g.gain.linearRampToValueAtTime(WHOOP_LEVEL * 0.6, t + dur * 0.7);
+    g.gain.linearRampToValueAtTime(0, t + dur);
+    o.connect(lp); lp.connect(g); g.connect(v.gain);
+    this._closeVoice(this._fx, v);
   }
 
   // Glittery high shimmer bed: two band-passed noises spread L/R with a fast flutter.

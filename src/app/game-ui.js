@@ -4,6 +4,8 @@
 // small confetti engine.
 import { PULL_COST, TIER_LABELS, RARE_COUNT } from "./progress.js";
 import { gemIconSVG } from "../render/gems.js";
+import { shapeIconSVG } from "../render/shape-icons.js";
+import { uniqueSvg } from "./ui.js";
 
 const $ = (id) => document.getElementById(id);
 const wait = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -45,25 +47,64 @@ export function createGameUI({ progress, rareInfo, rareIcon, rareThumb, onPull, 
     el.hidden = false;
     $("order-swatch").style.setProperty("--c", order.hex);
     $("order-text").textContent = order.text;
-    $("order-gem").innerHTML = order.gems ? gemIconSVG(order.gems.shape, "#f4a3c4") : "";
+    $("order-gem").innerHTML = order.shape ? uniqueSvg(shapeIconSVG(order.shape)) : order.gems ? uniqueSvg(gemIconSVG(order.gems.shape, "#f4a3c4")) : "";
+    $("order-gem").classList.toggle("shape", Boolean(order.shape));
     el.classList.remove("pop"); void el.offsetWidth; el.classList.add("pop");
   }
 
   // ---------------------------------------------------------------- reward
-  async function showReward({ stars, coins, xp, mood, levelUps }) {
-    const card = $("reward");
-    $("reward-stars").innerHTML = [1, 2, 3].map((i) => `<span class="${i <= stars ? "" : "off"}">★</span>`).join("");
-    $("reward-text").textContent = mood === "happy" ? "완전 맛있어요! 주문 그대로예요" : mood === "ok" ? "맛있어요! 조금 달랐지만 좋아요" : "음… 주문이랑 많이 달라요";
-    $("reward-coins").textContent = `+${coins}`;
-    $("reward-xp").textContent = `♥ +${xp}`;
+  // kind: "eat" (stars 1..4, ★4 = special) | "refuse" (consolation coins) | "spit" (coins lost)
+  async function showReward({ kind = "eat", stars = 1, coins = 0, xp = 0, mood, levelUps = [], bonus = 0 }) {
+    const card = $("reward"), inner = card.querySelector(".reward-card");
+    inner.classList.toggle("refuse", kind === "refuse");
+    inner.classList.toggle("spit", kind === "spit");
+    const starsEl = $("reward-stars");
+    starsEl.classList.toggle("special", stars === 4 && kind === "eat");
+    starsEl.innerHTML = kind === "eat"
+      ? [1, 2, 3, 4].filter((i) => i <= Math.max(3, stars)).map((i) => `<span class="${i <= stars ? "" : "off"}">★</span>`).join("")
+      : kind === "refuse" ? "🙅" : "💦";
+    $("reward-text").textContent = kind === "refuse" ? "토끼가 고개를 저어요… 다시 만들어 볼까요?"
+      : kind === "spit" ? "퉤! 토끼 입맛에 너무 안 맞았어요"
+      : mood === "special" ? "최고예요!! 레어 보석까지 들어간 특별한 젤리!"
+      : mood === "happy" ? (bonus ? "레어 보석 덕분에 별 하나 더! 맛있어요" : "완전 맛있어요! 주문 그대로예요")
+      : mood === "ok" ? (bonus ? "레어 보석이 반짝여서 별 하나 더!" : "맛있어요! 조금 달랐지만 좋아요")
+      : "음… 주문이랑 많이 달라요";
+    const coinsEl = $("reward-coins");
+    coinsEl.classList.toggle("loss", kind === "spit");
+    coinsEl.textContent = kind === "spit" ? `-${coins}` : `+${coins}`;
+    $("reward-xp").textContent = xp ? `♥ +${xp}` : "";
     const lu = levelUps[levelUps.length - 1];
     $("levelup").hidden = !lu;
-    if (lu) $("levelup").textContent = `토끼와 더 친해졌어요! Lv${lu.level}` + (lu.reward ? ` · ${lu.reward.label} 생김` : "");
+    if (lu) $("levelup").textContent = `토끼와 더 친해졌어요! Lv${lu.level}` + (lu.rewards?.length ? ` · ${lu.rewards.map((r) => r.label).join(", ")} 생김` : "");
     card.hidden = false;
-    if (stars === 3) confetti.burst({ x: innerWidth / 2, y: innerHeight * 0.3, kind: "hearts", count: 40 });
+    if (kind === "eat" && stars === 4) { confetti.burst({ x: innerWidth / 2, y: innerHeight * 0.3, kind: "rainbow", count: 130 }); confetti.burst({ x: innerWidth / 2, y: innerHeight * 0.32, kind: "hearts", count: 50 }); confetti.rays({ x: innerWidth / 2, y: innerHeight * 0.28 }); }
+    else if (kind === "eat" && stars === 3) confetti.burst({ x: innerWidth / 2, y: innerHeight * 0.3, kind: "hearts", count: 40 });
     if (lu) { confetti.burst({ x: innerWidth / 2, y: innerHeight * 0.35, kind: "rainbow", count: 70 }); sounds.levelUp?.(); }
-    await wait(lu ? 3600 : 2600);
+    await wait(lu ? 3800 : stars === 4 ? 3200 : 2600);
     card.hidden = true;
+  }
+
+  // Coins being taken away: they hop out of the counter and fall off screen
+  // while the number counts down.
+  async function loseCoins(amount) {
+    const icon = $("coins").querySelector(".coin-icon").getBoundingClientRect();
+    const n = Math.min(18, Math.max(3, Math.round(amount / 6)));
+    sounds.coinLoss?.(n);
+    for (let i = 0; i < n; i++) {
+      const c = document.createElement("i");
+      c.className = "coin-fly";
+      c.style.left = `${icon.left}px`; c.style.top = `${icon.top}px`;
+      document.body.appendChild(c);
+      const dx = (Math.random() - 0.3) * 160, up = 40 + Math.random() * 60;
+      c.animate([
+        { transform: "translate(0, 0) rotate(0deg)", opacity: 1 },
+        { transform: `translate(${dx * 0.4}px, ${-up}px) rotate(${180 + i * 40}deg)`, opacity: 1, offset: 0.3 },
+        { transform: `translate(${dx}px, ${innerHeight * 0.6}px) rotate(${540 + i * 60}deg)`, opacity: 0 },
+      ], { duration: 1100 + Math.random() * 300, delay: i * 45, easing: "cubic-bezier(.3,.1,.6,1)" }).finished.then(() => c.remove());
+    }
+    const from = shownCoins, to = progress.coins, steps = 20;
+    for (let k = 1; k <= steps; k++) { await wait(45); shownCoins = Math.round(from + (to - from) * k / steps); $("coin-count").textContent = String(shownCoins); }
+    renderHud();
   }
 
   // ---------------------------------------------------------------- gacha
@@ -172,7 +213,7 @@ export function createGameUI({ progress, rareInfo, rareIcon, rareThumb, onPull, 
         const card = document.createElement("div");
         card.className = "album-card";
         const date = new Date(a.date || Date.now());
-        card.innerHTML = `${a.thumb ? `<img alt="" src="${a.thumb}">` : `<img alt="" style="background:${a.hex}">`}<b>${a.name || "젤리"}${a.texture === "slime" ? " 슬랑이" : ""}</b><span>${"★".repeat(a.stars || 1)}${"☆".repeat(3 - (a.stars || 1))}</span><br><span class="small">${date.getMonth() + 1}월 ${date.getDate()}일</span>`;
+        card.innerHTML = `${a.thumb ? `<img alt="" src="${a.thumb}">` : `<img alt="" style="background:${a.hex}">`}<b>${a.shapeLabel ? a.shapeLabel + " · " : ""}${a.name || "젤리"}${a.texture === "slime" ? " 슬랑이" : ""}</b><span>${"★".repeat(a.stars || 1)}${"☆".repeat(Math.max(0, 3 - (a.stars || 1)))}</span><br><span class="small">${date.getMonth() + 1}월 ${date.getDate()}일</span>`;
         grid.appendChild(card);
       }
     }
@@ -181,7 +222,7 @@ export function createGameUI({ progress, rareInfo, rareIcon, rareThumb, onPull, 
   $("book-close").addEventListener("click", () => { $("book").hidden = true; });
   $("book-tabs").addEventListener("click", (e) => { const t = e.target.closest("[data-tab]"); if (t) { tab = t.dataset.tab; renderBook(); } });
 
-  return { renderHud, addCoin, coinCounterNDC, showOrder, showReward, confetti, get busy() { return Boolean(pulling); } };
+  return { renderHud, addCoin, loseCoins, coinCounterNDC, showOrder, showReward, confetti, get busy() { return Boolean(pulling); } };
 }
 
 // ---------------------------------------------------------------- confetti

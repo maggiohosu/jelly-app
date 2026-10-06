@@ -3,8 +3,18 @@
 // settings sliders, and persisted per-device settings.
 import { GEM_SHAPES, GEM_COLORS, gemIconSVG } from "../render/gems.js";
 import { PAINTS, ADDITIVES } from "../core/world.js";
+import { SHAPES } from "../core/shapes.js";
+import { shapeIconSVG } from "../render/shape-icons.js";
 
 const $ = (id) => document.getElementById(id);
+// The same SVG icon can appear twice (toolbar + a hidden drawer); url(#id)
+// resolves to the first element with that id, which may be display:none —
+// give every inserted copy its own ids.
+let svgCopies = 0;
+export function uniqueSvg(svg) {
+  const tag = `-c${++svgCopies}`;
+  return svg.replace(/id="([^"]+)"/g, `id="$1${tag}"`).replace(/url\(#([^)]+)\)/g, `url(#$1${tag})`).replace(/href="#([^"]+)"/g, `href="#$1${tag}"`);
+}
 const STORAGE_KEY = "mallang-jelly-settings-v3";
 const HOLD_MS = 350, DRIP_MS = 230;
 
@@ -15,6 +25,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
   glow: 1,          // 0 … 2
   crunch: 0.8, gems: 0.6, boing: 0.6, effects: 0.8, master: 0.9,
   texture: "jelly", // 'jelly' | 'slime' (슬랑이)
+  shape: "flower",  // jelly shape id (core/shapes.js)
   gemColor: 0,      // index into GEM_COLORS, -1 = random
   base: "berry",
 });
@@ -106,7 +117,7 @@ function draggable(button, { ghostHTML, onTap, onDrop, onHold }) {
   button.addEventListener("pointercancel", (event) => end(event, true));
 }
 
-export function buildUI({ settings, onSetting, onTexture, onPaintDrop, onPaintTap, onAdditiveDrop, onAdditiveTap, onGemDrop, onGemTap, onRareDrop, onRareTap, onScatter, onBase }) {
+export function buildUI({ settings, onSetting, onTexture, onShape, onPaintDrop, onPaintTap, onAdditiveDrop, onAdditiveTap, onGemDrop, onGemTap, onRareDrop, onRareTap, onScatter, onBase }) {
   const change = (key, value) => { settings[key] = value; saveSettings(settings); onSetting(key, value); };
 
   // ---- pipette palette (paints the player has, then additives) ----
@@ -182,6 +193,40 @@ export function buildUI({ settings, onSetting, onTexture, onPaintDrop, onPaintTa
     onTexture(settings.texture);
   });
 
+  // ---- shape picker (toolbar button + drawer; locked shapes show their level) ----
+  const shapeButton = $("shape-button"), shapeDrawer = $("shape-drawer"), shapeGrid = $("shape-grid");
+  let unlockedShapes = ["flower"];
+  const paintShapeButton = () => { shapeButton.innerHTML = uniqueSvg(shapeIconSVG(settings.shape)); shapeButton.setAttribute("aria-label", `모양: ${SHAPES.find((x) => x.id === settings.shape)?.label || "꽃"}`); };
+  function setShapes(unlocked, fresh = []) {
+    unlockedShapes = unlocked;
+    shapeGrid.textContent = "";
+    for (const sh of SHAPES) {
+      const open = unlocked.includes(sh.id), b = document.createElement("button");
+      b.className = (open ? "" : "locked") + (sh.id === settings.shape ? " active" : "") + (fresh.includes(sh.id) ? " new" : "");
+      b.setAttribute("aria-label", open ? sh.label : `${sh.label} (토끼 친밀도 Lv${sh.level})`);
+      b.innerHTML = `${uniqueSvg(shapeIconSVG(sh.id, { locked: !open }))}<span>${sh.label}</span>${open ? "" : `<i class="lv">Lv${sh.level}</i>`}`;
+      b.addEventListener("click", () => {
+        if (!open) { onShape(null, sh); return; }
+        b.classList.remove("new");
+        change("shape", sh.id);
+        for (const other of shapeGrid.children) other.classList.toggle("active", other === b);
+        paintShapeButton();
+        shapeDrawer.hidden = true; shapeButton.classList.remove("on");
+        onShape(sh.id, sh);
+      });
+      shapeGrid.appendChild(b);
+    }
+    paintShapeButton();
+  }
+  shapeButton.addEventListener("click", () => {
+    const open = shapeDrawer.hidden;
+    shapeDrawer.hidden = !open;
+    shapeButton.classList.toggle("on", open);
+    shapeButton.setAttribute("aria-pressed", String(open));
+    if (open) { $("gem-drawer").hidden = true; $("gems").classList.remove("on"); }
+  });
+  setShapes(unlockedShapes);
+
   // ---- base colour (settings) ----
   for (const button of document.querySelectorAll("[data-base]")) {
     button.classList.toggle("active", button.dataset.base === settings.base);
@@ -241,5 +286,5 @@ export function buildUI({ settings, onSetting, onTexture, onPaintDrop, onPaintTa
   }
   paintGems();
   $("gem-scatter").addEventListener("click", () => onScatter(settings.gemColor));
-  return { setPalette, setRareGems };
+  return { setPalette, setRareGems, setShapes };
 }

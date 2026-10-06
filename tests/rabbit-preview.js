@@ -1,13 +1,16 @@
 // Standalone preview of the jelly-eating bunny (src/render/rabbit.js) on the
 // app's tray, with the app's camera, light, background, fog and bloom.
-// A stand-in jelly (pink transmissive dome, 72 × 36 mm) is moved by a damped
-// spring toward the bunny's paw targets (lagging and wobbling like the app's
-// physics would) and shrinks 13 % per bite.
+// A stand-in jelly (transmissive, one of the app's shapes' bounding sizes) is
+// CARRIED like the app does: while the bunny returns `hold`, the whole jelly is
+// pulled toward it by a damped spring (rigid, lagging, a little squash wobble
+// from acceleration; no stretching); otherwise it falls back onto the plate.
+// It shrinks 13 % per bite and vanishes on "finish".
 //
-// Query: ?lite=1 (WebGL2)  ?quality=high|medium|low  ?mood=happy|ok|sad  ?bites=4
-//        ?autoplay=0  ?t=<s> freeze at that time (deterministic seek)  ?seat=<deg> seat angle
-//        ?az=<rad> camera azimuth  ?polar=<rad>  ?dist=<m>  ?zoom=1 close-up  ?bloom=0|1
-//        ?clean=1 hide HUD  ?jelly=0 no stand-in
+// Query: ?lite=1 (WebGL2)  ?quality=high|medium|low  ?outcome=eat|refuse|spit
+//        ?mood=happy|ok|sad|special  ?bites=4  ?shape=flower|bear|cat|bird|cake|pudding
+//        ?color=%23rrggbb  ?autoplay=0  ?t=<s> freeze at that time (deterministic seek)
+//        ?seat=<deg> seat angle  ?az=<rad> camera azimuth  ?polar=<rad>  ?dist=<m>
+//        ?zoom=1 close-up  ?bloom=0|1  ?clean=1 hide HUD  ?jelly=0 no stand-in
 import * as THREE from "three/webgpu";
 import { pass } from "three/tsl";
 import { bloom } from "three/addons/tsl/display/BloomNode.js";
@@ -18,6 +21,9 @@ const num = (k, d) => (q.has(k) && Number.isFinite(Number(q.get(k))) ? Number(q.
 const lite = q.get("lite") === "1";
 let quality = q.get("quality") ?? "high";
 let mood = q.get("mood") ?? "happy";
+let outcome = q.get("outcome") ?? "eat";
+let shape = q.get("shape") ?? "flower";
+let jellyColor = q.get("color") ?? "#ff6f9a";
 let bites = num("bites", 4);
 if (q.get("clean") === "1") document.body.classList.add("clean");
 
@@ -79,86 +85,104 @@ rim.position.y = rimTube * 0.7;
 tray.add(rim);
 
 // ---------------------------------------------------- stand-in jelly ----
-const JELLY_W = 0.072, JELLY_H = 0.036;
-const jellyGeometry = new THREE.SphereGeometry(1, 64, 40);
-{
-  const p = jellyGeometry.attributes.position, v = new THREE.Vector3();
+// Bounding sizes (m) of the app's jelly shapes; p = superellipsoid exponent.
+const SHAPES = {
+  flower: { w: 0.072, h: 0.036, d: 0.072, p: 2, lobes: 5 },
+  bear: { w: 0.066, h: 0.056, d: 0.05, p: 2.2 },
+  cat: { w: 0.064, h: 0.06, d: 0.046, p: 2.4 },
+  bird: { w: 0.074, h: 0.05, d: 0.048, p: 2 },
+  cake: { w: 0.08, h: 0.046, d: 0.056, p: 4.5 },
+  pudding: { w: 0.064, h: 0.052, d: 0.064, p: 3 },
+};
+const JELLY_YAW = 0.45; // the stand-in is turned a little so its bounds are not axis aligned
+function jellyGeometry(spec) {
+  const g = new THREE.SphereGeometry(1, 64, 40);
+  const p = g.attributes.position, v = new THREE.Vector3();
+  const e = 2 / spec.p;
+  const sp = (a) => Math.sign(a) * Math.pow(Math.abs(a), e);
   for (let i = 0; i < p.count; i += 1) {
     v.fromBufferAttribute(p, i);
-    const a = Math.atan2(v.z, v.x);
-    const lobe = 1 + 0.06 * Math.cos(5 * a) * Math.sqrt(Math.max(0, 1 - v.y * v.y));
-    let y = v.y < 0 ? -Math.pow(-v.y, 0.45) : v.y; // flat-ish bottom
-    p.setXYZ(i, v.x * lobe * JELLY_W / 2, y * JELLY_H / 2, v.z * lobe * JELLY_W / 2);
+    const ring = Math.sqrt(Math.max(0, 1 - v.y * v.y));
+    const lobe = spec.lobes ? 1 + 0.06 * Math.cos(spec.lobes * Math.atan2(v.z, v.x)) * ring : 1;
+    const y = v.y < 0 ? -Math.pow(-v.y, 0.45) : sp(v.y); // flat-ish bottom
+    p.setXYZ(i, sp(v.x) * lobe * spec.w / 2, y * spec.h / 2, sp(v.z) * lobe * spec.d / 2);
   }
-  jellyGeometry.computeVertexNormals();
+  g.computeVertexNormals();
+  g.computeBoundingBox();
+  return g;
 }
 const jellyMaterial = new THREE.MeshPhysicalNodeMaterial({
-  color: "#ffe0eb", roughness: 0.075, metalness: 0, transmission: 1, thickness: 0.03, ior: 1.35,
-  attenuationDistance: 0.035, attenuationColor: "#ed5187", clearcoat: 0.42, clearcoatRoughness: 0.05, transparent: false,
+  color: "#fff0f4", roughness: 0.075, metalness: 0, transmission: 1, thickness: 0.03, ior: 1.35,
+  attenuationDistance: 0.035, attenuationColor: jellyColor, clearcoat: 0.42, clearcoatRoughness: 0.05, transparent: false,
 });
-const jelly = new THREE.Mesh(jellyGeometry, jellyMaterial);
+const jelly = new THREE.Mesh(jellyGeometry(SHAPES[shape] || SHAPES.flower), jellyMaterial);
 jelly.name = "StandInJelly";
+jelly.rotation.y = JELLY_YAW;
 jelly.visible = q.get("jelly") !== "0";
 tray.add(jelly);
-const J = {
-  c: new THREE.Vector3(0, JELLY_H / 2, 0), v: new THREE.Vector3(), size: 1, sizeGoal: 1,
-  wob: 0, wobV: 0, gone: false, rest: new THREE.Vector3(0, JELLY_H / 2, 0), F: new THREE.Vector3(0, 0, 1),
-};
-function resetJelly() {
-  J.c.copy(J.rest); J.v.set(0, 0, 0); J.size = J.sizeGoal = 1; J.wob = J.wobV = 0; J.gone = false;
-  jelly.visible = q.get("jelly") !== "0";
+const J = { c: new THREE.Vector3(), v: new THREE.Vector3(), size: 1, sizeGoal: 1, wob: 0, wobV: 0, gone: false, carried: false };
+const spec = () => SHAPES[shape] || SHAPES.flower;
+function setShape(name) {
+  shape = SHAPES[name] ? name : "flower";
+  jelly.geometry.dispose();
+  jelly.geometry = jellyGeometry(spec());
 }
-function stepJelly(dt, paws) {
-  if (J.gone) { J.size = Math.max(0, J.size - dt * 8); }
+function resetJelly() {
+  J.c.set(0, spec().h / 2, 0); J.v.set(0, 0, 0);
+  J.size = J.sizeGoal = 1; J.wob = J.wobV = 0; J.gone = false; J.carried = false;
+  jellyMaterial.attenuationColor.set(jellyColor);
+  jelly.visible = q.get("jelly") !== "0";
+  placeJelly();
+}
+function placeJelly() {
+  const sy = 1 + J.wob, sxz = 1 / Math.sqrt(sy);
+  jelly.position.copy(J.c);
+  jelly.scale.set(sxz * J.size, sy * J.size, sxz * J.size);
+  if (J.gone && J.size <= 0.01) jelly.visible = false;
+}
+const _a = new THREE.Vector3();
+function stepJelly(dt, hold) {
+  if (J.gone) J.size = Math.max(0, J.size - dt * 8);
   else J.size += (J.sizeGoal - J.size) * (1 - Math.exp(-dt / 0.06));
-  const target = new THREE.Vector3();
-  let w = 2 * Math.PI * 1.6, z = 0.9;
-  if (paws) {
-    // Paws hold the jelly's left/right sides: its centre sits between them (sagging a little).
-    target.set((paws[0][0] + paws[1][0]) / 2, (paws[0][1] + paws[1][1]) / 2, (paws[0][2] + paws[1][2]) / 2);
-    target.y -= 0.002;
-    w = 2 * Math.PI * 4.2; z = 0.32;
-  } else {
-    target.copy(J.c); target.y = (JELLY_H / 2) * J.size; // settle down onto the tray
-    target.x *= 1; target.z *= 1;
-    if (J.c.y > target.y + 1e-4) { J.v.y -= 9.81 * dt; }
-  }
+  const rest = (spec().h / 2) * J.size;
+  J.carried = Boolean(hold);
   const n = Math.max(1, Math.ceil(dt / (1 / 240))), h = dt / n;
   for (let i = 0; i < n; i += 1) {
-    if (paws) {
-      const a = target.clone().sub(J.c).multiplyScalar(w * w).addScaledVector(J.v, -2 * z * w);
-      J.v.addScaledVector(a, h);
+    _a.set(0, 0, 0);
+    if (hold) {
+      // Rigid carry: every node translated toward the target, gravity off → spring on the centre.
+      const w = 2 * Math.PI * 3.2, z = 0.45;
+      _a.set(hold[0] - J.c.x, hold[1] - J.c.y, hold[2] - J.c.z).multiplyScalar(w * w).addScaledVector(J.v, -2 * z * w);
     } else {
-      J.v.multiplyScalar(Math.exp(-h * 4));
+      _a.y = -9.81;
+      if (J.c.y <= rest + 1e-5) { J.v.x *= Math.exp(-h * 12); J.v.z *= Math.exp(-h * 12); }
     }
+    J.v.addScaledVector(_a, h);
     J.c.addScaledVector(J.v, h);
-    if (!paws && J.c.y < (JELLY_H / 2) * J.size) { J.c.y = (JELLY_H / 2) * J.size; if (J.v.y < 0) { J.wobV += -J.v.y * 40; J.v.y *= -0.15; } }
-    // wobble (squash) driven by vertical acceleration
+    if (J.c.y < rest) { if (J.v.y < -0.05) J.wobV += J.v.y * 30; J.c.y = rest; J.v.y = Math.max(0, J.v.y) * 0; }
+    // Squash wobble from vertical acceleration (soft body on a rigid carry).
     const ww = 2 * Math.PI * 5.5;
-    J.wobV += (-ww * ww * J.wob - 2 * 0.18 * ww * J.wobV) * h;
+    J.wobV += (-ww * ww * J.wob - 2 * 0.2 * ww * J.wobV + (hold ? -_a.y * 0.02 : 0)) * h;
     J.wob += J.wobV * h;
   }
-  if (paws) J.wobV += -J.v.y * dt * 30;
-  J.wob = Math.max(-0.35, Math.min(0.35, J.wob));
-  const sy = 1 + J.wob, sxz = 1 / Math.sqrt(sy);
-  // Held jellies sag between the paws: flatter and a bit narrower.
-  const sag = paws ? 0.9 : 1;
-  jelly.position.copy(J.c);
-  jelly.scale.set(sxz * J.size, sy * J.size * sag, sxz * J.size);
-  if (J.gone && J.size <= 0) jelly.visible = false;
+  J.wob = Math.max(-0.25, Math.min(0.25, J.wob));
+  placeJelly();
 }
+const _box = new THREE.Box3();
 function jellyInfo() {
   if (!jelly.visible || J.size <= 0.01) return null;
-  const hx = (JELLY_W / 2) * jelly.scale.x * 1.06, hy = (JELLY_H / 2) * jelly.scale.y, hz = (JELLY_W / 2) * jelly.scale.z * 1.06;
-  const c = J.c;
-  return { center: [c.x, c.y, c.z], bounds: [c.x - hx, c.y - hy, c.z - hz, c.x + hx, c.y + hy, c.z + hz] };
+  // Exact AABB from the vertices (like the app's physics bounds); the tray is the scene root here.
+  jelly.updateMatrixWorld(true);
+  _box.setFromObject(jelly, true);
+  return { center: [J.c.x, J.c.y, J.c.z], bounds: [_box.min.x, _box.min.y, _box.min.z, _box.max.x, _box.max.y, _box.max.z] };
 }
 
 // ---------------------------------------------------------------- rabbit ----
 const rabbit = new Rabbit(tray, { quality });
-Object.assign(R, { rabbit, renderer, scene, camera, tray });
+Object.assign(R, { rabbit, renderer, scene, camera, tray, jelly: J });
 const seatAngle = (num("seat", 0) * Math.PI) / 180;
-const seat = [-0.105 * Math.sin(seatAngle), 0, -0.105 * Math.cos(seatAngle)];
+const SEAT_R = 0.111;
+const seat = [-SEAT_R * Math.sin(seatAngle), 0, -SEAT_R * Math.cos(seatAngle)];
 const faceTo = [0, 0.02, 0];
 let clock = 0, playStart = 0;
 const logEl = document.getElementById("log");
@@ -168,23 +192,27 @@ function log(line) {
   while (logLines.length > 26) logLines.shift();
   logEl.textContent = logLines.join("\n");
 }
+const fmt = (a) => a.map((x) => x.toFixed(3)).join(",");
 
 function play(m = mood) {
   mood = m;
   resetJelly();
-  J.F.set(faceTo[0] - seat[0], 0, faceTo[2] - seat[2]).normalize();
   R.events.length = 0;
-  log(`— play ${mood} ×${bites} (${quality})`);
+  log(`— play ${outcome} · ${mood} · ${shape} ×${bites} (${quality})`);
   playStart = clock;
+  const sp = spec();
   rabbit.play({
-    position: seat, faceTo, jelly: { center: [J.c.x, J.c.y, J.c.z], width: JELLY_W, height: JELLY_H }, bites, mood,
+    position: seat, faceTo, outcome, mood, bites, jellyColor,
+    jelly: { center: [J.c.x, J.c.y, J.c.z], width: Math.max(sp.w, sp.d), height: sp.h },
     onEvent(type, data) {
       const t = clock - playStart;
       R.events.push({ t: Number(t.toFixed(3)), type, data });
-      const fmt = (a) => a.map((x) => x.toFixed(3)).join(",");
       const extra = type === "bite" ? ` ${data.index + 1}/${data.count} @${fmt(data.mouth)}`
-        : type === "grab" ? ` L[${fmt(data.paws[0])}] R[${fmt(data.paws[1])}]`
-          : type === "react" ? ` ${data.mood}` : type === "hop" ? ` ${data.phase}#${data.index}` : "";
+        : type === "grab" ? ` hold ${fmt(data.hold)}`
+          : type === "lift" ? ` → ${fmt(data.hold)}`
+            : type === "putDown" ? ` → ${fmt(data.to)}`
+              : type === "spit" ? ` v ${fmt(data.velocity)}`
+                : type === "react" || type === "refuse" ? ` ${data.mood}` : type === "hop" ? ` ${data.phase}#${data.index}` : "";
       log(`${t.toFixed(2).padStart(5)}s ${type}${extra}`);
       if (type === "bite") J.sizeGoal *= 0.87;
       if (type === "finish") J.gone = true;
@@ -257,16 +285,21 @@ function button(label, on, fn) {
   b.addEventListener("click", fn);
   hud.appendChild(b);
 }
+const sep = () => hud.appendChild(Object.assign(document.createElement("span"), { className: "sep" }));
 function updateHud() {
   hud.innerHTML = "";
-  button("😊 happy", false, () => play("happy"));
-  button("🙂 ok", false, () => play("ok"));
-  button("😢 sad", false, () => play("sad"));
+  for (const [k, label] of [["eat", "🥄 eat"], ["refuse", "🙅 refuse"], ["spit", "💦 spit"]]) button(label, outcome === k, () => { outcome = k; play(mood); });
+  sep();
+  for (const [k, label] of [["happy", "😊"], ["ok", "🙂"], ["sad", "😢"], ["special", "🌟"]]) button(label, mood === k, () => play(k));
   button("⏭ skip", false, () => rabbit.skip());
-  hud.appendChild(Object.assign(document.createElement("span"), { className: "sep" }));
+  sep();
+  for (const k of Object.keys(SHAPES)) button(k, shape === k, () => { setShape(k); play(mood); });
+  sep();
+  for (const c of ["#ff6f9a", "#7fd6a8", "#ffb347"]) button("●", jellyColor === c, () => { jellyColor = c; play(mood); });
+  sep();
   for (const k of ["high", "medium", "low"]) button(k, quality === k, () => { quality = k; rabbit.setQuality(k); updateHud(); });
-  hud.appendChild(Object.assign(document.createElement("span"), { className: "sep" }));
-  for (const n of [2, 4, 6]) button(`${n} bites`, bites === n, () => { bites = n; updateHud(); });
+  for (const n of [2, 4, 6]) button(`${n}×`, bites === n, () => { bites = n; updateHud(); });
+  for (const b of hud.querySelectorAll("button")) if (b.textContent === "●") b.style.color = ["#ff6f9a", "#7fd6a8", "#ffb347"][[...hud.querySelectorAll("button")].filter((x) => x.textContent === "●").indexOf(b)];
 }
 updateHud();
 const statusEl = document.getElementById("status");
@@ -276,7 +309,7 @@ let last = performance.now(), paused = false, lastFrame = null;
 function step(dt) {
   clock += dt;
   const out = rabbit.update(dt, jellyInfo());
-  stepJelly(dt, out.paws);
+  stepJelly(dt, out.hold);
   lastFrame = out;
   return out;
 }
@@ -284,6 +317,9 @@ function step(dt) {
 R.seek = (t, opts = {}) => {
   if (opts.quality) { quality = opts.quality; rabbit.setQuality(quality); }
   if (opts.bites) bites = opts.bites;
+  if (opts.outcome) outcome = opts.outcome;
+  if (opts.color) jellyColor = opts.color;
+  if (opts.shape) setShape(opts.shape);
   clock = 0;
   play(opts.mood ?? mood);
   const n = Math.round(t * 60);
@@ -291,7 +327,7 @@ R.seek = (t, opts = {}) => {
   paused = true;
   render();
   R.seekDone = (R.seekDone || 0) + 1;
-  return { phase: lastFrame?.phase, paws: lastFrame?.paws, mouth: lastFrame?.mouth, jelly: jellyInfo() };
+  return { phase: lastFrame?.phase, hold: lastFrame?.hold, paws: lastFrame?.paws, mouth: lastFrame?.mouth, jelly: jellyInfo() };
 };
 R.play = (m) => { paused = false; play(m); };
 R.skip = () => rabbit.skip();
@@ -301,8 +337,8 @@ R.render = render;
 R.setQuality = (k) => { quality = k; rabbit.setQuality(k); updateHud(); };
 // Draw calls of the bunny alone (plain render, no bloom).
 R.countDraws = () => {
-  const vis = [tray.children.map((c) => c.visible)];
-  for (const c of tray.children) if (c !== rabbit.root) c.visible = false;
+  const vis = tray.children.map((c) => c.visible);
+  for (const c of tray.children) if (c !== rabbit.root && c !== rabbit.chunk) c.visible = false;
   const bg = scene.background; scene.background = null;
   renderer.info.autoReset = false;
   renderer.info.reset();
@@ -310,7 +346,7 @@ R.countDraws = () => {
   const calls = renderer.info.render.drawCalls;
   const triangles = renderer.info.render.triangles;
   renderer.info.autoReset = true;
-  tray.children.forEach((c, i) => { c.visible = vis[0][i]; });
+  tray.children.forEach((c, i) => { c.visible = vis[i]; });
   scene.background = bg;
   R.bunnyDraws = calls - 1; // minus the backend's own output pass (an empty scene counts 1)
   return { calls, triangles };
@@ -325,9 +361,10 @@ renderer.setAnimationLoop(() => {
   R.frames += 1;
   if (R.frames > 2) R.ready = true;
   if (R.frames % 10 === 0) {
-    statusEl.textContent = `${R.backend} · ${quality} · ${lastFrame?.phase ?? ""} · t=${(clock - playStart).toFixed(2)}s · draws ${lastDraws} (bunny ${R.bunnyDraws ?? "?"})`;
+    statusEl.textContent = `${R.backend} · ${quality} · ${lastFrame?.phase ?? ""} · t=${(clock - playStart).toFixed(2)}s · hold ${lastFrame?.hold ? fmt(lastFrame.hold) : "–"} · draws ${lastDraws} (bunny ${R.bunnyDraws ?? "?"})`;
   }
 });
 
+resetJelly();
 if (q.has("t")) R.seek(num("t", 0));
 else if (q.get("autoplay") !== "0") play(mood);

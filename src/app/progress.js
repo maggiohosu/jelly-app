@@ -8,7 +8,9 @@ export const PROGRESS_KEY = "mallang-jelly-progress-v1";
 export const WELCOME_COINS = 100;
 export const PULL_COST = 100;
 export const DUPE_REFUND = 30;
-export const COINS_BY_STARS = Object.freeze([0, 30, 45, 60]);
+export const COINS_BY_STARS = Object.freeze([0, 30, 45, 60, 80]);   // ★4 = 'special' (rare gem bonus on a ★3 work)
+export const REFUSE_COINS = Object.freeze([1, 10]);   // the bunny shakes its head: a small consolation
+export const SPIT_COINS = Object.freeze([1, 100]);    // 퉤: coins taken away (never below 0)
 export const RARE_BONUS = 10;                 // per rare gem in the eaten jelly
 export const RARE_COUNT = 25;
 export const TIER_LABELS = Object.freeze(["글리터", "금빛", "무지개빛"]);
@@ -17,13 +19,15 @@ const ALBUM_MAX = 60;
 // Friendship: XP per meal = 10 + 10 per star. Cumulative XP to reach each level.
 export const LEVEL_XP = Object.freeze([0, 0, 40, 100, 180, 280, 400, 540, 700, 880, 1080]);
 export const LEVEL_REWARDS = Object.freeze({
-  2: { kind: "paint", id: "orange", label: "주황 물감" },
-  3: { kind: "additive", id: "glitter", label: "글리터" },
-  4: { kind: "paint", id: "lime", label: "연두 물감" },
-  5: { kind: "additive", id: "stars", label: "별사탕 토핑" },
-  6: { kind: "paint", id: "pearl", label: "금펄 물감" },
-  8: { kind: "paint", id: "glow", label: "야광 물감" },
+  2: Object.freeze([{ kind: "paint", id: "orange", label: "주황 물감" }, { kind: "shape", id: "pudding", label: "푸딩 모양" }]),
+  3: Object.freeze([{ kind: "additive", id: "glitter", label: "글리터" }]),
+  4: Object.freeze([{ kind: "paint", id: "lime", label: "연두 물감" }, { kind: "shape", id: "cake", label: "케이크 모양" }]),
+  5: Object.freeze([{ kind: "additive", id: "stars", label: "별사탕 토핑" }]),
+  6: Object.freeze([{ kind: "paint", id: "pearl", label: "금펄 물감" }, { kind: "shape", id: "bear", label: "곰젤리 모양" }]),
+  8: Object.freeze([{ kind: "paint", id: "glow", label: "야광 물감" }, { kind: "shape", id: "cat", label: "고양이 모양" }]),
+  10: Object.freeze([{ kind: "shape", id: "bird", label: "새 모양" }]),
 });
+const unlocked = (level, kind) => Object.entries(LEVEL_REWARDS).filter(([l]) => level >= Number(l)).flatMap(([, list]) => list.filter((r) => r.kind === kind).map((r) => r.id));
 export const BASE_PAINTS = Object.freeze(["red", "yellow", "blue", "pink", "purple", "sky", "water"]);
 
 export function levelForXp(xp) {
@@ -79,25 +83,19 @@ export class Progress {
   get canPull() { return this.state.coins >= PULL_COST; }
 
   /** Paint ids the player can use (base + unlocked by friendship). */
-  paints() {
-    const out = [...BASE_PAINTS], lvl = this.level.level;
-    for (const [l, r] of Object.entries(LEVEL_REWARDS)) if (r.kind === "paint" && lvl >= Number(l)) out.push(r.id);
-    return out;
-  }
-  additives() {
-    const out = [], lvl = this.level.level;
-    for (const [l, r] of Object.entries(LEVEL_REWARDS)) if (r.kind === "additive" && lvl >= Number(l)) out.push(r.id);
-    return out;
-  }
+  paints() { return [...BASE_PAINTS, ...unlocked(this.level.level, "paint")]; }
+  additives() { return unlocked(this.level.level, "additive"); }
+  shapes() { return ["flower", ...unlocked(this.level.level, "shape")]; }
   ownedRare() { return this.state.rare.map((tier, index) => ({ index, tier })).filter((r) => r.tier >= 0); }
 
   /**
-   * The bunny ate a jelly. → { coins, xp, levelUps: [{level, reward}] }
+   * The bunny ate a jelly (stars 1..4). → { coins, xp, levelUps: [{ level, rewards: [...] }] }
    */
   feed({ stars, rareCount = 0, card = null }) {
     const before = this.level.level;
-    const coins = COINS_BY_STARS[Math.max(1, Math.min(3, stars))] + RARE_BONUS * Math.min(4, rareCount);
-    const xp = 10 + 10 * stars;
+    const s = Math.max(1, Math.min(4, stars));
+    const coins = COINS_BY_STARS[s] + RARE_BONUS * Math.min(8, rareCount);
+    const xp = 10 + 10 * s;
     this.state.coins += coins;
     this.state.xp += xp;
     this.state.feeds++;
@@ -105,10 +103,33 @@ export class Progress {
       this.state.album.push(card);
       while (this.state.album.length > ALBUM_MAX) this.state.album.shift();
     }
-    const after = this.level.level, levelUps = [];
-    for (let l = before + 1; l <= after; l++) levelUps.push({ level: l, reward: LEVEL_REWARDS[l] || null });
+    const levelUps = this.levelUpsSince(before);
     this.save(); this.emit();
     return { coins, xp, levelUps };
+  }
+
+  levelUpsSince(before) {
+    const out = [];
+    for (let l = before + 1; l <= this.level.level; l++) out.push({ level: l, rewards: LEVEL_REWARDS[l] || [] });
+    return out;
+  }
+  randInt([lo, hi]) { return lo + Math.floor(this.random() * (hi - lo + 1)); }
+
+  /** ★1 and the bunny shakes its head after one bite: 1–10 coins, a little ♥. */
+  refuse() {
+    const before = this.level.level, coins = this.randInt(REFUSE_COINS), xp = 5;
+    this.state.coins += coins; this.state.xp += xp;
+    const levelUps = this.levelUpsSince(before);
+    this.save(); this.emit();
+    return { coins, xp, levelUps };
+  }
+
+  /** ★1 and the bunny spits it out (퉤): 1–100 coins are taken away, never below 0. */
+  spit() {
+    const rolled = this.randInt(SPIT_COINS), lost = Math.min(this.state.coins, rolled);
+    this.state.coins -= lost;
+    this.save(); this.emit();
+    return { lost, rolled };
   }
 
   /**

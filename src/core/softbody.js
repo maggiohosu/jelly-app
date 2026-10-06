@@ -73,6 +73,7 @@ export class SoftBody {
     this.totalMass = this.mass.reduce((a, b) => a + b, 0);
 
     this.grab = null; this.extraGrabs = [];
+    this.carry = null;          // app extension: { target:[x,y,z] } — carried as a whole (no gravity)
     this.sleeping = false; this.quietTime = 0; this.grounded = false; this.internalRms = 0; this.rigidRms = 0;
 
     // App extensions. null gravityVector = original fixed -Y gravity.
@@ -240,13 +241,19 @@ export class SoftBody {
   }
 
   beginStep(h) {
-    if (this.grab || this.extraGrabs.length) this.wake();
+    if (this.grab || this.extraGrabs.length || this.carry) this.wake();
     if (this.sleeping) return false;
     const P = this.params;
     const x = this.x, v = this.velocity, old = this.previous, n = this.nodeCount;
     old.set(x); this.contact.fill(0);
     const gv = this.gravityVector;
-    if (gv) {
+    if (this.carry) {
+      // held in two paws: weightless, moved as a whole by carryVelocities()
+      for (let i = 0; i < n; i++) {
+        const j = i * 3;
+        x[j] += v[j] * h; x[j + 1] += v[j + 1] * h; x[j + 2] += v[j + 2] * h;
+      }
+    } else if (gv) {
       for (let i = 0; i < n; i++) {
         const j = i * 3; v[j] += gv[0] * h; v[j + 1] += gv[1] * h; v[j + 2] += gv[2] * h;
         x[j] += v[j] * h; x[j + 1] += v[j + 1] * h; x[j + 2] += v[j + 2] * h;
@@ -314,14 +321,39 @@ export class SoftBody {
     }
     this.impact = impact; this.wallImpact = wallImpact;
     this.applyDamping(h);
+    if (this.carry) this.carryVelocities(h);
 
     this.grounded = false;
     for (let i = 0; i < n; i++) if (this.contact[i] > 0) { this.grounded = true; break; }
-    this.quietTime = !this.grab && !this.extraGrabs.length && this.grounded && this.rigidRms < .004 && this.internalRms < .021 ? this.quietTime + h : 0;
+    this.quietTime = !this.grab && !this.extraGrabs.length && !this.carry && this.grounded && this.rigidRms < .004 && this.internalRms < .021 ? this.quietTime + h : 0;
     if (this.quietTime > .45) {
       this.sleeping = true;
       v.fill(0); this.internalRms = this.rigidRms = 0;
       old.set(x);
+    }
+  }
+
+  // Carry: steer the centre-of-mass velocity toward the target (critically
+  // damped, ~70 ms) with one uniform velocity change — a uniform change cannot
+  // stretch the body, so it travels as one piece. The bottom gets slightly more
+  // of it than the top (it is held from below), which leaves a gentle sway.
+  carryVelocities(h) {
+    const c = this.carry, x = this.x, v = this.velocity, m = this.mass, n = this.nodeCount, M = this.totalMass;
+    let cx = 0, cy = 0, cz = 0, vx = 0, vy = 0, vz = 0, lo = Infinity, hi = -Infinity;
+    for (let i = 0; i < n; i++) {
+      const j = i * 3, w = m[i] / M;
+      cx += x[j] * w; cy += x[j + 1] * w; cz += x[j + 2] * w;
+      vx += v[j] * w; vy += v[j + 1] * w; vz += v[j + 2] * w;
+      if (x[j + 1] < lo) lo = x[j + 1]; if (x[j + 1] > hi) hi = x[j + 1];
+    }
+    const k = 14, maxSpeed = 0.7;
+    let dx = (c.target[0] - cx) * k - vx, dy = (c.target[1] - cy) * k - vy, dz = (c.target[2] - cz) * k - vz;
+    const want = Math.hypot(dx + vx, dy + vy, dz + vz);
+    if (want > maxSpeed) { const s = maxSpeed / want; dx = (dx + vx) * s - vx; dy = (dy + vy) * s - vy; dz = (dz + vz) * s - vz; }
+    const blend = 1 - Math.exp(-h * 30), span = Math.max(1e-4, hi - lo);
+    for (let i = 0; i < n; i++) {
+      const j = i * 3, t = (x[j + 1] - lo) / span, w = blend * (1.08 - 0.16 * t);
+      v[j] += dx * w; v[j + 1] += dy * w; v[j + 2] += dz * w;
     }
   }
 
@@ -424,7 +456,7 @@ export class SoftBody {
   reset(lift = 0) {
     this.x.set(this.rest);
     if (lift) for (let i = 1; i < this.x.length; i += 3) this.x[i] += lift;
-    this.previous.set(this.x); this.velocity.fill(0); this.grab = null; this.extraGrabs = [];
+    this.previous.set(this.x); this.velocity.fill(0); this.grab = null; this.extraGrabs = []; this.carry = null;
     this.grounded = false; this.internalRms = this.rigidRms = 0; this.wake();
     this.updateSurface();
   }
@@ -503,11 +535,14 @@ export class SoftBody {
   // A bite: tets near `center` (current positions) shrink their rest shape —
   // and their original rest shape, so it stays — by up to `factor` (linear),
   // with a smooth falloff to `radius`. The surface there caves in like a
-  // bite taken out of the jelly. Returns how many tets were affected.
-  shrinkRegion(center, radius, factor = 0.3) {
+  // bite taken out of the jelly. `minScale` (optional) caps how far repeated
+  // bites can shrink one tet in total (a steep size jump between neighbours
+  // turns tets inside out). Returns how many tets were affected.
+  shrinkRegion(center, radius, factor = 0.3, minScale = 0) {
     this.ensureRestShapes();
     const E = this.elementCount, x = this.x, ids = this.ids, M = this.restDm, M0 = this.restDm0, I = new Float64Array(9);
     const g = this.gradients;
+    const total = minScale > 0 ? (this.biteScale ||= new Float64Array(E).fill(1)) : null;
     let count = 0;
     for (let e = 0; e < E; e++) {
       let cx = 0, cy = 0, cz = 0;
@@ -515,7 +550,9 @@ export class SoftBody {
       const d = Math.hypot(cx / 4 - center[0], cy / 4 - center[1], cz / 4 - center[2]) / radius;
       if (d >= 1) continue;
       const w = 1 - d * d * (3 - 2 * d);              // smoothstep falloff
-      const s = 1 - (1 - factor) * w, o = e * 9;
+      let s = 1 - (1 - factor) * w;
+      if (total) { s = Math.min(1, Math.max(s, minScale / total[e])); if (s >= 1) continue; total[e] *= s; }
+      const o = e * 9;
       for (let k = 0; k < 9; k++) { M[o + k] *= s; M0[o + k] *= s; }
       if (inv3into(M, o, I)) {
         const go = e * 12;

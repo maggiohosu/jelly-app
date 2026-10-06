@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <title>Shape preview</title>
+  <link rel="icon" href="data:,">
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "../vendor/three/three.webgpu.min.js",
+        "three/webgpu": "../vendor/three/three.webgpu.min.js",
+        "three/tsl": "../vendor/three/three.tsl.min.js",
+        "three/addons/": "../vendor/three/addons/"
+      }
+    }
+  </script>
+  <style>
+    html, body { margin: 0; height: 100%; background: #dfe6e8; overflow: hidden; font: 12px/1.35 -apple-system, system-ui, sans-serif; color: #44545b; }
+    canvas { display: block; width: 100vw; height: 100vh; touch-action: none; }
+    #hud { position: fixed; left: 8px; top: 8px; display: flex; flex-wrap: wrap; gap: 4px; max-width: calc(100vw - 16px); }
+    #hud a { text-decoration: none; border-radius: 9px; padding: 5px 9px; background: #ffffffcc; color: #44545b; }
+    #hud a.on { background: #44545b; color: #fff; }
+    #stats { position: fixed; left: 8px; bottom: 8px; font: 11px/1.35 ui-monospace, Menlo, monospace; white-space: pre; opacity: 0.8; }
+    body.clean #hud, body.clean #stats { display: none; }
+  </style>
+</head>
+<body>
+  <canvas id="stage"></canvas>
+  <div id="hud"></div>
+  <div id="stats"></div>
+  <script type="module" src="./shapes-preview.js"></script>
+</body>
+</html>

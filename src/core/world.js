@@ -12,7 +12,8 @@
 //   keep their radius inside the body and knock into each other (clinks).
 
 import { SoftBody, easeGrabTarget, clampGrabTarget } from "./softbody.js";
-import { makeFlowerCage, makeSurfaceStencils, makeTetLocator } from "./cage.js";
+import { makeSurfaceStencils, makeTetLocator } from "./cage.js";
+import { makeShapeCage, shapeLook, SHAPES } from "./shapes.js";
 
 // Absorption (1/m) of a saturated paint swirl; mixing adds σ.
 export const PAINTS = Object.freeze([
@@ -49,11 +50,28 @@ const GEM_WANDER = 0.03;          // m/s random drift at full stirring
 // pulled into (plastic), sags, then slowly rounds back into a blob.
 const SLIME = Object.freeze({ shear: 0.32, damping: 6.5, friction: 1.7, flow: 1.6, recover: 0.13, yieldStrain: 0.2, holdTime: 2.5, awake: 30, beads: 180, beadRadius: 0.0021 });
 const PLASTIC_HZ = 30;
-const RARE_CAPACITY = 4;           // big rare gems per jelly
+const RARE_CAPACITY = 8;           // big rare gems per jelly
 const GLITTER_MAX = 360, STARS_MAX = 36;
 
-function makeType() {
-  const cage = makeFlowerCage();
+// Decorations (faces, cherry, beak…) of the shaped jellies; index = kind id
+// sent to the renderer (render/decor.js DECOR_KINDS has the same order).
+// A bunny bite: the whole jelly × scale (linear), the bitten spot caves in to
+// `factor` (linear) within `radius`, never below `minScale` in total.
+export const BITE = Object.freeze({ radius: 0.014, factor: 0.5, minScale: 0.35, scale: 0.87 });
+export const DECOR_KINDS = Object.freeze(["eye", "nose", "mouth", "blush", "muzzle", "earInner", "cherry", "beak"]);
+// Decorations are drawn on top of the jelly (render/decor.js overlay pass), so
+// they anchor ON the rendered surface; shapes.js projects anchors onto it.
+const DECOR_INSET = 0;
+
+const types = new Map();
+function makeType(id = "flower") {
+  if (types.has(id)) return types.get(id);
+  const t = buildType(id);
+  types.set(id, t);
+  return t;
+}
+function buildType(id) {
+  const cage = makeShapeCage(id);
   const stencils = makeSurfaceStencils(cage);
   const locator = makeTetLocator(cage, 0.004);
   const edgeSet = new Set(), edges = [];
@@ -66,14 +84,15 @@ function makeType() {
   for (let i = 0; i < n; i++) { cx += cage.pos[i * 3]; cy += cage.pos[i * 3 + 1]; cz += cage.pos[i * 3 + 2]; }
   const vertexTri = new Int32Array(stencils.vertexCount).fill(-1);
   for (let t = 0; t < stencils.indices.length / 3; t++) for (let k = 0; k < 3; k++) if (vertexTri[stencils.indices[t * 3 + k]] < 0) vertexTri[stencils.indices[t * 3 + k]] = t;
-  return { cage, stencils, locator, vertexTri, edges: Int32Array.from(edges), centroid: [cx / n, cy / n, cz / n] };
+  return { id, cage, stencils, locator, vertexTri, edges: Int32Array.from(edges), centroid: [cx / n, cy / n, cz / n], look: shapeLook(id) };
 }
 
 export class JellyWorld {
-  constructor({ wallRadius = 0.075, base = "berry", gemCapacity = 14, texture = "jelly" } = {}) {
+  constructor({ wallRadius = 0.075, base = "berry", gemCapacity = 24, texture = "jelly", shape = "flower" } = {}) {
     this.texture = texture === "slime" ? "slime" : "jelly";
+    this.shape = SHAPES.some((x) => x.id === shape) ? shape : "flower";
     this.wallRadius = wallRadius;
-    this.type = makeType();
+    this.type = makeType(this.shape);
     this.gemCapacity = gemCapacity;
     this.params = { shear: 600, damping: 3, friction: 1 };
     this.gravityVector = null; this.frictionOverride = null;
@@ -100,20 +119,25 @@ export class JellyWorld {
     this.additives = { glitter: [], stars: [] };
     this.additiveVersion = (this.additiveVersion || 0) + 1;
     this.eatenBeads = null;
+    this.pearls = null; this.eatenPearls = null;
+    this.decor = [];
     this.meanDye = [0, 0, 0];
     this.gems = [];
     this.grabs = new Map(); this.grabbing = false;
     this.falling = [];
     this.accumulator = 0;
     this.setBase(base);
+    this.applyLook();
     if (lift) body.reset(lift);
     this.events.push({ type: "reset" });
   }
 
   setBase(base) {
-    const sigma = BASES[base] || BASES.berry;
-    this.base = BASES[base] ? base : "berry";
+    // a σ triple (a shape's signature colour from an order) or a BASES id
+    const sigma = Array.isArray(base) ? base : BASES[base] || BASES.berry;
+    this.base = Array.isArray(base) ? this.base || "berry" : BASES[base] ? base : "berry";
     for (let i = 0; i < this.body.nodeCount; i++) this.dye.set(sigma, i * 3);
+    this.lookDye = null;
     this.fx?.fill(0);
     this.dyeVersion = (this.dyeVersion || 0) + 1;
     this.dyeActive = false;
@@ -126,6 +150,113 @@ export class JellyWorld {
     const damping = slime ? Math.max(this.params.damping, SLIME.damping) : this.params.damping;
     const friction = this.params.friction * (slime ? SLIME.friction : 1);
     return { shear, damping, staticFriction: 0.65 * friction, dynamicFriction: 0.42 * friction };
+  }
+
+  // ---------------------------------------------------------------- shape
+  // A new shape = a new jelly (paint, gems and additives start over).
+  setShape(id, base = this.base) {
+    if (!SHAPES.some((x) => x.id === id)) return;
+    this.shape = id;
+    this.type = makeType(id);
+    this.beads = null;
+    this.reset(base);
+    this.events.push({ type: "shape", shape: id });
+  }
+
+  // The shape's signature look: colour field, pearl/glow, glitter, pearls and
+  // decorations (eyes, nose, cherry…), all as material points of this cage.
+  applyLook() {
+    const look = this.type.look, pos = this.type.cage.pos, n = this.body.nodeCount;
+    if (!look) return;
+    if (look.dye) {
+      for (let i = 0; i < n; i++) {
+        const d = look.dye(pos[i * 3], pos[i * 3 + 1], pos[i * 3 + 2]);
+        for (let c = 0; c < 3; c++) this.dye[i * 3 + c] = Math.max(0, Math.min(SIGMA_MAX, Number(d[c]) || 0));
+      }
+      // the signature pattern (cake layers, the bird's cap and wings) stays
+      // put: only paint dropped on top of it diffuses (see diffuseDye)
+      this.lookDye = this.dye.slice();
+      this.dyeVersion++;
+      this.updateMeanDye();
+    }
+    if (look.fx) {
+      for (let i = 0; i < n; i++) {
+        const f = look.fx(pos[i * 3], pos[i * 3 + 1], pos[i * 3 + 2]);
+        this.fx[i * 2] = Math.max(0, Math.min(4, Number(f[0]) || 0));
+        this.fx[i * 2 + 1] = Math.max(0, Math.min(4, Number(f[1]) || 0));
+      }
+      this.dyeVersion++;
+    }
+    if (look.glitter > 0) this.fillAdditive("glitter", Math.min(GLITTER_MAX, look.glitter));
+    if (look.pearls > 0) this.pearls = this.makePoints(look.pearls, 0.0016, () => 5);   // 5 = pearl (render/beads.js PEARL_COLOR)
+    this.decor = [];
+    const L = this.type.locator;
+    for (const d of look.decor || []) {
+      const kind = DECOR_KINDS.indexOf(d.kind);
+      if (kind < 0) continue;
+      const inset = DECOR_INSET;
+      let e = -1, u = null;
+      for (let k = 0; k < 8 && e < 0; k++) {
+        const depth = inset + k * 0.0006;
+        u = [d.u[0] - d.n[0] * depth, d.u[1] - d.n[1] * depth, d.u[2] - d.n[2] * depth];
+        e = L.locate(u[0], u[1], u[2]);
+      }
+      if (e < 0) continue;
+      // rest frame: local +Z = outward normal, +Y = up (orthogonalised)
+      const z = norm3(d.n), upDot = dot3(d.up, z);
+      const y = norm3([d.up[0] - z[0] * upDot, d.up[1] - z[1] * upDot, d.up[2] - z[2] * upDot]);
+      const x = cross3(y, z);
+      const q0 = quatFromBasis(x, y, z, [0, 0, 0, 1]);
+      const rgb = d.color ? hexToRgb(d.color) : [-1, -1, -1];
+      this.decor.push({ kind, tet: e, bary: L.bary.slice(), q0, scale: d.scale || 0.003, rgb, quat: q0.slice() });
+    }
+  }
+
+  // Uniformly spread material points (pearls) through the body.
+  makePoints(count, radius, colorOf) {
+    const L = this.type.locator, bnd = L.bounds;
+    const tets = new Int32Array(count), bary = new Float64Array(count * 4), color = new Uint8Array(count);
+    let n = 0, seed = 12345;
+    const rnd = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 4294967296; };
+    for (let tries = 0; n < count && tries < count * 60; tries++) {
+      const u = [bnd[0] + rnd() * (bnd[3] - bnd[0]), bnd[1] + rnd() * (bnd[4] - bnd[1]), bnd[2] + rnd() * (bnd[5] - bnd[2])];
+      if (!this.gemFits(u, radius)) continue;
+      const e = L.locate(u[0], u[1], u[2]);
+      tets[n] = e; bary.set(L.bary, n * 4); color[n] = colorOf(n); n++;
+    }
+    return { count: n, tets, bary, color };
+  }
+
+  // Glitter spread through the whole body (shape looks).
+  fillAdditive(kind, count) {
+    const list = this.additives[kind], L = this.type.locator, bnd = L.bounds;
+    let seed = 777;
+    const rnd = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 4294967296; };
+    for (let tries = 0; list.length < count && tries < count * 40; tries++) {
+      const u = [bnd[0] + rnd() * (bnd[3] - bnd[0]), bnd[1] + rnd() * (bnd[4] - bnd[1]), bnd[2] + rnd() * (bnd[5] - bnd[2])];
+      if (!this.gemFits(u, 0.0008)) continue;
+      const e = L.locate(u[0], u[1], u[2]);
+      if (e < 0) continue;
+      list.push({ tet: e, bary: L.bary.slice(), variant: Math.floor(rnd() * 4), spin: rnd() });
+    }
+    this.additiveVersion++;
+  }
+
+  // 12 floats per decoration: kind, x, y, z, qx, qy, qz, qw, scale, r, g, b (r < 0 = kind default).
+  decorCount() { return this.decor.length; }
+  decorStates(out) {
+    const body = this.body, p = [0, 0, 0], bary = [0, 0, 0, 0], q = this.scratchDecorQ ||= [0, 0, 0, 1];
+    for (let i = 0; i < this.decor.length; i++) {
+      const d = this.decor[i], o = i * 12;
+      bary[0] = d.bary[0]; bary[1] = d.bary[1]; bary[2] = d.bary[2]; bary[3] = d.bary[3];
+      body.pointInTet(d.tet, bary, p);
+      tetRotation(body, d.tet, q);
+      slerpInto(d.quat, quatMultiply(q, d.q0, this.scratchDecorQ2 ||= [0, 0, 0, 1]), 0.5);
+      out[o] = d.kind; out[o + 1] = p[0]; out[o + 2] = p[1]; out[o + 3] = p[2];
+      out[o + 4] = d.quat[0]; out[o + 5] = d.quat[1]; out[o + 6] = d.quat[2]; out[o + 7] = d.quat[3];
+      out[o + 8] = d.scale; out[o + 9] = d.rgb[0]; out[o + 10] = d.rgb[1]; out[o + 11] = d.rgb[2];
+    }
+    return out;
   }
 
   // ---------------------------------------------------------------- texture
@@ -163,17 +294,23 @@ export class JellyWorld {
   }
 
   // 4 floats per bead: x, y, z, colour index. Empty unless slime.
+  beadCount() {
+    return (this.texture === "slime" && this.beads ? this.beads.count : 0) + (this.pearls ? this.pearls.count : 0);
+  }
   beadStates(out) {
-    const b = this.beads, body = this.body, p = [0, 0, 0], bary = [0, 0, 0, 0], gone = this.eatenBeads;
+    const body = this.body, p = [0, 0, 0], bary = [0, 0, 0, 0];
     let n = 0;
-    for (let i = 0; i < b.count; i++) {
+    const lists = [];
+    if (this.texture === "slime" && this.beads) lists.push([this.beads, this.eatenBeads]);
+    if (this.pearls) lists.push([this.pearls, this.eatenPearls]);
+    for (const [b, gone] of lists) for (let i = 0; i < b.count; i++) {
       if (gone && gone[i]) continue;
       bary[0] = b.bary[i * 4]; bary[1] = b.bary[i * 4 + 1]; bary[2] = b.bary[i * 4 + 2]; bary[3] = b.bary[i * 4 + 3];
       body.pointInTet(b.tets[i], bary, p);
       out[n * 4] = p[0]; out[n * 4 + 1] = p[1]; out[n * 4 + 2] = p[2]; out[n * 4 + 3] = b.color[i];
       n++;
     }
-    return n < b.count ? out.subarray(0, n * 4) : out;
+    return n * 4 < out.length ? out.subarray(0, n * 4) : out;
   }
 
   // ---------------------------------------------------------------- input
@@ -211,9 +348,15 @@ export class JellyWorld {
       }
       case "bounce": this.bounce(event.strength); break;
       case "texture": this.setTexture(event.texture); break;
+      case "shape": this.setShape(event.shape, event.base); break;
       case "nudge": body.nudge(); break;
       case "reset": this.reset(event.base, event.lift || 0); break;
       case "grabNear": this.grabNear(event); break;
+      case "carry":
+        // the bunny holds the jelly as a whole (target = centre of mass), null = put down
+        if (event.target) { this.body.carry = { target: event.target.slice() }; this.body.wake(); this.lastTouch = this.time || 0; }
+        else this.body.carry = null;
+        break;
       case "bite": this.bite(event); break;
       case "additive": this.addAdditive(event); break;
       case "base": this.setBase(event.base); break;
@@ -287,11 +430,12 @@ export class JellyWorld {
 
   // A bite at tray-space `center`: the jelly caves in there, and gems,
   // glitter, star candies and foam beads inside the bite are eaten.
-  bite({ center, radius = 0.016, factor = 0.2, scale = 0.87 }) {
+  bite({ center, radius = BITE.radius, factor = BITE.factor, scale = BITE.scale }) {
     // the whole jelly gets smaller (a bite's worth is gone) and the bitten
-    // side caves in a little more
+    // side caves in a little more (gently enough that the tets there do not
+    // turn inside out, even bite after bite in one place)
     this.body.scaleRest(scale);
-    this.body.shrinkRegion(center, radius, factor);
+    this.body.shrinkRegion(center, radius, factor, BITE.minScale);
     const r2 = (radius * 0.95) ** 2, inside = (p) => (p[0] - center[0]) ** 2 + (p[1] - center[1]) ** 2 + (p[2] - center[2]) ** 2 < r2;
     const eaten = [];
     this.gems = this.gems.filter((g) => { if (g.fall || !inside(g.wpos)) return true; eaten.push({ shape: g.shape, rare: g.rare, tier: g.tier }); return false; });
@@ -303,6 +447,11 @@ export class JellyWorld {
       const gone = this.eatenBeads ||= new Uint8Array(this.beads.count);
       for (let i = 0; i < this.beads.count; i++) if (!gone[i] && inside(at(this.beads, i))) gone[i] = 1;
     }
+    if (this.pearls) {
+      const gone = this.eatenPearls ||= new Uint8Array(this.pearls.count);
+      for (let i = 0; i < this.pearls.count; i++) if (!gone[i] && inside(at(this.pearls, i))) gone[i] = 1;
+    }
+    this.decor = this.decor.filter((d) => { bary[0] = d.bary[0]; bary[1] = d.bary[1]; bary[2] = d.bary[2]; bary[3] = d.bary[3]; return !inside(this.body.pointInTet(d.tet, bary, p)); });
     this.events.push({ type: "bitten", center: center.slice(), eaten });
   }
 
@@ -434,6 +583,7 @@ export class JellyWorld {
       for (let i = 0; i < n; i++) {
         const f = Math.min(0.75, dose * w[i] / W / m[i]);
         for (let c = 0; c < 3; c++) d[i * 3 + c] *= 1 - f;
+        if (this.lookDye) for (let c = 0; c < 3; c++) this.lookDye[i * 3 + c] *= 1 - f;
         this.fx[i * 2] *= 1 - f; this.fx[i * 2 + 1] *= 1 - f;
       }
     }
@@ -457,16 +607,18 @@ export class JellyWorld {
   }
 
   // Pigment-conserving diffusion over cage edges; stirring speeds it up.
+  // With a signature pattern (lookDye) only the paint on top of it — the
+  // difference — diffuses, so the pattern keeps its layers.
   diffuseDye(dt) {
     if (!this.dyeActive) return;
-    const edges = this.type.edges, d = this.dye, m = this.body.mass;
+    const edges = this.type.edges, d = this.dye, m = this.body.mass, L = this.lookDye;
     const stir = Math.min(1, this.body.internalRms / 0.08);
     const alpha = Math.min(0.045, (0.18 + 2.2 * stir) * dt);
     let spread = 0;
     for (let k = 0; k < edges.length; k += 2) {
       const i = edges[k], j = edges[k + 1], mij = Math.min(m[i], m[j]) * alpha;
       for (let c = 0; c < 3; c++) {
-        const diff = d[j * 3 + c] - d[i * 3 + c];
+        const diff = L ? d[j * 3 + c] - L[j * 3 + c] - (d[i * 3 + c] - L[i * 3 + c]) : d[j * 3 + c] - d[i * 3 + c];
         if (diff === 0) continue;
         const flux = diff * mij;
         d[i * 3 + c] += flux / m[i]; d[j * 3 + c] -= flux / m[j];
@@ -746,6 +898,10 @@ function inv3cols(a, b, c) {
   ];
 }
 const dot = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+const dot3 = dot;
+const norm3 = (a) => { const l = Math.hypot(a[0], a[1], a[2]) || 1; return [a[0] / l, a[1] / l, a[2] / l]; };
+const cross3 = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+function hexToRgb(hex) { const v = parseInt(String(hex).replace("#", ""), 16); return [((v >> 16) & 255) / 255, ((v >> 8) & 255) / 255, (v & 255) / 255]; }
 const cross = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
 const norm = (a) => { const l = Math.hypot(a[0], a[1], a[2]) || 1; return [a[0] / l, a[1] / l, a[2] / l]; };
 function quatFromBasis(x, y, z, out) {

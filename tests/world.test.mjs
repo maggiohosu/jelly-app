@@ -1,6 +1,7 @@
 // JellyWorld: paint drops (exact pigment bookkeeping, subtractive mixing,
 // diffusion, water dilution), gem containment / suspension / clinks, cost.
 import { JellyWorld, PAINTS, BASES } from "../src/core/world.js";
+import { SHAPES, signatureSigma } from "../src/core/shapes.js";
 
 let failures = 0;
 const check = (label, ok, detail = "") => { if (!ok) failures++; console.log(`${ok ? "PASS" : "FAIL"}  ${label}${detail ? "  " + detail : ""}`); };
@@ -163,8 +164,8 @@ w.handle({ type: "gemScatter", count: 1, rare: { index: 3, tier: 2 }, radius: 0.
 const rareGem = w.gems.find((g) => g.rare);
 const gs = w.gemStates(new Float32Array(w.gems.length * 10));
 check("rare gem is encoded in the gem states (tier ≥ 100)", rareGem && Array.from({ length: w.gems.length }, (_, i) => gs[i * 10 + 1]).includes(102));
-for (let i = 0; i < 4; i++) w.handle({ type: "gemScatter", count: 1, rare: { index: i, tier: 0 }, radius: 0.0048 });
-check("at most 4 rare gems per jelly", w.rareCount <= 4 && w.events.some((e) => e.type === "rareFull"), `${w.rareCount}`);
+for (let i = 0; i < 8; i++) w.handle({ type: "gemScatter", count: 1, rare: { index: i, tier: 0 }, radius: 0.0048 });
+check("at most 8 rare gems per jelly", w.rareCount <= 8 && w.events.some((e) => e.type === "rareFull"), `${w.rareCount}`);
 drain(w);
 const meshVolume = () => { const P = w.body.positions, I = w.type.stencils.indices; let v = 0; for (let t = 0; t < I.length; t += 3) { const a = I[t] * 3, b = I[t + 1] * 3, c = I[t + 2] * 3; v += (P[a] * (P[b + 1] * P[c + 2] - P[b + 2] * P[c + 1]) - P[a + 1] * (P[b] * P[c + 2] - P[b + 2] * P[c]) + P[a + 2] * (P[b] * P[c + 1] - P[b + 1] * P[c])) / 6; } return Math.abs(v); };
 const vol0 = meshVolume();
@@ -206,6 +207,79 @@ w.handle({ type: "additive", kind: "stars", point: top(w) });
 const nAdd = w.additiveCount(), as = w.additiveStates(new Float32Array(nAdd * 5));
 check("glitter and star candies are added", w.additives.glitter.length >= 60 && w.additives.stars.length >= 4, `${w.additives.glitter.length} glitter, ${w.additives.stars.length} stars`);
 check("additive positions are finite and on/in the jelly", Array.from(as).every(Number.isFinite) && (() => { const b = w.body.bounds; for (let i = 0; i < nAdd; i++) { const y = as[i * 5 + 1]; if (y < b[1] - 0.002 || y > b[4] + 0.002) return false; } return true; })());
+
+// 5f) carry: the bunny holds the whole jelly — it rises as one piece, no stretching
+{
+  const c = new JellyWorld(); run(c, 2);
+  const size = () => { const b = c.body.bounds; return [b[3] - b[0], b[4] - b[1], b[5] - b[2]]; };
+  // compare with the rest shape: off the floor the jelly un-sags back to it (that is not stretching)
+  const r = c.body.rest, s0 = [0, 1, 2].map((k) => { let lo = Infinity, hi = -Infinity; for (let i = k; i < r.length; i += 3) { lo = Math.min(lo, r[i]); hi = Math.max(hi, r[i]); } return hi - lo; });
+  const y0 = c.body.center[1], x0 = c.body.center[0];
+  let worst = 0;
+  const target = [x0 + 0.02, y0 + 0.06, c.body.center[2]];
+  c.handle({ type: "carry", target });
+  for (let t = 0; t < 1.5; t += dt) {
+    c.advance(dt);
+    const s1 = size();
+    worst = Math.max(worst, ...s1.map((v, k) => Math.abs(v / s0[k] - 1)));
+  }
+  check("carry lifts the jelly to the paws", Math.abs(c.body.center[1] - target[1]) < 0.004 && Math.abs(c.body.center[0] - target[0]) < 0.004, `Δ ${(Math.hypot(c.body.center[0] - target[0], c.body.center[1] - target[1]) * 1000).toFixed(1)} mm`);
+  let settledWorst = 0; for (let t = 0; t < 0.3; t += dt) { c.advance(dt); settledWorst = Math.max(settledWorst, ...size().map((v, k) => Math.abs(v / s0[k] - 1))); }
+  check("carried jelly keeps its rest shape (no stretching, < 8 % once lifted)", settledWorst < 0.08, `${(settledWorst * 100).toFixed(1)} % (incl. the lift-off jolt: ${(worst * 100).toFixed(1)} %)`);
+  // move it around like the bunny does, then put it down
+  for (let t = 0; t < 1; t += dt) { c.handle({ type: "carry", target: [x0 + 0.02 * Math.cos(t * 6), y0 + 0.06, 0.01 * Math.sin(t * 6)] }); c.advance(dt); }
+  check("still no stretching while swaying (< 10 %)", Math.max(...size().map((v, k) => Math.abs(v / s0[k] - 1))) < 0.10, size().map((v, k) => (v / s0[k]).toFixed(2)).join(" "));
+  c.handle({ type: "carry", target: [x0, y0 + 0.002, 0] }); run(c, 1);
+  c.handle({ type: "carry", target: null }); run(c, 2);
+  check("put down: back on the tray, finite", c.body.isFinite() && c.body.center[1] < y0 + 0.004 && !c.body.carry);
+}
+
+// 5g) shapes: each one is a new jelly with its signature look, decorations follow it
+for (const sh of SHAPES.filter((x) => x.id !== "flower")) {
+  const sw = new JellyWorld(); run(sw, 0.3); drain(sw);
+  sw.handle({ type: "gemScatter", count: 4 }); run(sw, 1.5);
+  sw.handle({ type: "shape", shape: sh.id });
+  const ev = drain(sw);
+  check(`${sh.id}: switching shape starts a new jelly`, sw.shape === sh.id && sw.gems.length === 0 && ev.some((e) => e.type === "shape"));
+  run(sw, 2.5);
+  const nd = sw.decorCount(), ds = sw.decorStates(new Float32Array(nd * 12));
+  const b = sw.body.bounds;
+  check(`${sh.id}: settles finite on the tray`, sw.body.isFinite() && b[1] < 0.003 && b[1] > -0.001, `min y ${(b[1] * 1000).toFixed(1)} mm`);
+  const decorOk = Array.from(ds).every(Number.isFinite) && Array.from({ length: nd }, (_, i) => ds[i * 12 + 2] > b[1] - 0.002 && ds[i * 12 + 2] < b[4] + 0.012 && Math.abs(Math.hypot(ds[i * 12 + 4], ds[i * 12 + 5], ds[i * 12 + 6], ds[i * 12 + 7]) - 1) < 1e-3).every(Boolean);
+  check(`${sh.id}: decorations follow the jelly (${nd})`, decorOk);
+  const look = sw.type.look;
+  const sig = signatureSigma(sh.id);
+  check(`${sh.id}: a fresh jelly's mean colour is the order's starting colour (signatureSigma)`, !look.dye || sig.every((v, c) => Math.abs(v - sw.meanDye[c]) < 0.005 * Math.max(1, v)), `${sw.meanDye.map((v) => v.toFixed(2))} vs ${sig}`);
+  check(`${sh.id}: signature look applied`, (!look.dye || Math.max(...sw.meanDye) > 3) && sw.additives.glitter.length >= Math.min(look.glitter, 30) && (!look.pearls || sw.beadCount() > look.pearls * 0.6));
+  sw.handle({ type: "gemScatter", count: 30 }); run(sw, 3);
+  check(`${sh.id}: 24 gems fit`, sw.gems.length >= 18 && sw.gems.length <= 24, `${sw.gems.length}`);
+  sw.handle({ type: "carry", target: [sw.body.center[0], 0.07, sw.body.center[2]] }); run(sw, 0.8);
+  for (let i = 0; i < 4; i++) { sw.handle({ type: "bite", center: [sw.body.center[0], sw.body.center[1] + 0.01, sw.body.bounds[5] - 0.002] }); run(sw, 0.4); }
+  sw.handle({ type: "carry", target: null }); run(sw, 2);
+  check(`${sh.id}: carried + 4 bites stays stable`, sw.body.isFinite());
+  sw.handle({ type: "texture", texture: "slime" }); run(sw, 4);
+  check(`${sh.id}: slime works`, sw.body.isFinite() && sw.beadCount() > 100);
+}
+
+// 5h) a shape's signature pattern stays put: paint dropped on the rainbow cake
+//     spreads through it, the layers underneath keep their colours
+{
+  const cw = new JellyWorld(); run(cw, 0.3);
+  cw.handle({ type: "shape", shape: "cake" }); run(cw, 1.5); drain(cw);
+  const rest = cw.type.cage.pos, n = cw.body.nodeCount;
+  const band = (y0, y1) => { const ids = []; for (let i = 0; i < n; i++) if (rest[i * 3 + 1] > y0 && rest[i * 3 + 1] < y1) ids.push(i); return ids; };
+  const blue = band(0.0160, 0.0210), yellow = band(0.0295, 0.0345);
+  const meanRed = (ids) => ids.reduce((a, i) => a + cw.dye[i * 3], 0) / ids.length;
+  const contrast0 = meanRed(blue) - meanRed(yellow);
+  for (let k = 0; k < 3; k++) { cw.handle({ type: "drop", point: top(cw), paint: k }); run(cw, 0.4); }
+  const pig0 = cw.totalPigment();
+  for (let t = 0; t < 20; t += 1) { cw.handle({ type: "nudge" }); run(cw, 1); }
+  const pig1 = cw.totalPigment(), contrast1 = meanRed(blue) - meanRed(yellow);
+  check("cake layers stay layered after paint is dropped and stirred (≥ 80 % of the contrast)", blue.length > 5 && yellow.length > 5 && contrast1 > 0.8 * contrast0,
+    `blue − yellow red absorption ${contrast0.toFixed(1)} → ${contrast1.toFixed(1)} 1/m`);
+  check("the dropped paint still spreads and pigment is conserved", pig1.every((v, c) => Math.abs(v - pig0[c]) < 1e-9 * Math.max(1, pig0[c])) && !cw.dyeActive,
+    pig0.map((v, c) => `${(v * 1e6).toFixed(3)}→${(pig1[c] * 1e6).toFixed(3)}`).join(" "));
+}
 
 // 6) cost (awake, 240 Hz, with gems and an active dye field)
 w = new JellyWorld(); run(w, 0.3);

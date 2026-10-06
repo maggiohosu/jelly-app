@@ -81,11 +81,19 @@
     <button class="pill" id="gem-scatter">✨ 한 줌 쏟기</button>
   </section>
 
+  <section class="drawer" id="shape-drawer" hidden aria-label="모양">
+    <div class="drawer-head">
+      <b>모양</b><span class="small">고르면 새 젤리가 떨어져요 · 토끼와 친해지면 새 모양</span>
+    </div>
+    <div class="shape-grid" id="shape-grid"></div>
+  </section>
+
   <nav class="toolbar" id="toolbar" hidden>
     <div class="paints" id="paints" role="toolbar" aria-label="스포이드 물감"></div>
     <div class="actions">
       <button class="round toggle" id="gems" aria-label="보석함" aria-pressed="false">💎</button>
       <button class="round toggle texture" id="texture" aria-pressed="false">젤리</button>
+      <button class="round toggle" id="shape-button" aria-label="모양 고르기" aria-pressed="false"></button>
       <button class="round" id="nudge" aria-label="통통 튀기기">통통</button>
       <button class="round carrot" id="feed" aria-label="토끼에게 먹이기">🥕</button>
     </div>

@@ -530,9 +530,9 @@ async function testRealtime() {
 }
 
 // ======================================================== bunny / coins / cards
-const FX_METHODS = ["munch", "chew", "squeak", "coin", "coinShower", "cardFlip", "reveal", "levelUp", "cardShake"];
-const fireAll = (a, f = 0) => [a.munch(1), a.chew(0.6), a.squeak(["happy", "ok", "sad"][f % 3]), a.coin(1, f), a.coinShower(40, 1),
-  a.cardFlip(), a.cardShake(), a.reveal(["new", "gold", "rainbow", "dupe"][f % 4]), a.levelUp()];
+const FX_METHODS = ["munch", "chew", "squeak", "coin", "coinShower", "cardFlip", "reveal", "levelUp", "cardShake", "spit", "splat", "special", "coinLoss"];
+const fireAll = (a, f = 0) => [a.munch(1), a.chew(0.6), a.squeak(["happy", "ok", "sad", "no", "grumpy"][f % 5]), a.coin(1, f), a.coinShower(40, 1),
+  a.cardFlip(), a.cardShake(), a.reveal(["new", "gold", "rainbow", "dupe"][f % 4]), a.levelUp(), a.spit(1), a.splat(1), a.special(), a.coinLoss(20)];
 
 // Render `seconds`; plan = [[time, (audio, t) => result], …] runs each once on the frame nearest `time`.
 async function fxRender(seconds, plan, { seed = 7, texture = "jelly", volumes, setup, sampleRate = SR } = {}) {
@@ -545,7 +545,7 @@ async function fxRender(seconds, plan, { seed = 7, texture = "jelly", volumes, s
 
 async function testFxApi() {
   const a = new JellyAudio();
-  check("fx API: munch/chew/squeak/coin/coinShower/cardFlip/reveal/levelUp/cardShake present", FX_METHODS.every((m) => typeof a[m] === "function"),
+  check("fx API: munch/chew/squeak/coin/coinShower/cardFlip/reveal/levelUp/cardShake/spit/splat/special/coinLoss present", FX_METHODS.every((m) => typeof a[m] === "function"),
     FX_METHODS.filter((m) => typeof a[m] !== "function").join(","));
   let threw = null, res = [];
   try { res = fireAll(a).concat([a.squeak("sad"), a.reveal("rainbow"), a.coin(0.5)]); a.dispose(); res = res.concat(fireAll(a)); } catch (e) { threw = e; }
@@ -753,15 +753,88 @@ async function testReveal() {
   check("levelUp: C-major pentatonic", tl >= 15, `${fmt(tl, 1)} dB`);
 }
 
+// spit/splat, squeak 'no'/'grumpy', special(), coinLoss()
+async function testBunnyExtras() {
+  // 퉤: a plosive burst and a wet spray; the chunk lands ~0.35 s later
+  const sp = await fxRender(1.2, [[0.05, (a) => a.spit(0.8, 0)]], { seed: 12 });
+  const spSpan = soundSpan(sp.x, SR), spS = spectrum(sp.x, SR, 0.05, 0.35);
+  check("spit: audible 퉤, short (−30 dB span ≤ 0.3 s), then silence", rmsOf(sp.buffer, 0.05, 0.3) > 0.003 && spSpan.dur <= 0.3 && rmsOf(sp.buffer, 1.05, 1.2) < 1e-4,
+    `${fmt(dB(rmsOf(sp.buffer, 0.05, 0.3)), 1)} dBFS, ${fmt(spSpan.dur, 2)} s`);
+  const hiFrac = bandE(spS, 2000, 20000) / bandE(spS, 40, 20000);
+  check("spit: wet spray (≥ 50 % of the energy above 2 kHz)", hiFrac >= 0.5, `${fmt(hiFrac * 100, 0)} %`);
+  const env1 = envDb(sp.x, SR, 0.002);
+  let pk = 0; for (let j = 0; j < 0.3 / 0.002; j++) if (env1[j] > env1[pk]) pk = j;
+  check("spit: opens with the plosive (loudest within 20 ms of the call)", pk * 0.002 - 0.05 <= 0.02, `peak at +${fmt((pk * 0.002 - 0.05) * 1000, 0)} ms`);
+  const sl = await fxRender(1.2, [[0.05, (a) => a.splat(0.8)]], { seed: 12 });
+  const slSpan = soundSpan(sl.x, SR), slC = centroid(spectrum(sl.x, SR, 0.05, 0.3), 60, 12000), spC = centroid(spS, 60, 12000);
+  check("splat: audible, short (≤ 0.25 s), a wet low plop (darker than the spit)", rmsOf(sl.buffer, 0.05, 0.25) > 0.003 && slSpan.dur <= 0.25 && slC < spC * 0.6 && rmsOf(sl.buffer, 1.05, 1.2) < 1e-4,
+    `${fmt(dB(rmsOf(sl.buffer, 0.05, 0.25)), 1)} dBFS, ${fmt(slSpan.dur, 2)} s, centroid ${fmt(slC, 0)} vs spit ${fmt(spC, 0)} Hz`);
+  const both = await fxRender(1.6, [[0.05, (a) => a.spit(0.8)]], { seed: 12 });
+  const land = onsetPeaks(both.x, SR, 0.3, 0.6, 0.05, -12);
+  check("spit(): the chunk lands ~0.35 s later (splat); spit(s, 0) has none", land.some((q) => Math.abs(q.t - 0.403) < 0.03) && rmsOf(sp.buffer, 0.38, 0.6) < rmsOf(both.buffer, 0.38, 0.6) * 0.05,
+    `peaks at ${land.map((q) => fmt(q.t, 3)).join(", ")} s`);
+  const rl = await fxRender(0.6, [[0.05, (a) => a.spit()], [0.2, (a) => a.spit()], [0.4, (a) => a.splat()], [0.4 + 1 / 60, (a) => a.splat()]]);
+  check("spit/splat: rate-limited", rl.results.join() === "true,false,false,false", rl.results.join());
+
+  // 흥흥 / 흥!
+  const happy = await fxRender(1.0, [[0.05, (a) => a.squeak("happy")]], { seed: 11 });
+  const hC = centroid(spectrum(happy.x, SR, 0.05, 0.4), 100, 12000);
+  const sq = {};
+  for (const mood of ["no", "grumpy"]) {
+    const r = await fxRender(1.0, [[0.05, (a) => a.squeak(mood)]], { seed: 11 });
+    const span = soundSpan(r.x, SR), track = pitchTrack(r.x, SR, 0.04, 0.8, 400, 1200);
+    const f = track.map((q) => q.f), med = median(f);
+    sq[mood] = { ...r, span, track };
+    check(`squeak '${mood}': audible, short (${mood === "no" ? "≤ 0.5" : "≤ 0.25"} s)`, rmsOf(r.buffer, 0.05, 0.25) > 0.003 && span.dur <= (mood === "no" ? 0.5 : 0.25),
+      `${fmt(dB(rmsOf(r.buffer, 0.05, 0.25)), 1)} dBFS, ${fmt(span.dur, 2)} s`);
+    const c = centroid(spectrum(r.x, SR, 0.05, 0.45), 100, 12000);
+    check(`squeak '${mood}': a falling, nasal grunt (450–850 Hz, darker than 'happy')`, track.length >= 5 && pitchSlope(track) < -0.3 && med > 450 && med < 850 && c < hC * 0.75,
+      `median ${fmt(med, 0)} Hz, ${fmt(pitchSlope(track), 2)} oct/s, centroid ${fmt(c, 0)} vs ${fmt(hC, 0)} Hz`);
+  }
+  const grunts = onsetPeaks(sq.no.x, SR, 0.03, 0.6, 0.15, -15);
+  const f1 = median(sq.no.track.filter((q) => q.t < 0.26).map((q) => q.f)), f2 = median(sq.no.track.filter((q) => q.t > 0.28).map((q) => q.f));
+  check("squeak 'no': two grunts (흥흥), the second lower", grunts.length === 2 && f2 < f1 * 0.97, `${grunts.length} grunts, ${fmt(f1, 0)} → ${fmt(f2, 0)} Hz`);
+  check("squeak 'grumpy': one grunt, shorter than 'no'", onsetPeaks(sq.grumpy.x, SR, 0.03, 0.6, 0.15, -15).length === 1 && sq.grumpy.span.dur < sq.no.span.dur * 0.7,
+    `${fmt(sq.grumpy.span.dur, 2)} vs ${fmt(sq.no.span.dur, 2)} s`);
+
+  // ★4 special
+  const [spc, gold, rainbow] = await Promise.all(["special", "gold", "rainbow"].map((k) => fxRender(3.6, [[0.05, (a) => (k === "special" ? a.special() : a.reveal(k))]], { seed: 8 })));
+  const d = (r) => soundSpan(r.x, SR).dur;
+  check("special: audible ~1.6 s, ends in silence", rmsOf(spc.buffer, 0.05, 1.0) > 0.004 && d(spc) >= 1.3 && d(spc) <= 2.1 && rmsOf(spc.buffer, 3.4, 3.6) < 1e-4,
+    `${fmt(dB(rmsOf(spc.buffer, 0.05, 1.0)), 1)} dBFS, −30 dB span ${fmt(d(spc), 2)} s, voices fx ${spc.audio.stats.maxFxVoices}/${LIMITS.fx} beds ${spc.audio.stats.maxBeds}/${LIMITS.beds}`);
+  const rS = rmsOf(spc.buffer, 0.05, 1.5), rG = rmsOf(gold.buffer, 0.05, 1.5);
+  check("special: grander than reveal('gold') (louder, more notes)", rS > rG * 1.2 && spc.audio.stats.fxNotes > 1.5 * gold.audio.stats.fxNotes,
+    `+${fmt(dB(rS / rG), 1)} dB, ${spc.audio.stats.fxNotes} vs ${gold.audio.stats.fxNotes} notes`);
+  const trend = (r) => centroid(spectrum(r.x, SR, 0.3, 0.44), 300, 12000) / centroid(spectrum(r.x, SR, 0.05, 0.17), 300, 12000);
+  check("special: distinct from 'rainbow' (opening cascade falls where the rainbow rises; shorter)", trend(spc) < 0.8 && trend(rainbow) > 1.25 && d(spc) < d(rainbow) - 0.2,
+    `opening centroid ×${fmt(trend(spc), 2)} vs rainbow ×${fmt(trend(rainbow), 2)}, ${fmt(d(spc), 2)} vs ${fmt(d(rainbow), 2)} s`);
+  const Sb = spectrum(spc.x, SR, 0.5, 1.3, true);
+  const pp = Math.min(...[72, 76, 79, 81].map((m) => peakPow(Sb, mtof(m), 0.008))), po = Math.max(...[73, 75, 77, 78, 80, 82, 83].map((m) => peakPow(Sb, mtof(m), 0.008)));
+  check("special: C-major pentatonic bloom (C5 E5 G5 A5 ≫ off-scale semitones)", 10 * Math.log10(pp / po) >= 15, `${fmt(10 * Math.log10(pp / po), 1)} dB`);
+
+  // coins taken away
+  const lost = [];
+  const cl = await fxRender(2.4, [[0.05, (a) => a.coinLoss(10)]], { seed: 5, setup: (a) => { const f = a._coinNote; a._coinNote = function (t, s, h, pan, tag, pitch) { lost.push({ t, pitch }); return f.call(this, t, s, h, pan, tag, pitch); }; } });
+  const clSpan = soundSpan(cl.x, SR);
+  check("coinLoss: 10 coins, audible, ~0.9 s then silence", lost.length === 10 && rmsOf(cl.buffer, 0.05, 0.7) > 0.003 && clSpan.dur >= 0.6 && clSpan.dur <= 1.2 && rmsOf(cl.buffer, 2.2, 2.4) < 1e-4,
+    `${lost.length} coins, ${fmt(dB(rmsOf(cl.buffer, 0.05, 0.7)), 1)} dBFS, ${fmt(clSpan.dur, 2)} s`);
+  const fE = peakFreq(spectrum(cl.x, SR, 0.05, 0.2), 1300, 2800), fL = peakFreq(spectrum(cl.x, SR, 0.5, 0.75), 1300, 2800);
+  check("coinLoss: the clinks fall in pitch", fE / fL > 1.2 && lost.every((q, i) => !i || q.pitch < lost[i - 1].pitch), `${fmt(fE, 0)} → ${fmt(fL, 0)} Hz`);
+  const wE = centroid(spectrum(cl.x, SR, 0.06, 0.18), 200, 1300), wL = centroid(spectrum(cl.x, SR, 0.3, 0.46), 200, 1300);
+  check("coinLoss: a little 'whoop' down", wE > wL * 1.4, `${fmt(wE, 0)} → ${fmt(wL, 0)} Hz`);
+  const rl2 = await fxRender(1.0, [[0.05, (a) => a.coinLoss()], [0.3, (a) => a.coinLoss()], [0.5, (a) => a.coinLoss()]]);
+  check("coinLoss: rate-limited (≥ 0.4 s apart)", rl2.results.join() === "true,false,true", rl2.results.join());
+}
+
 // Everything at max volume: spammed every frame, then fired together every 0.5 s.
 async function testFxStress() {
   const t0 = performance.now();
   let frame = 0;
-  const { buffer, audio } = await JellyAudio.renderOffline(6, (a, t) => {
+  const { buffer, audio } = await JellyAudio.renderOffline(4.5, (a, t) => {
     frame++;
     a.setActivity(1, 0.5);
     a.clink(1, frame);
-    if (t < 3) {
+    if (t < 2.5) {
       a.squelch(1); a.pop(1);
       if (frame % 6 === 0) { a.boing(1, 1.2, "drop"); a.crunch(1); }
       fireAll(a, frame);
@@ -778,7 +851,7 @@ async function testFxStress() {
   check("fx stress: voice limits hold (grains, gems, fx notes, beds)", s.maxGrains <= LIMITS.grains && s.maxGemVoices <= LIMITS.gems && s.maxFxVoices <= LIMITS.fx && s.maxBeds <= LIMITS.beds,
     `grains ${s.maxGrains}/${LIMITS.grains}, gems ${s.maxGemVoices}/${LIMITS.gems}, fx ${s.maxFxVoices}/${LIMITS.fx} (${s.fxSteals} stolen), beds ${s.maxBeds}/${LIMITS.beds} (${s.bedSteals} stolen)`);
   check("fx stress: queue stays bounded", audio._fxQueue.length <= 256, `${audio._fxQueue.length} pending at the end`);
-  info(`fx stress: 6 s rendered in ${fmt(ms, 0)} ms (${fmt(6000 / ms, 1)}× realtime): ${s.munches} munches, ${s.chewBites} chew bites, ${s.squeaks} squeaks, ${s.coins} coins (${s.coinDrops} rate-limited), ${s.reveals} reveals, ${s.fxNotes} fx notes, ${s.beds} beds`);
+  info(`fx stress: 4.5 s rendered in ${fmt(ms, 0)} ms (${fmt(4500 / ms, 1)}× realtime, offline: every scheduled node lives in the graph for the whole render): ${s.munches} munches, ${s.chewBites} chew bites, ${s.squeaks} squeaks, ${s.coins} coins (${s.coinDrops} rate-limited), ${s.reveals} reveals, ${s.fxNotes} fx notes, ${s.beds} beds`);
 }
 
 async function testFxDeterminism() {
@@ -789,30 +862,37 @@ async function testFxDeterminism() {
     if (at(0.5)) a.cardShake();
     if (at(1.2)) { a.cardFlip(); a.reveal("rainbow"); }
     if (at(1.6)) { a.coin(0.7, 5); a.squeak("sad"); a.levelUp(); }
+    if (at(2.2)) { a.spit(0.9); a.coinLoss(8); }
+    if (at(2.5)) { a.squeak("no"); a.special(); }
+    if (at(3.0)) { a.squeak("grumpy"); a.splat(0.7); }
   };
-  const run = async (seed) => (await JellyAudio.renderOffline(3, plan, { sampleRate: 24000, random: mulberry32(seed) })).buffer;
+  const run = async (seed) => (await JellyAudio.renderOffline(4, plan, { sampleRate: 24000, random: mulberry32(seed) })).buffer;
   const [a, b, c] = [await run(77), await run(77), await run(78)];
   const diff = (p, q) => { let m = 0; for (let ch = 0; ch < 2; ch++) { const x = p.getChannelData(ch), y = q.getChannelData(ch); for (let i = 0; i < x.length; i++) m = Math.max(m, Math.abs(x[i] - y[i])); } return m; };
   const same = diff(a, b), other = diff(a, c);
-  check("fx determinism: same seed → identical render (to float precision; Chromium varies ~1e-5)", same < 5e-5 && rmsOf(a, 0, 3) > 0.003, `max diff ${same.toExponential(1)}`);
+  check("fx determinism: same seed → identical render (to float precision; Chromium varies ~1e-5)", same < 5e-5 && rmsOf(a, 0, 4) > 0.003, `max diff ${same.toExponential(1)}`);
   check("fx determinism: another seed → a different take", other > 1e-3, `max diff ${fmt(other, 4)}`);
 }
 
 let demoRender = null;
-// A short listening demo: bunny eats (와삭 냠냠 ×4), squeaks, coins rain, a card shakes, flips, goes rainbow, level up.
+// A short listening demo: bunny eats (와삭 냠냠 ×4), squeaks, coins rain, a card shakes, flips, goes rainbow, level up;
+// then a grumpy bunny spits a bite out (퉤), refuses (흥흥), coins are taken away, and a ★4 special.
 async function testDemo() {
   const plan = [[0.2, (a) => a.squeak("happy")]];
   [0.7, 1.5, 2.3, 3.1].forEach((t, i) => plan.push([t, (a) => { a.munch(i === 2 ? 1 : 0.8); a.chew(i === 3 ? 0.8 : 0.55); }]));
   plan.push([4.1, (a) => a.squeak("happy")], [4.6, (a) => a.coinShower(14, 1.3)], [6.2, (a) => a.cardShake()], [6.95, (a) => a.cardFlip()],
-    [7.05, (a) => a.reveal("rainbow")], [9.3, (a) => a.levelUp()], [10.25, (a) => a.squeak("happy")]);
+    [7.05, (a) => a.reveal("rainbow")], [9.3, (a) => a.levelUp()], [10.25, (a) => a.squeak("happy")],
+    [11.0, (a) => { a.munch(0.8); }], [11.35, (a) => a.squeak("grumpy")], [11.75, (a) => a.spit(0.9)], [12.6, (a) => a.squeak("no")],
+    [13.2, (a) => a.coinLoss(10)], [14.4, (a) => a.special()]);
+  const DEMO = 16.5;
   const t0 = performance.now();
-  const out = await fxRender(11, plan, { seed: 2025 });
+  const out = await fxRender(DEMO, plan, { seed: 2025 });
   const ms = performance.now() - t0;
   demoRender = out.buffer;
   const tp = truePeak(out.buffer);
-  check("demo render (eat ×4, squeak, coins, shake, flip, rainbow, level up): audible, true peak < 1.0", rmsOf(out.buffer, 0, 11) > 0.005 && tp < 1,
-    `${fmt(dB(rmsOf(out.buffer, 0, 11)), 1)} dBFS RMS, true peak ${fmt(dB(tp), 2)} dBFS`);
-  info(`demo: 11 s rendered in ${fmt(ms, 0)} ms (${fmt(11000 / ms, 1)}× realtime)`);
+  check("demo render (eat, squeak, coins, shake, flip, rainbow, level up, 흥 퉤 흥흥, coins lost, ★4 special): audible, true peak < 1.0", rmsOf(out.buffer, 0, DEMO) > 0.005 && tp < 1,
+    `${fmt(dB(rmsOf(out.buffer, 0, DEMO)), 1)} dBFS RMS, true peak ${fmt(dB(tp), 2)} dBFS`);
+  info(`demo: ${DEMO} s rendered in ${fmt(ms, 0)} ms (${fmt((DEMO * 1000) / ms, 1)}× realtime)`);
   // CPU proxy for a busy gacha moment: two big showers, a rainbow reveal, a level-up and munching at once
   const t1 = performance.now();
   const busy = await fxRender(4, [[0.1, (a) => { a.coinShower(40, 2); a.reveal("rainbow"); a.munch(1); a.chew(2); a.cardFlip(); a.squeak("happy"); }],
@@ -823,7 +903,7 @@ async function testDemo() {
 
 async function main() {
   const steps = [testApi, testOutputStage, testBoingMatchesLegacy, testSmoothing, testMainRender, testFx, testGemTimbre, testRateLimit, testStress, testSilenceAndDeterminism,
-    testFxApi, testMunchChew, testSqueak, testCoins, testCards, testReveal, testFxStress, testFxDeterminism, testDemo, testRealtime];
+    testFxApi, testMunchChew, testSqueak, testCoins, testCards, testReveal, testBunnyExtras, testFxStress, testFxDeterminism, testDemo, testRealtime];
   for (const step of steps) {
     try { await step(); } catch (e) { check(`${step.name} threw`, false, e && e.stack ? e.stack : String(e)); }
   }

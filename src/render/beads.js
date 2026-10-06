@@ -5,7 +5,8 @@ import * as THREE from "three/webgpu";
 
 const MAX_BEADS = 220;
 const BEAD_RADIUS = 0.0021;
-export const BEAD_COLORS = ["#fffaf3", "#ffd6e4", "#d9ecff", "#e6dcff", "#fff1c9"];
+export const BEAD_COLORS = ["#fffaf3", "#ffd6e4", "#d9ecff", "#e6dcff", "#fff1c9", "#fff4fb"];
+export const PEARL_COLOR = 5;          // the cat's pearls: smaller, pearly white (not slime foam)
 
 export class BeadLayer {
   constructor(parent) {
@@ -36,7 +37,7 @@ export class BeadLayer {
       const o = i * 4;
       this.position.set(states[o], states[o + 1], states[o + 2]);
       // slight size variety, stable per bead
-      const s = 0.8 + 0.4 * (((i * 2654435761) >>> 0) % 1000) / 1000;
+      const s = (0.8 + 0.4 * (((i * 2654435761) >>> 0) % 1000) / 1000) * (states[o + 3] === PEARL_COLOR ? 0.45 : 1);
       this.scale.setScalar(s);
       this.matrix.compose(this.position, this.rotation, this.scale);
       this.mesh.setMatrixAt(i, this.matrix);

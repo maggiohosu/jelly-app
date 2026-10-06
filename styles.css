@@ -485,3 +485,25 @@ button {
 .empty { grid-column: 1 / -1; text-align: center; color: var(--ink-soft); padding: 30px 0; }
 .toast { top: calc(var(--safe-top) + 112px); z-index: 55; }
 .badge { white-space: nowrap; }
+
+/* ---- v7: shapes, ★4, refuse / spit ---- */
+#shape-button { font-size: 0; }
+#shape-button svg { width: 34px; height: 34px; }
+#shape-button.on { box-shadow: 0 0 0 2px var(--ink) inset; }
+.round.toggle#shape-button:not(.on) { opacity: 1; }
+.shape-grid { display: grid; grid-template-columns: repeat(6, 1fr); gap: 6px; }
+.shape-grid button { display: grid; justify-items: center; gap: 2px; padding: 6px 0 4px; border-radius: 14px; background: rgba(255, 255, 255, 0.6); font-size: 11px; font-weight: 700; color: var(--ink-soft); position: relative; }
+.shape-grid button svg { width: 40px; height: 40px; }
+.shape-grid button.active { background: #fff; color: var(--ink); box-shadow: 0 0 0 2px var(--ink) inset; }
+.shape-grid button.locked { opacity: 0.55; }
+.shape-grid button .lv { position: absolute; top: 3px; right: 4px; font-size: 9px; color: #fff; background: #9aa7ad; border-radius: 6px; padding: 0 4px; }
+.shape-grid button.new::after { content: "NEW"; position: absolute; top: -3px; right: -3px; font-size: 8.5px; font-weight: 800; color: #fff; background: #ff6b8b; border-radius: 6px; padding: 1px 3px; }
+.order-gem.shape svg { width: 30px; height: 30px; }
+.stars.special span { background: linear-gradient(90deg, #ff8fb1, #ffd36b, #8af0b4, #7ec8ff, #c49bff); -webkit-background-clip: text; background-clip: text; color: transparent; text-shadow: none; filter: drop-shadow(0 2px 0 rgba(160, 90, 200, 0.35)); animation: shimmerStar 1.6s linear infinite; }
+@keyframes shimmerStar { 50% { filter: drop-shadow(0 0 8px rgba(255, 210, 120, 0.9)); } }
+.reward-coins.loss { color: #e0475c; }
+.reward-card.refuse { background: #f4f6f7; }
+.reward-card.spit { background: #fff0f2; }
+.coin-fly { position: fixed; width: 22px; height: 22px; z-index: 61; pointer-events: none; border-radius: 50%;
+  background: radial-gradient(circle at 38% 32%, #fff6c8 0 12%, #ffd34d 38%, #f0a400 72%, #c77a00 100%);
+  box-shadow: inset 0 0 0 2px #ffcf3a, inset 0 0 0 3.5px #d68b00; }
