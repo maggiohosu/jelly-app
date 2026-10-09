@@ -32,7 +32,7 @@
   <header class="top">
     <div class="hud" id="hud" hidden>
       <button class="hud-pill coins" id="coins" aria-label="금화"><i class="coin-icon" aria-hidden="true"></i><b id="coin-count">0</b></button>
-      <button class="hud-pill friend" id="friend" aria-label="토끼 친밀도"><span class="heart" aria-hidden="true">♥</span><b id="friend-level">Lv1</b><span class="bar"><i id="friend-bar"></i></span></button>
+      <button class="hud-pill friend" id="friend" aria-label="토끼 친밀도"><span class="heart" aria-hidden="true">♥</span><span class="friend-col"><span class="friend-row"><b id="friend-level">Lv1</b><span class="bar"><i id="friend-bar"></i></span></span><small class="title-tag" id="title-tag" hidden></small></span></button>
     </div>
     <div class="brand" id="brand">말랑젤리</div>
     <div class="badge" id="badge" hidden></div>
@@ -43,11 +43,20 @@
     </button>
   </header>
 
-  <button class="order" id="order" hidden aria-label="토끼 주문서">
-    <span class="order-swatch" id="order-swatch"></span>
-    <span class="order-body"><small>🐰 토끼 주문</small><b id="order-text">…</b></span>
-    <span class="order-gem" id="order-gem"></span>
-  </button>
+  <div class="order" id="order" hidden role="group" aria-label="토끼 주문서">
+    <span class="order-swatch" id="order-swatch" aria-hidden="true"></span>
+    <span class="order-head">
+      <small>🐰 토끼 주문</small>
+      <i class="order-kind" id="order-kind" hidden></i>
+      <span class="order-chips"><i class="order-time" id="order-time" hidden></i><i class="combo-chip" id="combo-chip" hidden></i></span>
+    </span>
+    <b class="order-text" id="order-text" role="button" tabindex="0">…</b>
+    <span class="order-foot">
+      <span class="order-conds" id="order-conds"></span>
+      <button class="order-new" id="order-new" aria-label="이 주문으로 새 젤리 만들기">✨ 이 주문으로 새 젤리</button>
+    </span>
+    <i class="order-timebar" id="order-timebar" aria-hidden="true"></i>
+  </div>
 
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
   <canvas class="confetti" id="confetti" aria-hidden="true"></canvas>
@@ -57,7 +66,32 @@
       <div class="stars" id="reward-stars">★★★</div>
       <div class="reward-line" id="reward-text">맛있어요!</div>
       <div class="reward-coins"><i class="coin-icon" aria-hidden="true"></i><b id="reward-coins">+0</b><span class="small" id="reward-xp"></span></div>
+      <div class="reward-break" id="reward-break" hidden></div>
       <div class="levelup" id="levelup" hidden></div>
+    </div>
+  </section>
+
+  <section class="reward notice" id="notice" hidden aria-live="polite">
+    <div class="reward-card notice-card" id="notice-card">
+      <div class="notice-icon" id="notice-icon"></div>
+      <div class="notice-title" id="notice-title"></div>
+      <div class="notice-text small" id="notice-text"></div>
+    </div>
+  </section>
+
+  <section class="overlay gift" id="gift" hidden aria-label="선물상자">
+    <div class="gift-card">
+      <p class="gift-title" id="gift-title">토끼와 더 친해졌어요!</p>
+      <button class="gift-box" id="gift-box" aria-label="선물상자 열기">
+        <span class="gift-lid"></span><span class="gift-body"></span>
+      </button>
+      <p class="gift-hint" id="gift-hint">톡 눌러 열어 보세요</p>
+      <div class="gift-content" id="gift-content" hidden>
+        <div class="gift-prize" id="gift-prize"></div>
+        <div class="gift-rewards" id="gift-rewards"></div>
+        <p class="small gift-tip" id="gift-tip" hidden></p>
+        <button class="primary" id="gift-ok">좋아요!</button>
+      </div>
     </div>
   </section>
 
@@ -107,6 +141,7 @@
       <span class="hud-pill coins small-pill"><i class="coin-icon" aria-hidden="true"></i><b id="gacha-coins">0</b></span>
       <button class="icon-button" id="gacha-close" aria-label="닫기">✕</button>
     </div>
+    <div class="gacha-free-row"><span class="free-pill" id="gacha-free" hidden></span></div>
     <p class="gacha-hint" id="gacha-hint">카드 한 장을 골라 보세요</p>
     <div class="cards" id="cards"></div>
     <div class="gacha-result" id="gacha-result" hidden>
@@ -114,22 +149,28 @@
       <span class="small" id="gacha-sub"></span>
     </div>
     <div class="gacha-actions">
-      <button class="primary" id="pull-button">금화 100개로 뽑기</button>
+      <button class="primary" id="pull-button">뽑기</button>
     </div>
   </section>
 
   <section class="overlay" id="book" hidden aria-label="도감">
     <div class="overlay-head">
       <b>📖 도감</b>
-      <div class="segmented tabs" id="book-tabs">
-        <button data-tab="rare" class="active">레어 보석</button>
-        <button data-tab="album">작품 앨범</button>
-      </div>
       <button class="icon-button" id="book-close" aria-label="닫기">✕</button>
+    </div>
+    <div class="book-tabs" id="book-tabs" role="tablist">
+      <button data-tab="rare" class="active" role="tab">레어 보석</button>
+      <button data-tab="album" role="tab">작품</button>
+      <button data-tab="colors" role="tab">색 도감</button>
+      <button data-tab="achievements" role="tab">업적</button>
+      <button data-tab="secrets" role="tab">숨은 레시피</button>
     </div>
     <p class="small book-count" id="book-count"></p>
     <div class="book-grid" id="book-rare"></div>
     <div class="album-grid" id="book-album" hidden></div>
+    <div class="color-grid" id="book-colors" hidden></div>
+    <div class="ach-list" id="book-achievements" hidden></div>
+    <div class="secret-grid" id="book-secrets" hidden></div>
   </section>
 
   <section class="start" id="start">
@@ -153,6 +194,10 @@
         <button class="chip-button" id="reset"><svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true"><path d="M4.5 12a7.5 7.5 0 1 0 2.2-5.3" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/><path d="M4 3.5v4.6h4.6" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg> 새 젤리</button>
         <button class="chip-button toggle on" id="sound" aria-pressed="true">🔊 소리 켜짐</button>
       </div>
+      <h3>🐰 토끼 꾸미기</h3>
+      <div class="outfits" id="outfits"></div>
+      <h3>🍽️ 접시·배경 테마</h3>
+      <div class="themes" id="themes"></div>
       <h3>젤리 바탕색</h3>
       <div class="segmented" id="bases">
         <button data-base="berry">베리</button>
@@ -182,9 +227,12 @@
       </ul>
       <h3>토끼와 금화</h3>
       <ul class="small">
-        <li>🐰 주문서 색과 보석을 맞춰 만들고 🥕를 누르면 토끼가 와삭와삭 먹어요. 비슷할수록 ★이 많고 금화도 많이 줘요</li>
-        <li>🎴 금화 100개로 카드 뽑기 — 같은 보석이 또 나오면 글리터 → 금빛 → 무지개빛으로 업그레이드돼요</li>
-        <li>토끼와 친해지면 새 물감과 첨가물(글리터·별사탕)이 생겨요</li>
+        <li>🐰 주문서 색과 보석을 맞춰 만들고 🥕를 누르면 토끼가 와삭와삭 먹어요. 비슷할수록 ★이 많고 금화도 많이 줘요. '✨ 이 주문으로 새 젤리'를 누르면 주문에 맞는 모양·바탕색 젤리가 바로 나와요</li>
+        <li>⚡ 주문을 받고 30초 안에 주면 금화 +50 %, 1분 안이면 +25 %. ★3 이상을 연달아 받으면 🔥콤보로 금화가 더 늘어요</li>
+        <li>✨ 황금 주문은 금화 ×3, 🧐 까다로운 날은 ×2, 🙈 기억 주문은 잠깐 뒤에 글이 숨어요(톡 누르면 다시 보기)</li>
+        <li>🎴 카드 뽑기 — 레어 보석이 10개씩 들어와요. 같은 보석이 또 나오면 10개 더 + 글리터 → 금빛 → 무지개빛 업그레이드. 아주 가끔 모양 카드도!</li>
+        <li>💎 레어 보석은 넣을 때마다 하나씩 줄어요. 먹이지 않고 새 젤리로 바꾸면 젤리 속 레어 보석은 보석함으로 돌아와요</li>
+        <li>토끼와 친해지면 선물상자와 새 물감·첨가물·모양·옷·테마가 생겨요</li>
         <li>금화·도감 기록은 이 기기에만 저장돼요. Safari 방문 기록·웹사이트 데이터를 지우면 처음부터 다시 시작해요</li>
       </ul>
       <p class="small install" id="install-hint-2" hidden>Safari <b>공유</b> → <b>홈 화면에 추가</b>로 설치할 수 있어요.</p>

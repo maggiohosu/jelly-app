@@ -1,7 +1,9 @@
-// Audio engine tests: `node tests/audio.test.mjs`.
+// Audio engine tests: `node tests/audio.test.mjs [testName,…]` (optional subset,
+// e.g. `node tests/audio.test.mjs testMotionSounds,testMotionLimits`).
 // Serves the repo on :8125 (in-process; reuses a server already on that port),
 // renders tests/audio.test.html in headless Chromium via Playwright, prints the
-// PASS/FAIL lines and saves the main render to /tmp/claude-0/audio/render.wav.
+// PASS/FAIL lines and saves the main render to /tmp/claude-0/audio/render.wav and
+// each motion / jingle sound to $AUDIO_SOUNDS_DIR (default /tmp/claude-0/audio/sounds/<name>.wav).
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
@@ -13,6 +15,8 @@ const { chromium } = require("/opt/node22/lib/node_modules/playwright");
 const root = path.resolve(new URL("..", import.meta.url).pathname);
 const PORT = 8125;
 const WAV = "/tmp/claude-0/audio/render.wav";
+const SOUNDS_DIR = process.env.AUDIO_SOUNDS_DIR || "/tmp/claude-0/audio/sounds";
+const ONLY = process.argv[2] || "";
 
 let failures = 0;
 const check = (label, ok, detail = "") => {
@@ -55,8 +59,8 @@ try {
   const pageErrors = [];
   page.on("pageerror", (e) => pageErrors.push(e.message));
   page.on("console", (m) => { if (m.type() === "error") pageErrors.push(m.text()); });
-  await page.goto(`http://127.0.0.1:${PORT}/tests/audio.test.html`);
-  await page.waitForFunction(() => window.__audioTest && window.__audioTest.done, null, { timeout: 100000 });
+  await page.goto(`http://127.0.0.1:${PORT}/tests/audio.test.html${ONLY ? `?only=${encodeURIComponent(ONLY)}` : ""}`);
+  await page.waitForFunction(() => window.__audioTest && window.__audioTest.done, null, { timeout: 300000, polling: 500 });
   const result = await page.evaluate(() => window.__audioTest);
   for (const line of result.lines) console.log(line);
   failures += result.failures;
@@ -65,6 +69,12 @@ try {
     fs.mkdirSync(path.dirname(WAV), { recursive: true });
     fs.writeFileSync(WAV, Buffer.from(result.wav, "base64"));
     console.log(`INFO  wrote ${WAV} (${(fs.statSync(WAV).size / 1e6).toFixed(2)} MB)`);
+  }
+  const sounds = Object.entries(result.soundWavs || {});
+  if (sounds.length) {
+    fs.mkdirSync(SOUNDS_DIR, { recursive: true });
+    for (const [name, b64] of sounds) fs.writeFileSync(path.join(SOUNDS_DIR, `${name}.wav`), Buffer.from(b64, "base64"));
+    console.log(`INFO  wrote ${sounds.length} sounds to ${SOUNDS_DIR}/ (${sounds.map(([n]) => n).join(", ")})`);
   }
   exitCode = failures ? 1 : 0;
 } catch (e) {

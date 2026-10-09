@@ -13,7 +13,7 @@
 
 import { SoftBody, easeGrabTarget, clampGrabTarget } from "./softbody.js";
 import { makeSurfaceStencils, makeTetLocator } from "./cage.js";
-import { makeShapeCage, shapeLook, SHAPES } from "./shapes.js";
+import { makeShapeCage, shapeLook, shapeMotions, motionWeight, SHAPES } from "./shapes.js";
 
 // Absorption (1/m) of a saturated paint swirl; mixing adds σ.
 export const PAINTS = Object.freeze([
@@ -58,10 +58,128 @@ const GLITTER_MAX = 360, STARS_MAX = 36;
 // A bunny bite: the whole jelly × scale (linear), the bitten spot caves in to
 // `factor` (linear) within `radius`, never below `minScale` in total.
 export const BITE = Object.freeze({ radius: 0.014, factor: 0.5, minScale: 0.35, scale: 0.87 });
-export const DECOR_KINDS = Object.freeze(["eye", "nose", "mouth", "blush", "muzzle", "earInner", "cherry", "beak"]);
+// Append only: eyeClosed / eyeHappy / mouthOpen / beakOpen are the
+// expressions the idle motions swap in (same anchor, same scale).
+export const DECOR_KINDS = Object.freeze(["eye", "nose", "mouth", "blush", "muzzle", "earInner", "cherry", "beak", "eyeClosed", "eyeHappy", "mouthOpen", "beakOpen"]);
 // Decorations are drawn on top of the jelly (render/decor.js overlay pass), so
 // they anchor ON the rendered surface; shapes.js projects anchors onto it.
 const DECOR_INSET = 0;
+
+// ---------------------------------------------------------------- idle motions
+// The animal shapes act on their own (shapes.js shapeMotions: interval,
+// moves, soft regions). A move is a script in the shape's model axes
+// (side = +x, up = +y, face = +z toward the face / beak, millimetres):
+//   regions  { region: force limit (N) } — the regions it drives
+//   drive(t, set)  set(region, side, up, face, on = 1): the region centre's
+//                  offset from where it was when the move started, at time t,
+//                  and how firmly it is held there (0..1; a region not set
+//                  is free — it never anchors the jelly against another one)
+//   face(t, show)  show(decorName, kind, scale×): expressions at time t
+//                  (anything not shown is its normal self)
+//   cues     [{ t, cue, index, hop?: m/s, plop?: m/s }] → "motionCue"
+//            events for sound sync (+ a hop: an upward push from the
+//            floor; a plop: the top squashes down onto the seat)
+// Each region is pulled along its script like a muscle: a PD servo on its
+// weighted centre relative to the jelly's centre of mass (in the jelly's
+// orientation at the start) plus the script's own acceleration
+// (feed-forward). The reaction is spread over the whole jelly, so the net
+// force is zero: it acts in place and stays where it is.
+// stiffness: N/m of a region's hold; slime: its moves are smaller (× slime)
+// and it barely gets off the tray (hops / plops × slimeHop); recenter (m/s)
+// and homeRange (m): see recenter()
+const MOTION = Object.freeze({ stiffness: 900, slime: 0.8, slimeHop: 0.5, recenter: 0.002, homeRange: 0.008, slip: 0.3 });
+const SLIPPERY = Object.freeze({ staticFriction: 0.05, dynamicFriction: 0.05 });
+const KIND = Object.freeze(Object.fromEntries(DECOR_KINDS.map((k, i) => [k, i])));
+const smooth01 = (x) => (x <= 0 ? 0 : x >= 1 ? 1 : x * x * (3 - 2 * x));
+// 0 → 1 over [a, a + rise], 1 → 0 over [b, b + fall]
+const env = (t, a, rise, b, fall) => smooth01((t - a) / rise) * (1 - smooth01((t - b) / fall));
+// a quick out-and-back stroke from t0: out in `out` s, back in `back` s
+const stroke = (t, t0, out, back) => (t < t0 ? 0 : t < t0 + out ? smooth01((t - t0) / out) : 1 - smooth01((t - t0 - out) / back));
+const PUNCH_AT = [0.1, 0.34, 0.58, 0.82];
+const CHIRP_AT = [0.12, 0.56, 1.0];
+const HOP_AT = [0.36, 0.9];
+const PLOP_AT = 1.5;
+export const MOVES = Object.freeze({
+  // 하품: the head stretches up and a little back, slowly (eyes shut, the
+  // mouth opens wide and closes), then a little stretch of the whole cat.
+  yawn: {
+    duration: 1.8, regions: { head: 1.8, pawL: 0.6, pawR: 0.6, haunch: 1.2, tail: 0.5 },
+    drive(t, set) {
+      const e = env(t, 0.05, 0.6, 1.1, 0.5), s = env(t, 1.15, 0.3, 1.45, 0.33);
+      set("head", 0, 10 * e, -2 * e, env(t, 0, 0.15, 1.5, 0.15));
+      const on = env(t, 1.08, 0.12, 1.66, 0.14);
+      if (on > 0) {
+        set("pawL", 0, 0, 3 * s, on); set("pawR", 0, 0, 3 * s, on);
+        set("haunch", 3.5 * s, 3 * s, 0, on);
+        set("tail", 0, 3 * s, 0, on);
+      }
+    },
+    face(t, show) {
+      if (t > 0.12 && t < 1.55) show("eye", KIND.eyeClosed, 1);
+      if (t > 0.2 && t < 1.5) show("mouth", KIND.mouthOpen, 0.6 + 2 * smooth01((t - 0.2) / 0.55) - 2 * smooth01((t - 1.12) / 0.38));
+    },
+    cues: [{ t: 0.2, cue: "open", index: 0 }, { t: 1.2, cue: "stretch", index: 0 }],
+  },
+  // 냥냥펀치: the front paws jab forward (toward the face side) and up,
+  // alternately, twice each; squinting ^^ eyes, a small open mouth.
+  punch: {
+    duration: 1.1, regions: { pawL: 0.6, pawR: 0.6, head: 1.2 },
+    drive(t, set) {
+      // each jab: lifted first and set down last, so the paw does not
+      // scrape (and creep) along the tray
+      const L = [0, 0], Rr = [0, 0];
+      PUNCH_AT.forEach((t0, k) => {
+        const a = k % 2 ? Rr : L;
+        a[0] += stroke(t, t0, 0.07, 0.24); a[1] += stroke(t, t0 + 0.012, 0.065, 0.1);
+      });
+      const on = env(t, 0.04, 0.06, 1.0, 0.08), e = env(t, 0.02, 0.12, 0.95, 0.13);
+      set("pawL", -2.5 * L[1], 7 * L[0], 5 * L[1], on);
+      set("pawR", 2.5 * Rr[1], 7 * Rr[0], 5 * Rr[1], on);
+      set("head", 0, -1 * e, 2 * e, e);
+    },
+    face(t, show) {
+      if (t > 0.04 && t < 1.04) { show("eye", KIND.eyeHappy, 1); show("mouth", KIND.mouthOpen, 1.1); }
+    },
+    cues: PUNCH_AT.map((t0, index) => ({ t: t0 + 0.07, cue: "punch", index })),
+  },
+  // 아기새의 날갯짓: the wings flap fast (≈ 9 Hz), two little hops that do not
+  // take off, then it gives up and plops down onto its seat (squash), happy.
+  flap: {
+    duration: 2.2, regions: { wingL: 0.8, wingR: 0.8, tail: 0.5, head: 0.8 },
+    drive(t, set) {
+      const e = env(t, 0.04, 0.1, 1.38, 0.12), w = Math.sin(2 * Math.PI * 9 * (t - 0.04));
+      const up = 5 * w * e, out = 2 * e * (0.5 + 0.5 * w);
+      set("wingL", -out, up, 0, e); set("wingR", out, up, 0, e);
+      set("tail", 0, 2.5 * e + 1.2 * w * e, 0, e);
+      set("head", 0, 2 * e, 0, e);
+    },
+    face(t, show) {
+      if (t > PLOP_AT + 0.02 && t < 2.15) show("eye", KIND.eyeHappy, 1);
+    },
+    cues: [
+      { t: 0.04, cue: "flap", index: 0 },
+      ...HOP_AT.map((t0, index) => ({ t: t0, cue: "hop", index, hop: 0.38 })),
+      { t: PLOP_AT, cue: "plop", index: 0, plop: 0.34 },
+    ],
+  },
+  // 짹짹짹: three chirps — the beak opens with a little head bob — with
+  // smiling eyes the whole time.
+  chirp: {
+    duration: 1.6, regions: { head: 1, tail: 0.5 },
+    drive(t, set) {
+      let b = 0;
+      for (const t0 of CHIRP_AT) b += stroke(t, t0 - 0.02, 0.08, 0.18);
+      const on = env(t, 0.04, 0.08, 1.4, 0.15);
+      set("head", 0, 2.5 * b, 1.5 * b, on);
+      set("tail", 0, 1.8 * b, 0, on);
+    },
+    face(t, show) {
+      if (t > 0.05 && t < 1.5) show("eye", KIND.eyeHappy, 1);
+      for (const t0 of CHIRP_AT) if (t >= t0 && t < t0 + 0.18) show("beak", KIND.beakOpen, 1);
+    },
+    cues: CHIRP_AT.map((t0, index) => ({ t: t0, cue: "chirp", index })),
+  },
+});
 
 const types = new Map();
 function makeType(id = "flower") {
@@ -84,7 +202,33 @@ function buildType(id) {
   for (let i = 0; i < n; i++) { cx += cage.pos[i * 3]; cy += cage.pos[i * 3 + 1]; cz += cage.pos[i * 3 + 2]; }
   const vertexTri = new Int32Array(stencils.vertexCount).fill(-1);
   for (let t = 0; t < stencils.indices.length / 3; t++) for (let k = 0; k < 3; k++) if (vertexTri[stencils.indices[t * 3 + k]] < 0) vertexTri[stencils.indices[t * 3 + k]] = t;
-  return { id, cage, stencils, locator, vertexTri, edges: Int32Array.from(edges), centroid: [cx / n, cy / n, cz / n], look: shapeLook(id) };
+  // idle-motion regions: smooth per-node weights from the REST positions
+  // (material points, so a region follows its part of the jelly however it moves)
+  const motions = shapeMotions(id);
+  let regions = null, seat = null;
+  if (motions) {
+    regions = {};
+    const low = [];
+    for (let i = 0; i < n; i++) if (cage.pos[i * 3 + 1] < 0.0101 + 0.0015) low.push(i);
+    seat = Int32Array.from(low);
+    for (const [name, parts] of Object.entries(motions.regions)) {
+      // anchor: the jelly around the region (the same ellipsoids, larger),
+      // where the drive's reaction goes — a muscle pulls between the two
+      const around = parts.map((p) => ({ ...p, r: p.r.map((v) => v * 1.8), inner: 0.3 }));
+      const ids = [], ws = [], aIds = [], as = [];
+      for (let i = 0; i < n; i++) {
+        // the seat's floor nodes are never pushed: shoved along the tray they
+        // can fold flat and stay stuck that way (static friction)
+        const x = cage.pos[i * 3], y = cage.pos[i * 3 + 1], z = cage.pos[i * 3 + 2], off = smooth01((y - 0.0101) / 0.01);
+        const w0 = motionWeight(parts, x, y, z), w = w0 * off;
+        if (w > 0.01) { ids.push(i); ws.push(w); }
+        const a = (motionWeight(around, x, y, z) - w0) * off;
+        if (a > 0.01) { aIds.push(i); as.push(a); }
+      }
+      regions[name] = { ids: Int32Array.from(ids), w: Float64Array.from(ws), anchor: Int32Array.from(aIds), a: Float64Array.from(as) };
+    }
+  }
+  return { id, cage, stencils, locator, vertexTri, edges: Int32Array.from(edges), centroid: [cx / n, cy / n, cz / n], look: shapeLook(id), motions, regions, seat };
 }
 
 export class JellyWorld {
@@ -100,11 +244,19 @@ export class JellyWorld {
     this.events = [];
     this.nextGemId = 1;
     this.grabs = new Map();
+    this.motionsEnabled = true;     // idle motions of the animal shapes (main turns them off while the bunny visits)
     this.reset(base);
   }
 
-  reset(base = this.base || "berry", lift = 0) {
+  // A new jelly. plain: the base colour even on a shaped jelly (no signature
+  // dye); its decorations, glitter, pearls and sheen stay. Emits "reset" with
+  // the rare gems that were still in the old jelly (main refunds them unless
+  // the jelly was just eaten).
+  reset(base = this.base || "berry", lift = 0, plain = false) {
     const t = this.type;
+    const rare = (this.gems || []).filter((g) => g.rare).map((g) => ({ index: g.shape, tier: g.tier }));
+    this.motion = null; this.motionClock = 0; this.motionHome = null;
+    this.plain = Boolean(plain);
     const body = new SoftBody({ cage: t.cage, stencils: t.stencils, params: this.bodyParams() });
     body.wallRadius = this.wallRadius;
     body.gravityVector = this.gravityVector;
@@ -121,7 +273,9 @@ export class JellyWorld {
     this.eatenBeads = null;
     this.pearls = null; this.eatenPearls = null;
     this.decor = [];
+    this.decorVersion = (this.decorVersion || 0) + 1;
     this.meanDye = [0, 0, 0];
+    this.meanFx = [0, 0];
     this.gems = [];
     this.grabs = new Map(); this.grabbing = false;
     this.falling = [];
@@ -129,7 +283,8 @@ export class JellyWorld {
     this.setBase(base);
     this.applyLook();
     if (lift) body.reset(lift);
-    this.events.push({ type: "reset" });
+    this.restCenter = massCenter(body.rest, body.mass, body.totalMass);
+    this.events.push({ type: "reset", rare });
   }
 
   setBase(base) {
@@ -154,12 +309,12 @@ export class JellyWorld {
 
   // ---------------------------------------------------------------- shape
   // A new shape = a new jelly (paint, gems and additives start over).
-  setShape(id, base = this.base) {
+  setShape(id, base = this.base, plain = false) {
     if (!SHAPES.some((x) => x.id === id)) return;
     this.shape = id;
     this.type = makeType(id);
     this.beads = null;
-    this.reset(base);
+    this.reset(base, 0, plain);
     this.events.push({ type: "shape", shape: id });
   }
 
@@ -168,7 +323,7 @@ export class JellyWorld {
   applyLook() {
     const look = this.type.look, pos = this.type.cage.pos, n = this.body.nodeCount;
     if (!look) return;
-    if (look.dye) {
+    if (look.dye && !this.plain) {
       for (let i = 0; i < n; i++) {
         const d = look.dye(pos[i * 3], pos[i * 3 + 1], pos[i * 3 + 2]);
         for (let c = 0; c < 3; c++) this.dye[i * 3 + c] = Math.max(0, Math.min(SIGMA_MAX, Number(d[c]) || 0));
@@ -186,6 +341,7 @@ export class JellyWorld {
         this.fx[i * 2 + 1] = Math.max(0, Math.min(4, Number(f[1]) || 0));
       }
       this.dyeVersion++;
+      this.updateMeanDye();
     }
     if (look.glitter > 0) this.fillAdditive("glitter", Math.min(GLITTER_MAX, look.glitter));
     if (look.pearls > 0) this.pearls = this.makePoints(look.pearls, 0.0016, () => 5);   // 5 = pearl (render/beads.js PEARL_COLOR)
@@ -208,7 +364,8 @@ export class JellyWorld {
       const x = cross3(y, z);
       const q0 = quatFromBasis(x, y, z, [0, 0, 0, 1]);
       const rgb = d.color ? hexToRgb(d.color) : [-1, -1, -1];
-      this.decor.push({ kind, tet: e, bary: L.bary.slice(), q0, scale: d.scale || 0.003, rgb, quat: q0.slice() });
+      // name: the designed kind; show / mul: an expression swapped in by a motion (−1 = none) and its scale
+      this.decor.push({ kind, name: d.kind, show: -1, mul: 1, tet: e, bary: L.bary.slice(), q0, scale: d.scale || 0.003, rgb, quat: q0.slice() });
     }
   }
 
@@ -252,9 +409,9 @@ export class JellyWorld {
       body.pointInTet(d.tet, bary, p);
       tetRotation(body, d.tet, q);
       slerpInto(d.quat, quatMultiply(q, d.q0, this.scratchDecorQ2 ||= [0, 0, 0, 1]), 0.5);
-      out[o] = d.kind; out[o + 1] = p[0]; out[o + 2] = p[1]; out[o + 3] = p[2];
+      out[o] = d.show >= 0 ? d.show : d.kind; out[o + 1] = p[0]; out[o + 2] = p[1]; out[o + 3] = p[2];
       out[o + 4] = d.quat[0]; out[o + 5] = d.quat[1]; out[o + 6] = d.quat[2]; out[o + 7] = d.quat[3];
-      out[o + 8] = d.scale; out[o + 9] = d.rgb[0]; out[o + 10] = d.rgb[1]; out[o + 11] = d.rgb[2];
+      out[o + 8] = d.scale * d.mul; out[o + 9] = d.rgb[0]; out[o + 10] = d.rgb[1]; out[o + 11] = d.rgb[2];
     }
     return out;
   }
@@ -323,6 +480,7 @@ export class JellyWorld {
         const id = event.id ?? 0;
         if (!this.grabs.has(id) && this.grabs.size >= 3) return;
         body.wake();
+        this.motionHome = null;     // moved on purpose: the idle motions take the new place as home
         const grab = { ...w, target: event.point.slice(), point: event.point.slice(), lambda: new Float64Array(3), raw: event.point.slice(), id };
         this.grabs.set(id, grab);
         this.syncGrabs();
@@ -348,20 +506,23 @@ export class JellyWorld {
       }
       case "bounce": this.bounce(event.strength); break;
       case "texture": this.setTexture(event.texture); break;
-      case "shape": this.setShape(event.shape, event.base); break;
+      case "shape": this.setShape(event.shape, event.base, event.plain); break;
       case "nudge": body.nudge(); break;
-      case "reset": this.reset(event.base, event.lift || 0); break;
+      case "reset": this.reset(event.base, event.lift || 0, event.plain); break;
+      case "motions": this.setMotions(event.enabled); break;
+      case "motionNow": this.startMotion(event.name); break;
+      case "kick": this.kickAway(event); break;
       case "grabNear": this.grabNear(event); break;
       case "carry":
         // the bunny holds the jelly as a whole (target = centre of mass), null = put down
-        if (event.target) { this.body.carry = { target: event.target.slice() }; this.body.wake(); this.lastTouch = this.time || 0; }
+        if (event.target) { this.body.carry = { target: event.target.slice() }; this.body.wake(); this.lastTouch = this.time || 0; this.motionHome = null; }
         else this.body.carry = null;
         break;
       case "bite": this.bite(event); break;
       case "additive": this.addAdditive(event); break;
       case "base": this.setBase(event.base); break;
       case "gravity":
-        this.gravityVector = event.vector; this.frictionOverride = event.friction;
+        this.gravityVector = event.vector; this.frictionOverride = event.friction; this.motionHome = null;
         body.gravityVector = event.vector; body.frictionOverride = event.friction; body.wake();
         break;
       case "params":
@@ -376,10 +537,11 @@ export class JellyWorld {
     }
   }
 
+  // Fingers / paws first, then an idle motion's drives (not a touch: grabbing stays false).
   syncGrabs() {
     const list = [...this.grabs.values()];
     this.body.grab = list[0] || null;
-    this.body.extraGrabs = list.slice(1);
+    this.body.extraGrabs = this.motion ? list.slice(1).concat(this.motion.active) : list.slice(1);
     this.grabbing = list.length > 0;
   }
 
@@ -392,7 +554,218 @@ export class JellyWorld {
     this.bounceQueued = 0;
     const v = 0.55 + 0.45 * Math.max(0, Math.min(2, strength));
     this.body.bounce(v, (Math.random() - 0.5) * 0.05, (Math.random() - 0.5) * 0.05);
+    this.motionHome = null;
     this.events.push({ type: "bounced", strength });
+  }
+
+  // ---------------------------------------------------------------- idle motions
+  // A random move of the shape every `interval` s of sim time (start to
+  // start), also while held; never while disabled (the timer waits at 0).
+  setMotions(enabled) {
+    this.motionsEnabled = Boolean(enabled);
+    if (!this.motionsEnabled) { this.stopMotion(); this.motionClock = 0; }
+  }
+
+  // Sim seconds until the next idle motion starts (null: none pending).
+  motionIn() {
+    const spec = this.type.motions;
+    if (!spec || !this.motionsEnabled || this.motion) return null;
+    return Math.max(0, spec.interval - this.motionClock);
+  }
+
+  // Time passing while nobody steps the world (the app stops ticking a
+  // sleeping jelly; the worker wakes itself when a motion is due): only the
+  // motion timer runs.
+  idle(seconds) {
+    const spec = this.type.motions;
+    if (!spec || !this.motionsEnabled || this.motion || !(seconds > 0)) return;
+    this.motionClock += seconds;
+    if (this.motionClock >= spec.interval - 1e-9) this.startMotion(spec.moves[Math.floor(Math.random() * spec.moves.length)]);
+  }
+
+  motionStep(h) {
+    const spec = this.type.motions;
+    if (!this.motion) {
+      if (!this.motionsEnabled) { this.motionClock = 0; return; }
+      this.motionClock += h;
+      if (this.motionClock < spec.interval - 1e-9) return;
+      if (!this.startMotion(spec.moves[Math.floor(Math.random() * spec.moves.length)])) return;
+    } else this.motionClock += h;
+    this.driveMotion(h);
+  }
+
+  // Start a move now (the timer restarts from here). false: not one of this shape's moves.
+  startMotion(name) {
+    const spec = this.type.motions, move = MOVES[name];
+    if (!spec || !move || !spec.moves.includes(name)) return false;
+    this.stopMotion();
+    this.motionClock = 0;
+    const body = this.body, x = body.x;
+    body.wake();
+    const R = bestRotation(body, this.restCenter), c = massCenter(x, body.mass, body.totalMass);
+    const m = { name, move, t: 0, cue: 0, R, regions: [], grabs: [], active: [], gain: this.texture === "slime" ? MOTION.slime : 1 };
+    for (const [region, force] of Object.entries(move.regions)) {
+      const reg = this.type.regions[region];
+      if (!reg || !reg.ids.length) continue;
+      // the region's drive: a soft, force-limited constraint on its centre
+      // (a finger grab, solved inside the XPBD iterations, so it is stable
+      // however stiff); weights ∝ region weight × node mass, so it shifts
+      // every node by its region weight (light rim nodes are not flung about)
+      const mass = body.mass, wm = Float64Array.from(reg.ids, (id, k) => reg.w[k] * mass[id]), W = wm.reduce((a, b) => a + b, 0);
+      for (let k = 0; k < wm.length; k++) wm[k] /= W;
+      const g = { ids: reg.ids, weights: wm, target: [0, 0, 0], point: [0, 0, 0], lambda: new Float64Array(3), raw: null, stiffness: MOTION.stiffness * m.gain, maxForce: force };
+      const p = weightedPoint(g, x), rel = [p[0] - c[0], p[1] - c[1], p[2] - c[2]];
+      // where the region sits now, in the jelly's frame (its own sag and any
+      // squish stay; the script moves it from there and back)
+      const q0 = [R[0] * rel[0] + R[3] * rel[1] + R[6] * rel[2], R[1] * rel[0] + R[4] * rel[1] + R[7] * rel[2], R[2] * rel[0] + R[5] * rel[1] + R[8] * rel[2]];
+      g.target = p.slice(); g.point = p.slice();
+      let am = 0;
+      for (let i = 0; i < reg.anchor.length; i++) am += reg.a[i] * mass[reg.anchor[i]];
+      m.regions.push({ name: region, reg, g, q0, off: new Float64Array(3), on: 0, am });
+      m.grabs.push(g);
+    }
+    m.set = (region, side, up, face, on = 1) => { for (const r of m.regions) if (r.name === region) { r.off[0] = side; r.off[1] = up; r.off[2] = face; r.on = on; } };
+    // home: where the jelly sits (kept while it only creeps; re-taken after
+    // it was moved — touched, kicked, carried, tilted — or a new jelly)
+    const seat = this.seatCenter(), home = this.motionHome;
+    if (!home || Math.hypot(seat[0] - home[0], seat[1] - home[1]) > MOTION.homeRange) this.motionHome = seat;
+    this.motion = m;
+    this.syncGrabs();
+    this.events.push({ type: "motion", shape: this.shape, name, duration: move.duration });
+    return true;
+  }
+
+  stopMotion() {
+    const m = this.motion;
+    if (!m) return;
+    this.motion = null;
+    if (m.slip) this.body.frictionOverride = this.frictionOverride;
+    this.cancelReaction(m);
+    this.syncGrabs();
+    this.setFace(null, 0);
+  }
+
+  // The drives' impulse in the last step (λ / h per constraint, Σ weights =
+  // 1) goes back into the jelly around each region (its anchor, ∝ anchor
+  // weight × mass): like a muscle, no net force — the jelly acts in place,
+  // and the rest of it (a tail, the seat's rim) feels no extra weight.
+  cancelReaction(m) {
+    const v = this.body.velocity, h = this.step;
+    for (const r of m.regions) {
+      const L = r.g.lambda;
+      if (L[0] !== 0 || L[1] !== 0 || L[2] !== 0) {
+        const ids = r.reg.anchor, a = r.reg.a, k = 1 / (h * r.am);
+        const jx = L[0] * k, jy = L[1] * k, jz = L[2] * k;
+        for (let i = 0; i < ids.length; i++) { const j = ids[i] * 3, f = a[i]; v[j] -= jx * f; v[j + 1] -= jy * f; v[j + 2] -= jz * f; }
+      }
+      L.fill(0);
+    }
+  }
+
+  driveMotion(h) {
+    const m = this.motion, move = m.move, body = this.body, t = m.t;
+    body.wake();
+    this.cancelReaction(m);
+    if (!this.grabbing) this.recenter(h);
+    while (m.cue < move.cues.length && move.cues[m.cue].t <= t) this.motionCue(move.cues[m.cue++]);
+    this.setFace(move.face, t);
+    if (m.regions.length) {
+      const R = m.R, ax = this.type.motions.axes, s = 0.001 * m.gain, c = massCenter(body.x, body.mass, body.totalMass);
+      for (const r of m.regions) { r.off.fill(0); r.on = 0; }
+      // the script at the end of this step
+      move.drive(t + h, m.set);
+      m.active.length = 0;
+      for (const r of m.regions) {
+        if (!(r.on > 0.01)) continue;
+        r.g.stiffness = MOTION.stiffness * m.gain * Math.min(1, r.on);
+        m.active.push(r.g);
+        const d = r.off, q = r.q0;
+        // model axes (mm) → rest frame (m), on top of the start offset → the jelly's orientation
+        const a = q[0] + (ax.side[0] * d[0] + ax.up[0] * d[1] + ax.face[0] * d[2]) * s;
+        const b = q[1] + (ax.side[1] * d[0] + ax.up[1] * d[1] + ax.face[1] * d[2]) * s;
+        const e = q[2] + (ax.side[2] * d[0] + ax.up[2] * d[1] + ax.face[2] * d[2]) * s;
+        const T = r.g.target;
+        T[0] = c[0] + R[0] * a + R[1] * b + R[2] * e;
+        T[1] = c[1] + R[3] * a + R[4] * b + R[5] * e;
+        T[2] = c[2] + R[6] * a + R[7] * b + R[8] * e;
+      }
+      this.syncGrabs();
+    }
+    // the last moment of a move: the seat slips freely for a little while, so
+    // floor nodes the move dragged into a folded (inverted) tet can spring
+    // back instead of staying stuck by static friction
+    if (!m.slip && this.texture === "jelly" && m.t >= move.duration - MOTION.slip) { m.slip = true; body.frictionOverride = SLIPPERY; }
+    m.t += h;
+    if (m.t >= move.duration) this.stopMotion();
+  }
+
+  // Horizontal centre of the seat (the nodes resting on the tray), [x, z].
+  seatCenter() {
+    const ids = this.type.seat, x = this.body.x, mass = this.body.mass, out = [0, 0];
+    let M = 0;
+    for (let k = 0; k < ids.length; k++) { const i = ids[k], w = mass[i]; out[0] += x[i * 3] * w; out[1] += x[i * 3 + 2] * w; M += w; }
+    out[0] /= M || 1; out[1] /= M || 1;
+    return out;
+  }
+
+  // The drives cannot move the mass centre (no net force), but rocking and
+  // hopping on the tray's friction let a jelly creep a few tenths of a mm per
+  // move — over an idle hour it would wander into the rim. While it acts,
+  // it is slid back toward its home rigidly and imperceptibly (≤ 2 mm/s,
+  // a translation of the whole jelly outside the solver, so friction does
+  // not see it). Not while a finger holds it.
+  recenter(h) {
+    const home = this.motionHome;
+    if (!home) return;
+    const s = this.seatCenter(), dx = home[0] - s[0], dz = home[1] - s[1], d = Math.hypot(dx, dz);
+    if (d < 1e-6) return;
+    const k = Math.min(d, MOTION.recenter * h) / d, x = this.body.x;
+    for (let i = 0; i < this.body.nodeCount; i++) { x[i * 3] += dx * k; x[i * 3 + 2] += dz * k; }
+  }
+
+  motionCue(cue) {
+    const body = this.body;
+    this.events.push({ type: "motionCue", name: this.motion.name, cue: cue.cue, index: cue.index });
+    if (!cue.hop && !cue.plop) return;
+    // the height gradient squashes / stretches it like a real hop or plop
+    const b = body.bounds, span = Math.max(1e-4, b[4] - b[1]), x = body.x, v = body.velocity, g = this.texture === "slime" ? MOTION.slimeHop : 1;
+    if (cue.hop && body.grounded) for (let i = 0; i < body.nodeCount; i++) v[i * 3 + 1] += cue.hop * g * (1.1 - 0.2 * (x[i * 3 + 1] - b[1]) / span);
+    if (cue.plop) for (let i = 0; i < body.nodeCount; i++) v[i * 3 + 1] -= cue.plop * g * Math.max(0, (x[i * 3 + 1] - b[1]) / span);
+  }
+
+  // Expressions: show(decorName, kind, scale×) for the swaps at time t; every
+  // other decoration back to its own kind. A change bumps decorVersion.
+  setFace(face, t) {
+    const list = this.decor;
+    for (const d of list) { d.nextShow = -1; d.nextMul = 1; }
+    if (face) face(t, (name, kind, mul) => { for (const d of list) if (d.name === name) { d.nextShow = kind; d.nextMul = mul; } });
+    let changed = false;
+    for (const d of list) if (d.show !== d.nextShow || d.mul !== d.nextMul) { d.show = d.nextShow; d.mul = d.nextMul; changed = true; }
+    if (changed) this.decorVersion++;
+  }
+
+  // ---------------------------------------------------------------- kick
+  // The bunny's hind-foot kick (★1): the jelly shoots off along `dir` (tray
+  // x, z), pops up a little and tumbles forward, bounces and slides across
+  // the tray into the rim (wallRadius) and stays there.
+  kickAway({ dir = [0, 1], strength = 0.8 } = {}) {
+    const body = this.body, x = body.x, v = body.velocity, n = body.nodeCount;
+    let dx = Number(dir[0]) || 0, dz = Number(dir[1]) || 0;
+    const l = Math.hypot(dx, dz);
+    if (l > 1e-9) { dx /= l; dz /= l; } else { dx = 0; dz = 1; }
+    const s = Math.max(0, Math.min(1.5, Number(strength) || 0));
+    const along = 0.3 + 0.55 * s, pop = 0.3 + 0.35 * s, spin = 4 + 4.5 * s;
+    // forward tumble: ω = up × dir (the top runs ahead of the bottom)
+    const wx = spin * dz, wz = -spin * dx;
+    const c = massCenter(x, body.mass, body.totalMass);
+    body.carry = null;
+    body.wake();
+    this.motionHome = null;
+    for (let i = 0; i < n; i++) {
+      const j = i * 3, rx = x[j] - c[0], ry = x[j + 1] - c[1], rz = x[j + 2] - c[2];
+      v[j] += along * dx - wz * ry; v[j + 1] += pop + wz * rx - wx * rz; v[j + 2] += along * dz + wx * ry;
+    }
+    this.events.push({ type: "kicked", dir: [dx, dz], strength: s });
   }
 
   // ---------------------------------------------------------------- bunny
@@ -424,6 +797,7 @@ export class JellyWorld {
     for (let k = 0; k < ids.length; k++) { pt[0] += x[ids[k] * 3] * weights[k]; pt[1] += x[ids[k] * 3 + 1] * weights[k]; pt[2] += x[ids[k] * 3 + 2] * weights[k]; }
     if (!this.grabs.has(id) && this.grabs.size >= 4) return;
     this.body.wake();
+    this.motionHome = null;
     this.grabs.set(id, { ids, weights, target: pt.slice(), point: pt.slice(), lambda: new Float64Array(3), raw: pt.slice(), id, maxForce, stiffness: 320 });
     this.syncGrabs();
   }
@@ -509,6 +883,7 @@ export class JellyWorld {
     const started = performance.now(), body = this.body;
     while (this.accumulator >= this.step && steps < 12) {
       for (const g of this.grabs.values()) easeGrabTarget(g.target, g.raw, this.step);
+      if (this.type.motions) this.motionStep(this.step);
       const awake = !body.sleeping || this.grabbing;
       body.step(this.step);
       if (body.plastic && !body.sleeping) {
@@ -533,7 +908,7 @@ export class JellyWorld {
     if (steps === 12) this.accumulator = Math.min(this.accumulator, this.step);
     const elapsed = performance.now() - started;
     if (stepped) {
-      if (!body.isFinite()) { body.reset(); this.grabs.clear(); this.grabbing = false; this.events.push({ type: "recovered" }); }
+      if (!body.isFinite()) { this.stopMotion(); body.reset(); this.grabs.clear(); this.grabbing = false; this.events.push({ type: "recovered" }); }
       body.updateSurface();
     }
     if (this.bounceQueued && body.grounded && !this.grabbing) this.bounce(this.bounceQueued);
@@ -600,10 +975,15 @@ export class JellyWorld {
     this.events.push({ type: "dropped", paint, point: point.slice() });
   }
 
+  // Mass-weighted mean σ (meanDye) and mean [pearl, glow] (meanFx).
   updateMeanDye() {
-    const m = this.body.mass, d = this.dye, M = this.body.totalMass, out = this.meanDye;
-    out[0] = out[1] = out[2] = 0;
-    for (let i = 0; i < this.body.nodeCount; i++) { const w = m[i] / M; out[0] += d[i * 3] * w; out[1] += d[i * 3 + 1] * w; out[2] += d[i * 3 + 2] * w; }
+    const m = this.body.mass, d = this.dye, f = this.fx, M = this.body.totalMass, out = this.meanDye, fx = this.meanFx;
+    out[0] = out[1] = out[2] = 0; fx[0] = fx[1] = 0;
+    for (let i = 0; i < this.body.nodeCount; i++) {
+      const w = m[i] / M;
+      out[0] += d[i * 3] * w; out[1] += d[i * 3 + 1] * w; out[2] += d[i * 3 + 2] * w;
+      fx[0] += f[i * 2] * w; fx[1] += f[i * 2 + 1] * w;
+    }
   }
 
   // Pigment-conserving diffusion over cage edges; stirring speeds it up.
@@ -692,18 +1072,24 @@ export class JellyWorld {
     return { id: this.nextGemId++, shape, color, radius, u, rare: Boolean(rare), tier: rare ? rare.tier : 0, wpos: [0, 0, 0], prev: [0, 0, 0], vel: null, quat: [0, 0, 0, 1], qLocal: randomQuat(), glow: 0, rattle: 0, contacts: new Set(), fresh: true };
   }
 
+  // Rare gems: "rareIn" {index, tier} when one is really placed; a rejected
+  // rare request names it ({type: "gemFull" | "rareFull", rare: {index, tier}})
+  // so main can give back what it deducted when the player dropped it.
   addGemAtSurface({ a, b, c, bary, shape, color, radius = 0.0034, rare = null }) {
-    if (this.gems.length >= this.gemCapacity) { this.events.push({ type: "gemFull" }); return; }
-    if (rare && this.rareCount >= RARE_CAPACITY) { this.events.push({ type: "rareFull" }); return; }
+    const reject = (type) => this.events.push(rare ? { type, rare: { index: rare.index, tier: rare.tier } } : { type });
+    if (this.gems.length >= this.gemCapacity) { reject("gemFull"); return; }
+    if (rare && this.rareCount >= RARE_CAPACITY) { reject("rareFull"); return; }
     const u = [0, 0, 0], st = this.type.stencils, pos = this.type.cage.pos;
     for (const [v, w] of [[a, bary[0]], [b, bary[1]], [c, bary[2]]]) {
       for (let k = st.offsets[v]; k < st.offsets[v + 1]; k++) { const j = st.ids[k] * 3, ww = st.weights[k] * w; u[0] += pos[j] * ww; u[1] += pos[j + 1] * ww; u[2] += pos[j + 2] * ww; }
     }
     const inside = this.pullInside(u, radius);
-    if (!inside) { this.events.push({ type: "gemFull" }); return; }
+    if (!inside) { reject("gemFull"); return; }
     const gem = this.makeGem(rare ? rare.index : shape, color, radius, inside, rare);
     this.gems.push(gem);
     this.events.push({ type: "gemIn", gem: gem.id, rare: Boolean(rare) });
+    // a rare gem really placed: main deducts one from its stock
+    if (rare) this.events.push({ type: "rareIn", index: gem.shape, tier: gem.tier });
   }
 
   // 한 줌 쏟기: gems appear in the air above the jelly, fall, and stick in.
@@ -712,8 +1098,10 @@ export class JellyWorld {
   scatterGems({ count = 5, shape = -1, color = -1, radius = 0.0034, shapes = 9, colors = 6, rare = null }) {
     const bnd = this.type.locator.bounds;
     let added = 0;
-    if (rare && this.rareCount >= RARE_CAPACITY) { this.events.push({ type: "rareFull" }); return; }
-    for (let n = 0; n < count && this.gems.length < this.gemCapacity; n++) {
+    const rareRef = rare ? { index: rare.index, tier: rare.tier } : null;
+    if (rare && this.rareCount >= RARE_CAPACITY) { this.events.push({ type: "rareFull", rare: rareRef, count }); return; }
+    const placed = [];
+    for (let n = 0; n < count && this.gems.length < this.gemCapacity && !(rare && this.rareCount >= RARE_CAPACITY); n++) {
       for (let tries = 0; tries < 60; tries++) {
         const u = [bnd[0] + Math.random() * (bnd[3] - bnd[0]), bnd[1] + (0.45 + 0.45 * Math.random()) * (bnd[4] - bnd[1]), bnd[2] + Math.random() * (bnd[5] - bnd[2])];
         if (!this.gemFits(u, radius) || this.overlapsGem(u, radius)) continue;
@@ -727,11 +1115,18 @@ export class JellyWorld {
         };
         gem.wpos = gem.fall.pos.slice(); gem.prev = gem.wpos.slice();
         this.gems.push(gem);
+        if (rare) placed.push(gem);
         added++;
         break;
       }
     }
-    this.events.push({ type: added ? "gemScatter" : "gemFull", count: added });
+    if (!rare) this.events.push({ type: added ? "gemScatter" : "gemFull", count: added });
+    else {
+      // rare: the placed ones (rareIn each) and the rest rejected (count = how many)
+      if (added) this.events.push({ type: "gemScatter", count: added });
+      if (added < count) this.events.push({ type: this.rareCount >= RARE_CAPACITY ? "rareFull" : "gemFull", rare: rareRef, count: count - added });
+    }
+    for (const gem of placed) this.events.push({ type: "rareIn", index: gem.shape, tier: gem.tier });
   }
 
   // Falling-gem flight and landing (tray space). Returns true while in flight.
@@ -864,6 +1259,45 @@ export class JellyWorld {
 }
 
 // ------------------------------------------------------------------ helpers
+function massCenter(x, mass, total) {
+  const c = [0, 0, 0];
+  for (let i = 0; i < mass.length; i++) { const w = mass[i] / total; c[0] += x[i * 3] * w; c[1] += x[i * 3 + 1] * w; c[2] += x[i * 3 + 2] * w; }
+  return c;
+}
+function weightedPoint(g, x) {
+  const p = [0, 0, 0];
+  for (let k = 0; k < g.ids.length; k++) { const j = g.ids[k] * 3, w = g.weights[k]; p[0] += x[j] * w; p[1] += x[j + 1] * w; p[2] += x[j + 2] * w; }
+  return p;
+}
+// Best-fit rotation rest → current (row-major 3×3): the rotation of the polar
+// decomposition of Σ m (x − c)(rest − c₀)ᵀ (Higham iteration R ← ½(R + R⁻ᵀ)).
+function bestRotation(body, restCenter) {
+  const x = body.x, r = body.rest, m = body.mass, n = body.nodeCount;
+  const c = massCenter(x, m, body.totalMass), c0 = restCenter;
+  const A = [0, 0, 0, 0, 0, 0, 0, 0, 0];
+  for (let i = 0; i < n; i++) {
+    const j = i * 3, w = m[i];
+    const a0 = (x[j] - c[0]) * w, a1 = (x[j + 1] - c[1]) * w, a2 = (x[j + 2] - c[2]) * w;
+    const b0 = r[j] - c0[0], b1 = r[j + 1] - c0[1], b2 = r[j + 2] - c0[2];
+    A[0] += a0 * b0; A[1] += a0 * b1; A[2] += a0 * b2;
+    A[3] += a1 * b0; A[4] += a1 * b1; A[5] += a1 * b2;
+    A[6] += a2 * b0; A[7] += a2 * b1; A[8] += a2 * b2;
+  }
+  const f = Math.hypot(...A) / Math.sqrt(3);
+  if (!(f > 0)) return [1, 0, 0, 0, 1, 0, 0, 0, 1];
+  const R = A.map((v) => v / f);
+  for (let it = 0; it < 30; it++) {
+    const [a, b, cc, d, e, ff, g, h, k] = R;
+    const det = a * (e * k - ff * h) - b * (d * k - ff * g) + cc * (d * h - e * g);
+    if (!(Math.abs(det) > 1e-12)) return [1, 0, 0, 0, 1, 0, 0, 0, 1];
+    // R⁻ᵀ: the cofactor matrix / det
+    const inv = [(e * k - ff * h) / det, (ff * g - d * k) / det, (d * h - e * g) / det, (cc * h - b * k) / det, (a * k - cc * g) / det, (b * g - a * h) / det, (b * ff - cc * e) / det, (cc * d - a * ff) / det, (a * e - b * d) / det];
+    let change = 0;
+    for (let q = 0; q < 9; q++) { const nv = 0.5 * (R[q] + inv[q]); change += Math.abs(nv - R[q]); R[q] = nv; }
+    if (change < 1e-9) break;
+  }
+  return R;
+}
 function randomQuat() {
   const u1 = Math.random(), u2 = Math.random() * Math.PI * 2, u3 = Math.random() * Math.PI * 2;
   const a = Math.sqrt(1 - u1), b = Math.sqrt(u1);

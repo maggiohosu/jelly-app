@@ -10,6 +10,12 @@
 //   • coin()/coinShower()/coinLoss(), cardShake()/cardFlip(), reveal(),
 //     special(), levelUp()
 //                    gold coins, gacha cards and their fanfares (C-major pentatonic)
+//   • catYawn()/catPunch()           the cat jelly's 냐아아암~ yawn and 냥냥펀치
+//   • birdChirp()/birdFlap()/birdPlop()  the bird jelly's 짹짹짹, flutter and 퐁
+//   • sniff()/kick()                 the bunny's 킁킁 and 뻥! (★1 kick)
+//   • giftOpen(), comboUp(), achievement(), discovery(), goldenOrder()
+//                    gift box, ★3 streak, badges, colour-book / secret-recipe
+//                    discoveries, golden orders (C-major pentatonic jingles)
 //
 // iOS rules: the AudioContext must be created/resumed synchronously inside a
 // user gesture (unlock()); the 'ambient' audio session mixes with the user's
@@ -94,6 +100,15 @@ const TONES = {
   chip: { ratios: [1], levels: [1], taus: [0.14], attack: 0.003, wave: "chip" },
 };
 const RAINBOW_GLISS = [72, 74, 76, 79, 81, 84, 86, 88, 91, 93, 96, 98, 100, 103, 105, 108];   // C5→C8
+// Jelly motions, bunny sniff/kick and the fun-system jingles.
+const CAT_LEVEL = 0.1;              // voiced meows (soft: under the bunny squeak)
+const PUNCH_SWISH = 0.05, PUNCH_POP = 0.06;
+const CHIRP_LEVEL = 0.09, CHIRP_BASE = 3650, CHIRP_DUR = 0.07, CHIRP_GAP = 0.12;
+const FLAP_LEVEL = 0.28, PLOP_LEVEL = 0.14;
+const SNIFF_LEVEL = 0.18;
+const KICK_LEVEL = 0.18, KICK_WHOOSH = 0.09;
+const COMBO_STEPS = [84, 86, 88, 91, 93, 96, 98, 100, 103, 105];          // comboUp(1..10): C6 → A7
+const DISCOVERY_GLISS = [84, 86, 88, 91, 93, 96, 98, 100, 103, 105, 108];  // C6 → C8
 
 const mtof = (m) => 440 * Math.pow(2, (m - 69) / 12);
 const clamp = (x, lo, hi) => (x < lo ? lo : x > hi ? hi : x);
@@ -163,6 +178,7 @@ export class JellyAudio {
     this._lastFlip = -1e9; this._lastShake = -1e9; this._shakeVoice = null;
     this._lastReveal = -1e9; this._lastLevelUp = -1e9;
     this._lastSpit = -1e9; this._lastSplat = -1e9; this._lastSpecial = -1e9; this._lastLoss = -1e9;
+    this._lastAt = Object.create(null);   // _gate(): last start per sound name
     if (options.context) {
       this.ctx = options.context;
       this._ownsContext = false;
@@ -882,6 +898,361 @@ export class JellyAudio {
     return true;
   }
 
+  // ------------------------------------- jelly motions, bunny sniff and kick
+  //
+  // Same effects bus, voice pools and return values as above. Each sound has
+  // its own minimum spacing (_gate); calls inside it are dropped, not queued,
+  // so calling every frame is harmless.
+
+  /**
+   * Sleepy cat yawn '냐아아암~' (~1.1 s): a soft voiced meow whose pitch rises
+   * (~520 → 790 Hz) then sinks (→ ~420 Hz) while the mouth opens ('냐': the
+   * formant climbs to ~1.5 kHz, low-pass to ~4 kHz) and closes ('암': ~650 Hz),
+   * with a slow sleepy wobble and a breathy '하~' tail. ≥ 0.5 s apart; a new
+   * yawn replaces the previous one.
+   */
+  catYawn() {
+    if (!this._ready()) return false;
+    const now = this._now();
+    if (!this._gate("yawn", 0.5, now)) return false;
+    this._stopTag("yawn", now);
+    const rnd = this._random, t = now + 0.004, p = 0.95 + 0.1 * rnd(), D = 0.95;
+    const v = this._openVoice(this._fx, FX_VOICES, t, (rnd() - 0.5) * 0.2, "yawn");
+    this._meow(v, t, D, {
+      f: [[0, 520 * p], [0.12, 610 * p], [0.38, 790 * p], [0.72, 640 * p], [1, 420 * p]],
+      mouth: [[0, 900], [0.1, 1900], [0.32, 4200], [0.68, 3600], [0.86, 1300], [1, 650]],
+      formant: [[0, 900], [0.32, 1500], [0.7, 1300], [1, 700]],
+      amp: [[0, 0], [0.06, 0.45], [0.3, 1], [0.7, 0.85], [0.9, 0.35], [1, 0]],
+      level: CAT_LEVEL * 0.75, vibrato: [5.2, 0.014],
+    });
+    this._breath(v, t + D * 0.84, 0.36, CAT_LEVEL * 0.14);    // 하~
+    this._closeVoice(this._fx, v);
+    return true;
+  }
+
+  /**
+   * 냥냥펀치: two quick bright '냥!'s (~0.13 s each, 0.3 s apart), each with a
+   * little paw swish and a soft 'pop' as the paw lands (~45 ms in). With an
+   * `index` (0 first, 1 second, a touch higher) only that one plays, for
+   * per-cue sync. ≥ 0.1 s apart.
+   */
+  catPunch(index) {
+    if (!this._ready()) return false;
+    const now = this._now();
+    if (!this._gate("punch", 0.1, now)) return false;
+    const t = now + 0.003;
+    if (index === undefined || index === null) {
+      this._cancel("punch");
+      this._punch(t, 0);
+      this._schedule(t + 0.3, "punch", (tt) => this._punch(tt, 1));
+      this._flushFx(now);
+    } else this._punch(t, Math.abs(Math.round(+index) || 0) & 1);
+    return true;
+  }
+
+  /**
+   * Baby bird '짹짹짹': `count` (1..8) short high chirps (~70 ms, an up-down
+   * sweep within ~3–5 kHz with a little throat flutter, each at a slightly
+   * random pitch) ~0.12 s apart, the last one a touch louder. ≥ 0.12 s apart;
+   * a new call replaces chirps still pending.
+   */
+  birdChirp(count = 3) {
+    if (!this._ready()) return false;
+    const n = Math.round(clamp(+count || 0, 0, 8));
+    if (n < 1) return false;
+    const now = this._now();
+    if (!this._gate("chirp", 0.12, now)) return false;
+    this._cancel("chirp");
+    const rnd = this._random;
+    let t = now + 0.003;
+    for (let k = 0; k < n; k++) {
+      const p = 0.93 + 0.14 * rnd(), a = n > 1 && k === n - 1 ? 1 : 0.8 + 0.12 * rnd();
+      const pan = (rnd() - 0.5) * 0.4, flutter = 55 + 25 * rnd();
+      this._schedule(t, "chirp", (tt) => this._chirp(tt, p, a, pan, flutter));
+      t += CHIRP_DUR + CHIRP_GAP * (0.85 + 0.3 * rnd());
+    }
+    this._flushFx(now);
+    return true;
+  }
+
+  /**
+   * Little wings fluttering for `duration` s (0.15..4): soft filtered-noise
+   * flaps ('푸드득', air ~0.9 kHz + feather rustle ~3.8 kHz) at ~11 per second,
+   * swelling in and fading out over the last third. ≥ 0.3 s apart; a new
+   * flutter replaces the previous one.
+   */
+  birdFlap(duration = 1.6) {
+    if (!this._ready()) return false;
+    const d = clamp(+duration || 0, 0, 4);
+    if (d < 0.15) return false;
+    const now = this._now();
+    if (!this._gate("flap", 0.3, now)) return false;
+    this._stopTag("flap", now);
+    const rnd = this._random, t = now + 0.004, end = t + d + 0.15;
+    const v = this._openVoice(this._beds, BED_VOICES, t, 0, "flap");
+    const flap = this._gain(v, 0);           // per-flap gate
+    const env = this._gain(v, 0);            // the whole flutter
+    env.gain.setValueAtTime(0, t);
+    env.gain.linearRampToValueAtTime(1, t + Math.min(0.15, d * 0.25));
+    env.gain.setValueAtTime(1, t + d * 0.65);
+    env.gain.linearRampToValueAtTime(0, t + d);
+    const air = this._noiseSource(v, t, end), bpA = this._filter(v, "bandpass", 900, 0.8);
+    const rus = this._noiseSource(v, t, end), bpR = this._filter(v, "bandpass", 3800, 1.4);
+    const rg = this._gain(v, 0.3);
+    air.connect(bpA); bpA.connect(flap);
+    rus.connect(bpR); bpR.connect(rg); rg.connect(flap);
+    flap.connect(env); env.connect(v.gain);
+    flap.gain.setValueAtTime(0, t);
+    let ti = t, k = 0;
+    while (ti < t + d - 0.03) {
+      // each downstroke: a quick soft swell of air, then it settles (a fresh
+      // setValueAtTime ends the previous decay so the ramp starts from there)
+      const a = FLAP_LEVEL * (0.78 + 0.22 * rnd()) * (k & 1 ? 0.9 : 1);
+      flap.gain.setValueAtTime(0, ti);
+      flap.gain.linearRampToValueAtTime(a, ti + 0.014);
+      flap.gain.setTargetAtTime(0, ti + 0.014, 0.022);
+      bpA.frequency.setValueAtTime(780 + 260 * rnd(), ti);
+      ti += 1 / (11 * (0.95 + 0.1 * rnd()));
+      k++;
+    }
+    this._closeVoice(this._beds, v);
+    return true;
+  }
+
+  /** A little bird plopping down '퐁' (~0.2 s): a round falling 'pong', a soft thud and a feather puff. ≥ 0.12 s apart. */
+  birdPlop() {
+    if (!this._ready()) return false;
+    const now = this._now();
+    if (!this._gate("plop", 0.12, now)) return false;
+    const rnd = this._random, t = now + 0.003, L = PLOP_LEVEL, p = 0.95 + 0.1 * rnd();
+    const v = this._openVoice(this._fx, FX_VOICES, t, (rnd() - 0.5) * 0.3, "plop");
+    const o = this._source(v, this.ctx.createOscillator(), t, t + 0.3);
+    o.setPeriodicWave(this._waves.voice);
+    o.frequency.setValueAtTime(640 * p, t);
+    o.frequency.exponentialRampToValueAtTime(300 * p, t + 0.09);
+    const g = this._gain(v, 0);
+    g.gain.setValueAtTime(0, t);
+    g.gain.linearRampToValueAtTime(L, t + 0.004);
+    g.gain.setTargetAtTime(0, t + 0.004, 0.045);
+    o.connect(g); g.connect(v.gain);
+    this._partial(v, t, 130, L * 0.6, 0.03, 0.003, 5.75);
+    const puff = this._noiseSource(v, t, t + 0.1);
+    const lp = this._filter(v, "lowpass", 2200, 0.7);
+    const pg = this._gain(v, 0);
+    pg.gain.setValueAtTime(0, t);
+    pg.gain.linearRampToValueAtTime(L * 0.5, t + 0.003);
+    pg.gain.setTargetAtTime(0, t + 0.003, 0.015);
+    puff.connect(lp); lp.connect(pg); pg.connect(v.gain);
+    this._closeVoice(this._fx, v);
+    return true;
+  }
+
+  /**
+   * The bunny sniffing '킁킁' (~0.3 s): two short nasal inhales 0.2 s apart —
+   * band-passed noise (~1.9 → 3 kHz, with a small ~1.2 kHz nasal resonance)
+   * that swells and stops sharply, the second a little shorter and firmer.
+   * ≥ 0.35 s apart.
+   */
+  sniff() {
+    if (!this._ready()) return false;
+    const now = this._now();
+    if (!this._gate("sniff", 0.35, now)) return false;
+    const rnd = this._random, t = now + 0.003;
+    const v = this._openVoice(this._beds, BED_VOICES, t, (rnd() - 0.5) * 0.3, "sniff");
+    const src = this._noiseSource(v, t, t + 0.36);
+    const bp = this._filter(v, "bandpass", 1900, 1.3);
+    const nose = this._filter(v, "bandpass", 1200, 4);
+    const ng = this._gain(v, 0.7);
+    const soft = this._filter(v, "lowpass", 5000, 0.7);      // no hiss on top
+    const g = this._gain(v, 0);
+    src.connect(bp); bp.connect(g);
+    src.connect(nose); nose.connect(ng); ng.connect(g);
+    g.connect(soft); soft.connect(v.gain);
+    g.gain.setValueAtTime(0, t);
+    for (let i = 0; i < 2; i++) {
+      const ti = t + 0.2 * i, d = i ? 0.085 : 0.1, a = SNIFF_LEVEL * (i ? 1 : 0.85) * (0.9 + 0.2 * rnd());
+      g.gain.setValueAtTime(0, ti);
+      g.gain.linearRampToValueAtTime(a * 0.35, ti + d * 0.45);
+      g.gain.linearRampToValueAtTime(a, ti + d);
+      g.gain.setTargetAtTime(0, ti + d, 0.01);
+      bp.frequency.setValueAtTime(1900, ti);
+      bp.frequency.exponentialRampToValueAtTime(3000, ti + d);
+    }
+    this._closeVoice(this._beds, v);
+    return true;
+  }
+
+  /**
+   * The bunny kicking the jelly '뻥!' (~0.35 s, cartoon-soft): a round hollow
+   * 'pong' and a low thud with a soft felt click right away, then the jelly
+   * whooshes off (falling band of air drifting right). ≥ 0.3 s apart.
+   */
+  kick() {
+    if (!this._ready()) return false;
+    const now = this._now();
+    if (!this._gate("kick", 0.3, now)) return false;
+    const rnd = this._random, t = now + 0.003, L = KICK_LEVEL;
+    const v = this._openVoice(this._fx, FX_VOICES, t, 0, "kick");
+    const thud = this._source(v, this.ctx.createOscillator(), t, t + 0.45);
+    thud.frequency.setValueAtTime(170, t);
+    thud.frequency.exponentialRampToValueAtTime(58, t + 0.14);
+    const tg = this._gain(v, 0);
+    tg.gain.setValueAtTime(0, t);
+    tg.gain.linearRampToValueAtTime(L, t + 0.003);
+    tg.gain.setTargetAtTime(0, t + 0.003, 0.07);
+    thud.connect(tg); tg.connect(v.gain);
+    const pong = this._source(v, this.ctx.createOscillator(), t, t + 0.2);
+    pong.setPeriodicWave(this._waves.voice);
+    pong.frequency.setValueAtTime(460 * (0.97 + 0.06 * rnd()), t);
+    pong.frequency.exponentialRampToValueAtTime(250, t + 0.06);
+    const pg = this._gain(v, 0);
+    pg.gain.setValueAtTime(0, t);
+    pg.gain.linearRampToValueAtTime(L * 0.4, t + 0.002);
+    pg.gain.setTargetAtTime(0, t + 0.002, 0.03);
+    pong.connect(pg); pg.connect(v.gain);
+    const click = this._noiseSource(v, t, t + 0.03);
+    const cbp = this._filter(v, "bandpass", 1500, 0.9);
+    const cg = this._gain(v, 0);
+    cg.gain.setValueAtTime(0, t);
+    cg.gain.linearRampToValueAtTime(L * 0.8, t + 0.0008);
+    cg.gain.setTargetAtTime(0, t + 0.0008, 0.004);
+    click.connect(cbp); cbp.connect(cg); cg.connect(v.gain);
+    this._closeVoice(this._fx, v);
+    const w = this._openVoice(this._beds, BED_VOICES, t, 0, "kick");
+    if (w.panner) { w.panner.pan.setValueAtTime(0, t); w.panner.pan.linearRampToValueAtTime(0.5, t + 0.3); }
+    const air = this._noiseSource(w, t, t + 0.45);
+    const bp = this._filter(w, "bandpass", 1500, 1);
+    bp.frequency.setValueAtTime(1500, t + 0.01);
+    bp.frequency.exponentialRampToValueAtTime(600, t + 0.3);
+    const wg = this._gain(w, 0);
+    wg.gain.setValueAtTime(0, t + 0.01);
+    wg.gain.linearRampToValueAtTime(KICK_WHOOSH, t + 0.06);
+    wg.gain.setTargetAtTime(0, t + 0.08, 0.065);
+    air.connect(bp); bp.connect(wg); wg.connect(w.gain);
+    this._closeVoice(this._beds, w);
+    return true;
+  }
+
+  // ------------------------------------------------------- fun-system jingles
+
+  /**
+   * Level-up gift box (~1.1 s): a little '뽕!' (a rising bubble pop with a
+   * papery rustle), then a sparkly rising arpeggio C6 E6 G6 C7 E7 G7 into a
+   * high bell and twinkles. ≥ 0.3 s apart; a new one replaces the previous.
+   */
+  giftOpen() {
+    if (!this._ready()) return false;
+    const now = this._now();
+    if (!this._gate("gift", 0.3, now)) return false;
+    this._stopTag("gift", now);
+    const rnd = this._random, t0 = now + 0.004, tag = "gift";
+    const note = (dt, midi, amp, type, o = {}) => this._schedule(t0 + dt, tag, (t) => this._toneNote(t, midi, amp, type, { tag, ...o }));
+    this._schedule(t0, tag, (t) => this._giftPop(t, tag));
+    [84, 88, 91, 96, 100, 103].forEach((m, i) => note(0.09 + 0.055 * i, m, 0.05 + 0.005 * i, "pluck", { ring: 0.9, pan: -0.4 + 0.16 * i }));
+    note(0.42, 96, 0.075, "bell", { keep: true, ring: 0.8 });
+    for (let i = 0; i < 4; i++) note(0.46 + 0.1 * i + 0.04 * rnd(), [105, 108, 103, 108][i], 0.032, "tink", { pan: (rnd() - 0.5) * 1.2 });
+    this._schedule(t0 + 0.3, tag, (t) => this._shimmer(t, 0.6, 0.02, tag, 9000));
+    this._flushFx(now);
+    return true;
+  }
+
+  /**
+   * ★3 streak chime (~0.6 s): a quick grace note and a bright chime one
+   * pentatonic step up the ladder per combo level (1..10, clamped: C6, D6, E6,
+   * G6 … A7), with an octave sparkle; from level 5 a fifth above joins in,
+   * from level 8 a shimmer. ≥ 0.12 s apart; a new one replaces the previous.
+   */
+  comboUp(level = 1) {
+    if (!this._ready()) return false;
+    const now = this._now();
+    if (!this._gate("combo", 0.12, now)) return false;
+    this._stopTag("combo", now);
+    const l = Math.round(clamp(+level || 1, 1, COMBO_STEPS.length));
+    const m = COMBO_STEPS[l - 1], grace = l > 1 ? COMBO_STEPS[l - 2] : 81;
+    const t0 = now + 0.004, tag = "combo", u = (l - 1) / (COMBO_STEPS.length - 1);
+    const note = (dt, midi, amp, type, o = {}) => this._schedule(t0 + dt, tag, (t) => this._toneNote(t, midi, amp, type, { tag, ...o }));
+    note(0, grace, 0.05, "pluck", { ring: 0.5, pan: -0.15 });
+    note(0.06, m, 0.09 + 0.015 * u, "pluck", { ring: 0.95, keep: true });
+    note(0.062, m + 12, 0.03, "tink", { ring: 1.2, pan: 0.2 });
+    if (l >= 5) note(0.11, m + 7, 0.045, "pluck", { ring: 1, pan: 0.3 });
+    if (l >= 8) this._schedule(t0 + 0.06, tag, (t) => this._shimmer(t, 0.45, 0.02, tag, 9500));
+    this._flushFx(now);
+    return true;
+  }
+
+  /**
+   * Achievement badge (~1.1 s): two bell dings (G6, C7) and a small C-major
+   * bloom (C6 E6 G6 pad, E7/C7 plucks) with a few sparkles. ≥ 0.3 s apart; a
+   * new one replaces the previous.
+   */
+  achievement() {
+    if (!this._ready()) return false;
+    const now = this._now();
+    if (!this._gate("achieve", 0.3, now)) return false;
+    this._stopTag("achieve", now);
+    const rnd = this._random, t0 = now + 0.004, tag = "achieve";
+    const note = (dt, midi, amp, type, o = {}) => this._schedule(t0 + dt, tag, (t) => this._toneNote(t, midi, amp, type, { tag, ...o }));
+    note(0, 91, 0.1, "bell", { ring: 0.55, pan: -0.2 });
+    note(0.15, 96, 0.12, "bell", { ring: 0.8, keep: true, pan: 0.2 });
+    [[84, 0.04], [88, 0.035], [91, 0.032]].forEach(([mm, a], i) => note(0.3 + 0.004 * i, mm, a, "pad", { keep: true, attack: 0.04, hold: 0.35, rel: 0.15, pan: (i - 1) * 0.3 }));
+    note(0.3, 100, 0.05, "pluck", { ring: 1 });
+    note(0.34, 96, 0.045, "pluck", { ring: 1 });
+    for (let i = 0; i < 4; i++) note(0.36 + 0.11 * i + 0.04 * rnd(), SPARKLE_PITCHES[Math.floor(rnd() * SPARKLE_PITCHES.length)], 0.03, "tink", { pan: (rnd() - 0.5) * 1.3 });
+    this._schedule(t0 + 0.28, tag, (t) => this._shimmer(t, 0.5, 0.02, tag, 9000));
+    this._flushFx(now);
+    return true;
+  }
+
+  /**
+   * '새 색 발견!' / secret recipe (~1.4 s): a magic-wand glissando sweeping C6 → C8
+   * in 0.35 s over an airy riser, a bell (C7) on a soft C6/A chord, then
+   * twinkles falling back down (C8 A7 G7 E7) over a shimmer. ≥ 0.3 s apart;
+   * a new one replaces the previous.
+   */
+  discovery() {
+    if (!this._ready()) return false;
+    const now = this._now();
+    if (!this._gate("discover", 0.3, now)) return false;
+    this._stopTag("discover", now);
+    const rnd = this._random, t0 = now + 0.004, tag = "discover";
+    const note = (dt, midi, amp, type, o = {}) => this._schedule(t0 + dt, tag, (t) => this._toneNote(t, midi, amp, type, { tag, ...o }));
+    const last = DISCOVERY_GLISS.length - 1;
+    DISCOVERY_GLISS.forEach((m, i) => {
+      const u = i / last;
+      note(0.35 * Math.pow(u, 0.9), m, 0.032 + 0.022 * u, i & 1 ? "tink" : "pluck", { ring: i & 1 ? 1.5 : 0.45, decays: 4.6, pan: -0.5 + u });
+    });
+    this._schedule(t0, tag, (t) => this._riser(t, 0.36, 0.03, tag));
+    const B = 0.38;
+    note(B, 96, 0.08, "bell", { keep: true, ring: 0.9 });
+    [[72, 0.038], [76, 0.032], [81, 0.028], [84, 0.025]].forEach(([m, a], i) => note(B + 0.004 * i, m, a, "pad", { keep: true, attack: 0.06, hold: 0.45, rel: 0.2, pan: (i / 3 - 0.5) * 0.8 }));
+    [108, 105, 103, 100].forEach((m, i) => note(B + 0.12 + 0.12 * i + 0.02 * rnd(), m, 0.034 - 0.003 * i, "tink", { ring: 1.4, pan: 0.5 - 0.3 * i }));
+    this._schedule(t0 + 0.3, tag, (t) => this._shimmer(t, 0.9, 0.032, tag, 9500));
+    this._flushFx(now);
+    return true;
+  }
+
+  /**
+   * A golden order appears (~0.9 s): a coin glint, a quick high twinkle
+   * (E7 G7 A7 C8) and a warm bell (C7 over G6), with a bright shimmer.
+   * ≥ 0.3 s apart; a new one replaces the previous.
+   */
+  goldenOrder() {
+    if (!this._ready()) return false;
+    const now = this._now();
+    if (!this._gate("golden", 0.3, now)) return false;
+    this._stopTag("golden", now);
+    const t0 = now + 0.004, tag = "golden";
+    const note = (dt, midi, amp, type, o = {}) => this._schedule(t0 + dt, tag, (t) => this._toneNote(t, midi, amp, type, { tag, ...o }));
+    const h = hash32((this._showerSeed = (this._showerSeed + 0x9e3779b1) | 0));
+    this._schedule(t0, tag, (t) => this._coinNote(t, 0.6, h, -0.2, tag));
+    [100, 103, 105, 108].forEach((m, i) => note(0.05 + 0.04 * i, m, 0.034 + 0.005 * i, "tink", { ring: 1.6, pan: -0.3 + 0.2 * i }));
+    note(0.22, 96, 0.085, "bell", { keep: true, ring: 0.85 });
+    note(0.224, 91, 0.05, "warm", { ring: 1.2 });
+    this._schedule(t0 + 0.12, tag, (t) => this._shimmer(t, 0.6, 0.028, tag, 10000));
+    this._flushFx(now);
+    return true;
+  }
+
   // ======================================================================
   // internals
 
@@ -1356,6 +1727,8 @@ export class JellyAudio {
       voice: wave([0, 1, 0.36, 0.14, 0.06, 0.025]),       // soft, round bunny voice
       chip: wave([0, 1, 0, 0.28, 0, 0.12, 0, 0.05]),       // gentle square (level-up)
       pad: wave([0, 1, 0.2, 0.07, 0.025]),                 // chord bloom
+      meow: wave([0, 1, 0.7, 0.45, 0.3, 0.2, 0.13, 0.08, 0.05, 0.03]),   // brighter, buzzier cat voice
+      chirp: wave([0, 1, 0.14, 0.05]),                     // baby-bird whistle with a little edge
     };
     return { tear, chew };
   }
@@ -1872,5 +2245,129 @@ export class JellyAudio {
     g.gain.setTargetAtTime(0, t + dur, 0.06);
     src.connect(bp); bp.connect(g); g.connect(v.gain);
     this._closeVoice(this._beds, v);
+  }
+
+  // Minimum spacing per sound name: false (and no update) when called too soon.
+  _gate(name, gap, now) {
+    const last = this._lastAt[name];
+    if (last !== undefined && now - last < gap) return false;
+    this._lastAt[name] = now;
+    return true;
+  }
+
+  // Breakpoint envelope: pts = [[u 0..1 of dur, value], …], exponential or linear segments.
+  _contour(param, t, dur, pts, exp) {
+    param.setValueAtTime(pts[0][1], t + pts[0][0] * dur);
+    for (let i = 1; i < pts.length; i++) {
+      const at = t + pts[i][0] * dur;
+      if (exp) param.exponentialRampToValueAtTime(pts[i][1], at);
+      else param.linearRampToValueAtTime(pts[i][1], at);
+    }
+  }
+
+  // A voiced cat syllable: the buzzy 'meow' source with pitch contour s.f
+  // through a moving +9 dB peaking 'formant' (s.formant) and a low-pass
+  // 'mouth' (s.mouth: closed 'n'/'m' ≈ 0.7–1 kHz, open 'a' ≈ 4 kHz), shaped by
+  // s.amp × s.level; s.vibrato = [rate Hz, depth re the 2nd pitch point],
+  // growing over the syllable.
+  _meow(v, t, dur, s) {
+    const ctx = this.ctx;
+    const o = this._source(v, ctx.createOscillator(), t, t + dur + 0.01);
+    o.setPeriodicWave(this._waves.meow);
+    this._contour(o.frequency, t, dur, s.f, true);
+    const fm = this._filter(v, "peaking", s.formant[0][1], 2.5);
+    fm.gain.value = 9;
+    this._contour(fm.frequency, t, dur, s.formant, true);
+    const lp = this._filter(v, "lowpass", s.mouth[0][1], 0.8);
+    this._contour(lp.frequency, t, dur, s.mouth, true);
+    const g = this._gain(v, 0);
+    this._contour(g.gain, t, dur, s.amp.map(([u, a]) => [u, a * s.level]), false);
+    o.connect(fm); fm.connect(lp); lp.connect(g); g.connect(v.gain);
+    if (s.vibrato) {
+      const lfo = this._source(v, ctx.createOscillator(), t, t + dur + 0.01);
+      lfo.frequency.value = s.vibrato[0];
+      const depth = this._gain(v, 0);
+      depth.gain.setValueAtTime(0, t);
+      depth.gain.linearRampToValueAtTime(s.f[1][1] * s.vibrato[1], t + dur);
+      lfo.connect(depth); depth.connect(o.frequency);
+    }
+  }
+
+  // One paw of the 냥냥펀치 (i = 0 / 1): a swish of air, the paw's soft 'pop'
+  // landing ~45 ms in, and a bright '냥!' (n → ya → ng).
+  _punch(t, i) {
+    const rnd = this._random, p = (0.97 + 0.06 * rnd()) * (i ? 1.09 : 1), side = i ? 0.25 : -0.25;
+    const b = this._openVoice(this._beds, BED_VOICES, t, side, "punch");
+    const air = this._noiseSource(b, t, t + 0.12);
+    const bp = this._filter(b, "bandpass", 1800, 1.1);
+    bp.frequency.setValueAtTime(1800, t);
+    bp.frequency.exponentialRampToValueAtTime(5200, t + 0.05);
+    const ag = this._gain(b, 0);
+    ag.gain.setValueAtTime(0, t);
+    ag.gain.linearRampToValueAtTime(PUNCH_SWISH, t + 0.035);
+    ag.gain.setTargetAtTime(0, t + 0.045, 0.012);
+    air.connect(bp); bp.connect(ag); ag.connect(b.gain);
+    this._closeVoice(this._beds, b);
+    const v = this._openVoice(this._fx, FX_VOICES, t, side, "punch");
+    const tp = t + 0.045;
+    const pop = this._source(v, this.ctx.createOscillator(), tp, tp + 0.12);
+    pop.frequency.setValueAtTime(520 * p, tp);
+    pop.frequency.exponentialRampToValueAtTime(1050 * p, tp + 0.02);
+    const pg = this._gain(v, 0);
+    pg.gain.setValueAtTime(0, tp);
+    pg.gain.linearRampToValueAtTime(PUNCH_POP, tp + 0.002);
+    pg.gain.setTargetAtTime(0, tp + 0.002, 0.016);
+    pop.connect(pg); pg.connect(v.gain);
+    this._meow(v, t + 0.01, 0.13, {
+      f: [[0, 780 * p], [0.3, 1180 * p], [0.65, 1100 * p], [1, 820 * p]],
+      mouth: [[0, 1200], [0.25, 5000], [0.7, 4000], [1, 1500]],
+      formant: [[0, 1300], [0.35, 2000], [1, 1400]],
+      amp: [[0, 0], [0.12, 1], [0.6, 0.85], [1, 0]],
+      level: CAT_LEVEL * 0.85,
+    });
+    this._closeVoice(this._fx, v);
+  }
+
+  // One baby-bird chirp '짹': an up-down whistle sweep (0.88 → 1.28 → 0.98 ×
+  // 3.65 kHz × p) roughened by a fast throat flutter, ~70 ms.
+  _chirp(t, p, a, pan, flutter) {
+    const ctx = this.ctx, f0 = CHIRP_BASE * p, D = CHIRP_DUR, L = CHIRP_LEVEL * a;
+    const v = this._openVoice(this._fx, FX_VOICES, t, pan, "chirp");
+    const o = this._source(v, ctx.createOscillator(), t, t + D + 0.01);
+    o.setPeriodicWave(this._waves.chirp);
+    this._contour(o.frequency, t, D, [[0, 0.88 * f0], [0.28, 1.28 * f0], [1, 0.98 * f0]], true);
+    const lfo = this._source(v, ctx.createOscillator(), t, t + D + 0.01);
+    lfo.frequency.value = flutter;
+    const dep = this._gain(v, f0 * 0.03);
+    lfo.connect(dep); dep.connect(o.frequency);
+    const g = this._gain(v, 0);
+    g.gain.setValueAtTime(0, t);
+    g.gain.linearRampToValueAtTime(L, t + 0.006);
+    g.gain.linearRampToValueAtTime(L * 0.7, t + D * 0.6);
+    g.gain.linearRampToValueAtTime(0, t + D);
+    o.connect(g); g.connect(v.gain);
+    this._closeVoice(this._fx, v);
+  }
+
+  // Gift box '뽕!': a bubble pop sweeping up, a click and a papery rustle.
+  _giftPop(t, tag) {
+    const v = this._openVoice(this._fx, FX_VOICES, t, 0, tag);
+    const o = this._source(v, this.ctx.createOscillator(), t, t + 0.2);
+    o.frequency.setValueAtTime(320, t);
+    o.frequency.exponentialRampToValueAtTime(1150, t + 0.03);
+    const g = this._gain(v, 0);
+    g.gain.setValueAtTime(0, t);
+    g.gain.linearRampToValueAtTime(0.1, t + 0.002);
+    g.gain.setTargetAtTime(0, t + 0.002, 0.03);
+    o.connect(g); g.connect(v.gain);
+    const src = this._noiseSource(v, t, t + 0.25);
+    const hp = this._filter(v, "highpass", 2800, 0.7);
+    const ng = this._gain(v, 0);
+    ng.gain.setValueAtTime(0, t);
+    ng.gain.linearRampToValueAtTime(0.12, t + 0.0006);
+    ng.gain.setTargetAtTime(0.025, t + 0.0006, 0.003);
+    ng.gain.setTargetAtTime(0, t + 0.03, 0.04);
+    src.connect(hp); hp.connect(ng); ng.connect(v.gain);
+    this._closeVoice(this._fx, v);
   }
 }

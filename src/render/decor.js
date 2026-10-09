@@ -2,7 +2,8 @@
 // mouths, blush, cat muzzles / inner ears, the cake's cherry and the bird's
 // beak. Positions come from the app (tray space) every frame.
 //
-// One InstancedMesh per kind (8 kinds × ≤ 24 instances → ≤ 8 draw calls). The
+// One InstancedMesh per kind (12 kinds × ≤ 24 instances; hidden kinds cost
+// no draw call, so a face is still ≤ 8 draw calls). The
 // look of each kind is carried by per-vertex attributes of its geometry and a
 // colour per instance, so all kinds share one node graph (two material
 // instances: "patches" = blush / muzzle / inner ear, which never write depth,
@@ -49,6 +50,17 @@
 //   beak      length ≈ s along +Z: base buried at z = −0.25 s, tip at +0.78 s,
 //             hooking down a little; thin gold collar, instance-colour top
 //             (pulled toward blue-violet), deeper underside
+// Expressions (the world swaps them in for a moment during the idle motions,
+// at the same anchor and scale as the piece they replace):
+//   eyeClosed sleepy closed eye "︶": a curved stroke 1.9 s wide, stroke
+//             0.3 s, ends 0.15 s above / middle 0.2 s below the eye's centre
+//   eyeHappy  smiling eye "^": an arch 1.8 s wide, top 0.3 s above the centre
+//   mouthOpen open mouth under the anchor (the mouth's stem/ω joint): an oval
+//             1.1 s wide × 1.2 s tall hanging from it, dark red-brown inside,
+//             a pink tongue, the rim in the instance colour (the cat's pink)
+//   beakOpen  the beak with its mandibles parted (upper up 24°, lower down
+//             29° about the base), the inside of the mouth dark pink
+//   (eyeClosed / eyeHappy: instance colour, default the eye's)
 // Flat pieces are bent to hug a ~32 mm-radius surface at their nominal size.
 import * as THREE from "three/webgpu";
 import {
@@ -77,19 +89,21 @@ import {
   vec4,
 } from "three/tsl";
 
-export const DECOR_KINDS = Object.freeze(["eye", "nose", "mouth", "blush", "muzzle", "earInner", "cherry", "beak"]);
+// Append only (world.js DECOR_KINDS has the same order).
+export const DECOR_KINDS = Object.freeze(["eye", "nose", "mouth", "blush", "muzzle", "earInner", "cherry", "beak", "eyeClosed", "eyeHappy", "mouthOpen", "beakOpen"]);
 export const DECOR_STRIDE = 12;
 export const DECOR_MAX_PER_KIND = 24;
 // Default colours (sRGB) used when a state's r < 0.
 export const DECOR_DEFAULT_COLORS = Object.freeze({
   eye: "#0e0a12", nose: "#33222a", mouth: "#3b2129", blush: "#ff8fb0",
   muzzle: "#fffafd", earInner: "#ffa9c4", cherry: "#d80c28", beak: "#86aaff",
+  eyeClosed: "#0e0a12", eyeHappy: "#0e0a12", mouthOpen: "#c25a74", beakOpen: "#86aaff",
 });
 // Suggested sizes (m) for the contract's reference faces.
-export const DECOR_SIZES = Object.freeze({ eye: 0.0028, nose: 0.0016, mouth: 0.003, blush: 0.0045, muzzle: 0.005, earInner: 0.004, cherry: 0.0075, beak: 0.005 });
+export const DECOR_SIZES = Object.freeze({ eye: 0.0028, nose: 0.0016, mouth: 0.003, blush: 0.0045, muzzle: 0.005, earInner: 0.004, cherry: 0.0075, beak: 0.005, eyeClosed: 0.0028, eyeHappy: 0.0028, mouthOpen: 0.0036, beakOpen: 0.005 });
 
 const PATCH = new Set(["blush", "muzzle", "earInner"]);
-const TOPPER = new Set(["cherry", "beak"]);
+const TOPPER = new Set(["cherry", "beak", "beakOpen"]);
 const SURFACE_RADIUS = 0.032;      // jelly curvature the flat pieces are bent to
 const EMBED_GAP = 0.0003;          // embedded mode: jelly left in front of a piece (m)
 
@@ -358,7 +372,95 @@ function buildBeak() {
   return B.build();
 }
 
-const BUILDERS = { eye: buildEye, nose: buildNose, mouth: buildMouth, blush: buildBlush, muzzle: buildMuzzle, earInner: buildEarInner, cherry: buildCherry, beak: buildBeak };
+// A curved stroke for the eye expressions: x from −w/2 to w/2, y = f(x),
+// thicker in the middle, hugging the surface like the mouth.
+function eyeStroke(kind, f, halfW, thick) {
+  const B = new Builder();
+  const k = sagOf(kind), pts = [];
+  for (let i = 0; i <= 24; i += 1) {
+    const x = -halfW + (2 * halfW * i) / 24, y = f(x / halfW);
+    pts.push([x, y, 0.05 - k * (x * x + y * y)]);
+  }
+  tube(B, { pts, radius: (t) => thick * (0.62 + 0.38 * Math.sin(Math.PI * t)), squash: 0.6, look: () => ({ a: A_(0.35), b: B_() }) });
+  return B.build();
+}
+// sleepy closed eye ︶ (ends up, middle down)
+const buildEyeClosed = () => eyeStroke("eyeClosed", (u) => 0.15 - 0.35 * (1 - u * u), 0.95, 0.15);
+// smiling eye ^ (an arch, slightly pointed)
+const buildEyeHappy = () => eyeStroke("eyeHappy", (u) => -0.22 + 0.52 * (1 - Math.pow(Math.abs(u), 1.4)), 0.9, 0.15);
+
+// Shift the vertices added since `from` (Builder positions).
+function shiftFrom(B, from, dx, dy, dz) {
+  for (let i = from * 3; i < B.p.length; i += 3) { B.p[i] += dx; B.p[i + 1] += dy; B.p[i + 2] += dz; }
+}
+
+function buildMouthOpen() {
+  const B = new Builder();
+  const k = sagOf("mouthOpen"), inside = lin("#4a1222"), tongue = lin("#ff7f9e");
+  // the open mouth: an oval hanging from the anchor (the closed mouth's joint)
+  const oval = outlineFromSDF((x, y) => Math.hypot(x / 0.55, y / 0.6) - 1, 40, 0.55, 0.6);
+  let from = B.p.length / 3;
+  puff(B, {
+    outline: oval, front: 0.07, back: 0.05, sag: k,
+    look: (x, y, rho, front) => (front && rho < 0.8 ? { a: A_(0.25, 0, 0, 1), b: B_(inside, 1) } : { a: A_(0.5, 0.06), b: B_() }),
+  });
+  shiftFrom(B, from, 0, -0.55, 0);
+  // the tongue, a little in front in the lower half
+  const tong = outlineFromSDF((x, y) => Math.hypot(x / 0.3, y / 0.19) - 1, 32, 0.3, 0.19);
+  from = B.p.length / 3;
+  puff(B, { outline: tong, front: 0.06, back: 0.02, sag: k, look: () => ({ a: A_(0.55, 0.12, 0, 1), b: B_(tongue, 1) }) });
+  shiftFrom(B, from, 0, -0.83, 0.05);
+  return B.build();
+}
+
+function buildBeakOpen() {
+  const B = new Builder();
+  const gold = lin("#efbf4c"), seam = lin("#1f2a5c"), deep = lin("#4d70e0"), violet = lin("#5466d8"), mouth = lin("#7a2c4c"), throat = lin("#3a1022");
+  const hinge = 0.02;
+  // one mandible: the beak's upper (top) or lower half, closed by a flat inner face
+  const mandible = (upper, angle, len) => {
+    const from = B.p.length / 3;
+    B.closed(28, 18, (u, v) => {
+      const th = u * Math.PI * 2, t = v, z = (0.78 - 1.03 * t) * len - 0.25 * (1 - len);
+      let k = Math.pow(Math.min(1, t / 0.8), 0.78);
+      if (t > 0.86) k *= Math.sqrt(Math.max(0, 1 - ((t - 0.86) / 0.14) ** 2));
+      const hw = 0.38 * k, hh = 0.3 * k;
+      const c = Math.cos(th), s = Math.sin(th), outer = upper ? s > 0 : s < 0, n = upper ? 1.35 : 2.4;
+      const rr = 1 / Math.pow(Math.abs(c) ** n + Math.abs(s) ** n, 1 / n);
+      const x = hw * c * rr;
+      // outer shell as the closed beak; the inner face nearly flat (a little thickness)
+      let y = outer ? hh * s * rr * (upper ? 1.15 : 0.7) : -0.05 * hh * s;
+      if (upper) y -= 0.24 * (1 - t) ** 2.2;                    // the hooked tip
+      else y -= 0.06 * (1 - t) ** 2;
+      const collar = smooth(0.6, 0.7, t);
+      let tint, w;
+      if (!outer) { tint = mouth; w = 1 - collar; }
+      else {
+        const line = (1 - collar) * 0.75 * Math.exp(-((s / 0.22) ** 2));
+        tint = upper ? violet : deep; w = upper ? 0.35 * (1 - collar) : (1 - collar) * 0.6;
+        if (line > w) { tint = seam; w = line; }
+      }
+      if (collar > w) { tint = gold; w = collar; }
+      return { p: [x, y, z], a: A_(outer ? 0.55 : 0.3, 0.06, 0, w), b: B_(tint, collar > 0.5 ? 0.8 : 0.66) };
+    });
+    // open about the hinge (x axis through y = 0, z = hinge)
+    const ca = Math.cos(angle), sa = Math.sin(angle);
+    for (let i = from * 3; i < B.p.length; i += 3) {
+      const y = B.p[i + 1], z = B.p[i + 2] - hinge;
+      B.p[i + 1] = y * ca + z * sa; B.p[i + 2] = hinge + z * ca - y * sa;
+    }
+  };
+  mandible(true, 0.42, 1);
+  mandible(false, -0.5, 0.86);
+  // the dark throat between the mandibles' bases
+  ellipsoid(B, { r: [0.2, 0.13, 0.22], c: [0, -0.02, 0.06], seg: 16, rings: 8, look: () => ({ a: A_(0.2, 0, 0, 1), b: B_(throat, 1) }) });
+  return B.build();
+}
+
+const BUILDERS = {
+  eye: buildEye, nose: buildNose, mouth: buildMouth, blush: buildBlush, muzzle: buildMuzzle, earInner: buildEarInner, cherry: buildCherry, beak: buildBeak,
+  eyeClosed: buildEyeClosed, eyeHappy: buildEyeHappy, mouthOpen: buildMouthOpen, beakOpen: buildBeakOpen,
+};
 
 // ---- material -----------------------------------------------------------------
 

@@ -4,7 +4,7 @@
   "type": "module",
   "description": "\ub9d0\ub791\uc824\ub9ac \u2014 Three.js WebGPU softbody jelly with pipette paints and crystal gems, as an iPhone PWA",
   "scripts": {
-    "test": "node tests/golden.test.mjs && node tests/optics.test.mjs && node tests/stability.test.mjs && node tests/world.test.mjs && node tests/shapes.test.mjs && node tests/quality.test.mjs && node tests/game.test.mjs && node tests/rare-gems.test.mjs && node tests/precache.test.mjs",
+    "test": "node tests/golden.test.mjs && node tests/optics.test.mjs && node tests/stability.test.mjs && node tests/world.test.mjs && node tests/shapes.test.mjs && node tests/quality.test.mjs && node tests/game.test.mjs && node tests/fun.test.mjs && node tests/rare-gems.test.mjs && node tests/precache.test.mjs",
     "serve": "node tests/serve.mjs",
     "test:audio": "node tests/audio.test.mjs"
   },

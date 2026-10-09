@@ -4,17 +4,21 @@
 // CARRIED like the app does: while the bunny returns `hold`, the whole jelly is
 // pulled toward it by a damped spring (rigid, lagging, a little squash wobble
 // from acceleration; no stretching); otherwise it falls back onto the plate.
-// It shrinks 13 % per bite and vanishes on "finish".
+// It shrinks 13 % per bite and vanishes on "finish". On "kick" it gets the
+// impulse the app's world gets ({dir, strength}): it slides and tumbles across
+// the tray, bumps into the rim and stays there.
 //
-// Query: ?lite=1 (WebGL2)  ?quality=high|medium|low  ?outcome=eat|refuse|spit
+// Query: ?lite=1 (WebGL2)  ?quality=high|medium|low  ?outcome=eat|spit|kick|refuse
 //        ?mood=happy|ok|sad|special  ?bites=4  ?shape=flower|bear|cat|bird|cake|pudding
+//        ?picky=1 (monocle)  ?head=ribbon|crown|flowerband  ?face=glasses  ?neck=scarf
+//        ?back=wings|cape  ?outfit=all (ribbon + glasses + scarf + wings)
 //        ?color=%23rrggbb  ?autoplay=0  ?t=<s> freeze at that time (deterministic seek)
-//        ?seat=<deg> seat angle  ?az=<rad> camera azimuth  ?polar=<rad>  ?dist=<m>
-//        ?zoom=1 close-up  ?bloom=0|1  ?clean=1 hide HUD  ?jelly=0 no stand-in
+//        ?seat=<deg> seat angle (default: seated like the app, from the camera)  ?az=<rad> camera azimuth
+//        ?polar=<rad>  ?dist=<m>  ?zoom=1 close-up  ?bloom=0|1  ?clean=1 hide HUD  ?jelly=0 no stand-in
 import * as THREE from "three/webgpu";
 import { pass } from "three/tsl";
 import { bloom } from "three/addons/tsl/display/BloomNode.js";
-import { Rabbit } from "../src/render/rabbit.js";
+import { OUTFIT_SLOTS, Rabbit } from "../src/render/rabbit.js";
 
 const q = new URLSearchParams(location.search);
 const num = (k, d) => (q.has(k) && Number.isFinite(Number(q.get(k))) ? Number(q.get(k)) : d);
@@ -25,6 +29,10 @@ let outcome = q.get("outcome") ?? "eat";
 let shape = q.get("shape") ?? "flower";
 let jellyColor = q.get("color") ?? "#ff6f9a";
 let bites = num("bites", 4);
+let picky = q.get("picky") === "1";
+const outfit = q.get("outfit") === "all"
+  ? { head: "ribbon", face: "glasses", neck: "scarf", back: "wings" }
+  : { head: q.get("head"), face: q.get("face"), neck: q.get("neck"), back: q.get("back") };
 if (q.get("clean") === "1") document.body.classList.add("clean");
 
 const R = (window.__rabbit = { errors: [], events: [], frames: 0, ready: false });
@@ -120,7 +128,7 @@ jelly.name = "StandInJelly";
 jelly.rotation.y = JELLY_YAW;
 jelly.visible = q.get("jelly") !== "0";
 tray.add(jelly);
-const J = { c: new THREE.Vector3(), v: new THREE.Vector3(), size: 1, sizeGoal: 1, wob: 0, wobV: 0, gone: false, carried: false };
+const J = { c: new THREE.Vector3(), v: new THREE.Vector3(), size: 1, sizeGoal: 1, wob: 0, wobV: 0, gone: false, carried: false, slide: null };
 const spec = () => SHAPES[shape] || SHAPES.flower;
 function setShape(name) {
   shape = SHAPES[name] ? name : "flower";
@@ -129,19 +137,52 @@ function setShape(name) {
 }
 function resetJelly() {
   J.c.set(0, spec().h / 2, 0); J.v.set(0, 0, 0);
-  J.size = J.sizeGoal = 1; J.wob = J.wobV = 0; J.gone = false; J.carried = false;
+  J.size = J.sizeGoal = 1; J.wob = J.wobV = 0; J.gone = false; J.carried = false; J.slide = null;
+  jelly.quaternion.setFromAxisAngle(new THREE.Vector3(0, 1, 0), JELLY_YAW);
   jellyMaterial.attenuationColor.set(jellyColor);
   jelly.visible = q.get("jelly") !== "0";
   placeJelly();
 }
+const _yawQ = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), JELLY_YAW), _tiltQ = new THREE.Quaternion();
 function placeJelly() {
   const sy = 1 + J.wob, sxz = 1 / Math.sqrt(sy);
   jelly.position.copy(J.c);
+  if (J.slide) {
+    // tumble: tilt about the horizontal axis across the slide (pivoting near the floor)
+    _tiltQ.setFromAxisAngle(J.slide.axis, J.slide.tilt);
+    jelly.quaternion.copy(_tiltQ).multiply(_yawQ);
+    jelly.position.y += Math.abs(Math.sin(J.slide.tilt)) * spec().w * 0.18;
+  }
   jelly.scale.set(sxz * J.size, sy * J.size, sxz * J.size);
   if (J.gone && J.size <= 0.01) jelly.visible = false;
 }
 const _a = new THREE.Vector3();
+// Kick (stand-in for the app's world): slide with friction, tumble (tilt spring
+// kicked by the impulse), bump into the rim and stay there.
+function kickJelly(dir, strength) {
+  const d = new THREE.Vector3(dir[0], 0, dir[1]).normalize();
+  J.slide = { d, speed: 0.64 * strength, axis: new THREE.Vector3(d.z, 0, -d.x), tilt: 0, tiltV: 7 * strength, hit: false };
+  J.wobV -= 6 * strength;
+}
+function stepSlide(dt) {
+  const S = J.slide;
+  if (!S) return;
+  const half = Math.max(spec().w, spec().d) / 2 * J.size;
+  S.speed = Math.max(0, S.speed - 2.6 * dt);
+  J.c.addScaledVector(S.d, S.speed * dt);
+  const r = Math.hypot(J.c.x, J.c.z), lim = TRAY_RADIUS - half * 0.92;
+  if (r > lim) {
+    J.c.x *= lim / r; J.c.z *= lim / r;
+    if (!S.hit) { S.hit = true; S.tiltV -= 9 * S.speed; J.wobV -= 25 * S.speed; }
+    S.speed = 0;
+  }
+  // tilt spring: rocks over and settles upright
+  const w = 2 * Math.PI * 2.2;
+  S.tiltV += (-w * w * S.tilt - 2 * 0.3 * w * S.tiltV) * dt;
+  S.tilt += S.tiltV * dt;
+}
 function stepJelly(dt, hold) {
+  stepSlide(dt);
   if (J.gone) J.size = Math.max(0, J.size - dt * 8);
   else J.size += (J.sizeGoal - J.size) * (1 - Math.exp(-dt / 0.06));
   const rest = (spec().h / 2) * J.size;
@@ -179,11 +220,25 @@ function jellyInfo() {
 
 // ---------------------------------------------------------------- rabbit ----
 const rabbit = new Rabbit(tray, { quality });
+rabbit.setOutfit(outfit);
 Object.assign(R, { rabbit, renderer, scene, camera, tray, jelly: J });
-const seatAngle = (num("seat", 0) * Math.PI) / 180;
-const SEAT_R = 0.111;
-const seat = [-SEAT_R * Math.sin(seatAngle), 0, -SEAT_R * Math.cos(seatAngle)];
-const faceTo = [0, 0.02, 0];
+// Seat like the app (main.js feed()): behind the jelly as seen from the camera,
+// 2.4 cm to the side, facing the camera. ?seat=<deg> instead seats it on the
+// circle at that angle, facing the tray centre (the older preview behaviour).
+const seat = [0, 0, -0.111], faceTo = [0, 0.02, 0];
+function placeSeat() {
+  if (q.has("seat")) {
+    const a = (num("seat", 0) * Math.PI) / 180;
+    seat.splice(0, 3, -0.111 * Math.sin(a), 0, -0.111 * Math.cos(a));
+    faceTo.splice(0, 3, 0, 0.02, 0);
+    return;
+  }
+  const toCam = new THREE.Vector3(Math.sin(cam.az), 0, Math.cos(cam.az)); // = the app's camera seen from the tray centre
+  const side = new THREE.Vector3(-toCam.z, 0, toCam.x);
+  const p = toCam.clone().multiplyScalar(-0.108).addScaledVector(side, 0.024);
+  seat.splice(0, 3, p.x, 0, p.z);
+  faceTo.splice(0, 3, toCam.x * 0.3, 0.04, toCam.z * 0.3);
+}
 let clock = 0, playStart = 0;
 const logEl = document.getElementById("log");
 const logLines = [];
@@ -198,11 +253,13 @@ function play(m = mood) {
   mood = m;
   resetJelly();
   R.events.length = 0;
-  log(`— play ${outcome} · ${mood} · ${shape} ×${bites} (${quality})`);
+  log(`— play ${outcome} · ${mood} · ${shape} ×${bites} (${quality})${picky ? " · picky" : ""}`);
   playStart = clock;
   const sp = spec();
+  placeSeat();
+  placeCamera();
   rabbit.play({
-    position: seat, faceTo, outcome, mood, bites, jellyColor,
+    position: seat, faceTo, outcome, mood, bites, jellyColor, picky,
     jelly: { center: [J.c.x, J.c.y, J.c.z], width: Math.max(sp.w, sp.d), height: sp.h },
     onEvent(type, data) {
       const t = clock - playStart;
@@ -212,10 +269,12 @@ function play(m = mood) {
           : type === "lift" ? ` → ${fmt(data.hold)}`
             : type === "putDown" ? ` → ${fmt(data.to)}`
               : type === "spit" ? ` v ${fmt(data.velocity)}`
-                : type === "react" || type === "refuse" ? ` ${data.mood}` : type === "hop" ? ` ${data.phase}#${data.index}` : "";
+                : type === "kick" ? ` dir ${fmt(data.dir)} ×${data.strength} @${fmt(data.point)}`
+                  : type === "react" || type === "refuse" ? ` ${data.mood}` : type === "hop" ? ` ${data.phase}#${data.index}` : "";
       log(`${t.toFixed(2).padStart(5)}s ${type}${extra}`);
       if (type === "bite") J.sizeGoal *= 0.87;
       if (type === "finish") J.gone = true;
+      if (type === "kick") kickJelly(data.dir, data.strength);
     },
   });
   updateHud();
@@ -235,9 +294,11 @@ canvas.addEventListener("pointermove", (e) => {
 });
 canvas.addEventListener("pointerup", () => { drag = null; });
 canvas.addEventListener("wheel", (e) => { cam.dist = Math.min(0.42, Math.max(0.08, (cam.dist || 0.31) * Math.exp(e.deltaY * 0.001))); placeCamera(); }, { passive: true });
+// ?target=x,y,z overrides the look-at point (tray space)
+const customTarget = q.has("target") ? new THREE.Vector3(...q.get("target").split(",").map(Number)) : null;
 function placeCamera() {
   const d = cam.dist || (camera.aspect < 0.75 ? 0.31 : 0.26);
-  const target = q.get("zoom") === "1" ? new THREE.Vector3(seat[0] * 0.75, 0.05, seat[2] * 0.75) : TARGET;
+  const target = customTarget || (q.get("zoom") === "1" ? new THREE.Vector3(seat[0] * 0.75, 0.05, seat[2] * 0.75) : TARGET);
   const s = Math.sin(cam.polar);
   camera.position.set(target.x + d * s * Math.sin(cam.az), target.y + d * Math.cos(cam.polar), target.z + d * s * Math.cos(cam.az));
   camera.lookAt(target);
@@ -288,7 +349,8 @@ function button(label, on, fn) {
 const sep = () => hud.appendChild(Object.assign(document.createElement("span"), { className: "sep" }));
 function updateHud() {
   hud.innerHTML = "";
-  for (const [k, label] of [["eat", "🥄 eat"], ["refuse", "🙅 refuse"], ["spit", "💦 spit"]]) button(label, outcome === k, () => { outcome = k; play(mood); });
+  for (const [k, label] of [["eat", "🥄 eat"], ["spit", "💦 spit"], ["kick", "🦶 kick"], ["refuse", "🙅 refuse"]]) button(label, outcome === k, () => { outcome = k; play(mood); });
+  button("🧐 picky", picky, () => { picky = !picky; play(mood); });
   sep();
   for (const [k, label] of [["happy", "😊"], ["ok", "🙂"], ["sad", "😢"], ["special", "🌟"]]) button(label, mood === k, () => play(k));
   button("⏭ skip", false, () => rabbit.skip());
@@ -299,6 +361,11 @@ function updateHud() {
   sep();
   for (const k of ["high", "medium", "low"]) button(k, quality === k, () => { quality = k; rabbit.setQuality(k); updateHud(); });
   for (const n of [2, 4, 6]) button(`${n}×`, bites === n, () => { bites = n; updateHud(); });
+  sep();
+  const worn = rabbit.outfit;
+  for (const [slot, ids] of Object.entries(OUTFIT_SLOTS)) {
+    for (const id of ids) button(`${slot}:${id}`, worn[slot] === id, () => { rabbit.setOutfit({ ...rabbit.outfit, [slot]: worn[slot] === id ? null : id }); updateHud(); if (paused) render(); });
+  }
   for (const b of hud.querySelectorAll("button")) if (b.textContent === "●") b.style.color = ["#ff6f9a", "#7fd6a8", "#ffb347"][[...hud.querySelectorAll("button")].filter((x) => x.textContent === "●").indexOf(b)];
 }
 updateHud();
@@ -320,6 +387,8 @@ R.seek = (t, opts = {}) => {
   if (opts.outcome) outcome = opts.outcome;
   if (opts.color) jellyColor = opts.color;
   if (opts.shape) setShape(opts.shape);
+  if (opts.picky !== undefined) picky = Boolean(opts.picky);
+  if (opts.outfit) rabbit.setOutfit(opts.outfit);
   clock = 0;
   play(opts.mood ?? mood);
   const n = Math.round(t * 60);
@@ -335,6 +404,8 @@ R.resume = () => { paused = false; last = performance.now(); };
 R.step = step;
 R.render = render;
 R.setQuality = (k) => { quality = k; rabbit.setQuality(k); updateHud(); };
+R.setOutfit = (o) => { rabbit.setOutfit(o); updateHud(); };
+R.placeCamera = (o) => { Object.assign(cam, o); placeCamera(); };
 // Draw calls of the bunny alone (plain render, no bloom).
 R.countDraws = () => {
   const vis = tray.children.map((c) => c.visible);

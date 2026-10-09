@@ -1,7 +1,7 @@
 // Jelly shapes (src/core/shapes.js + shape-mesher.js): cage validity and
 // budgets, signature looks and decorations, and the real SoftBody under the
 // app's stresses (drop, drag, bites, slime, carry) for every shape.
-import { SHAPES, makeShapeCage, shapeLook, shapeStats, buildShapeCage, signatureSigma } from "../src/core/shapes.js";
+import { SHAPES, makeShapeCage, shapeLook, shapeStats, buildShapeCage, signatureSigma, shapeMotions, motionWeight } from "../src/core/shapes.js";
 import { makeFlowerCage, makeSurfaceStencils, makeTetLocator, evaluateSurface, computeVertexNormals } from "../src/core/cage.js";
 import { SoftBody, easeGrabTarget, clampGrabTarget } from "../src/core/softbody.js";
 import { tetDihedrals, tetAspect, checkManifold } from "../src/core/shape-mesher.js";
@@ -208,6 +208,38 @@ for (const id of NEW) {
   check(`${id}: decorations ${need.length ? need.join(" ") : "(none)"}`, have === wanted, have);
   check(`${id}: decorations sit on the rendered surface, unit outward normals`, decorProblems.length === 0,
     decorProblems.length ? decorProblems.slice(0, 4).join("; ") : `≤ ${mm(worstCage)} mm from the cage, ≤ ${(worstSurf * 1e6).toFixed(0)} µm from the rendered surface`);
+}
+
+// ---------------------------------------------------------------- idle motions (data)
+{
+  check("idle motions only for the cat and the bird", ["flower", "pudding", "cake", "bear"].every((id) => shapeMotions(id) === null) && shapeMotions("cat") && shapeMotions("bird"));
+  for (const [id, interval, moves, need] of [["cat", 5, ["yawn", "punch"], ["head", "pawL", "pawR", "haunch", "tail"]], ["bird", 7, ["flap", "chirp"], ["head", "wingL", "wingR", "tail"]]]) {
+    const M = shapeMotions(id), cage = makeShapeCage(id), P = cage.pos, n = P.length / 3;
+    const unit = (v) => Math.abs(Math.hypot(...v) - 1) < 1e-9;
+    check(`${id}: motions every ${interval} s (${moves.join(" / ")}), frozen and cached`, M === shapeMotions(id) && Object.isFrozen(M) && M.interval === interval && M.moves.join() === moves.join() && Object.isFrozen(M.regions));
+    check(`${id}: model axes are unit, up is +y, face ⟂ side`, unit(M.axes.side) && unit(M.axes.face) && M.axes.up.join() === "0,1,0" && Math.abs(M.axes.side[0] * M.axes.face[0] + M.axes.side[2] * M.axes.face[2]) < 1e-9);
+    const report = [];
+    let ok = need.every((r) => M.regions[r]);
+    for (const [name, parts] of Object.entries(M.regions)) {
+      let count = 0, full = 0, wsum = 0;
+      const c = [0, 0, 0];
+      for (let i = 0; i < n; i++) {
+        const w = motionWeight(parts, P[i * 3], P[i * 3 + 1], P[i * 3 + 2]);
+        if (!(w >= 0 && w <= 1)) ok = false;
+        if (w > 0.01) { count++; wsum += w; for (let k = 0; k < 3; k++) c[k] += w * P[i * 3 + k]; }
+        if (w > 0.9) full++;
+      }
+      if (count < 15 || full < 1) ok = false;
+      report.push(`${name} ${count}/${full}`);
+    }
+    // the paws sit in front (toward the face), the wings on either side
+    const centre = (r) => { const parts = M.regions[r], c = [0, 0, 0]; let s = 0; for (let i = 0; i < n; i++) { const w = motionWeight(parts, P[i * 3], P[i * 3 + 1], P[i * 3 + 2]); s += w; for (let k = 0; k < 3; k++) c[k] += w * P[i * 3 + k]; } return c.map((v) => v / s); };
+    const dotA = (v, a) => v[0] * a[0] + v[1] * a[1] + v[2] * a[2];
+    const all = centre("head").map((_, k) => P.filter((_, i) => i % 3 === k).reduce((a, b) => a + b, 0) / n);
+    if (id === "cat") ok &&= dotA(centre("pawL"), M.axes.face) > dotA(all, M.axes.face) + 0.01 && centre("head")[1] > all[1] + 0.005;
+    else ok &&= dotA(centre("wingL"), M.axes.side) < dotA(all, M.axes.side) - 0.01 && dotA(centre("wingR"), M.axes.side) > dotA(all, M.axes.side) + 0.01;
+    check(`${id}: motion regions are soft weights in 0..1 on real parts of the cage (nodes / full-weight)`, ok, report.join(", "));
+  }
 }
 
 // ---------------------------------------------------------------- physics

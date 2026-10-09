@@ -1,10 +1,12 @@
 // DOM for the pipette palette (drag a paint onto the jelly, hold to keep
-// dripping, tap to drop on top), the gem drawer (drag a gem in, or tap), the
-// settings sliders, and persisted per-device settings.
+// dripping, tap to drop on top), the gem drawer (drag a gem in, or tap; rare
+// gems show their remaining stock), the settings sliders, the bunny's
+// dress-up / plate theme panel, and persisted per-device settings.
 import { GEM_SHAPES, GEM_COLORS, gemIconSVG } from "../render/gems.js";
 import { PAINTS, ADDITIVES } from "../core/world.js";
 import { SHAPES } from "../core/shapes.js";
 import { shapeIconSVG } from "../render/shape-icons.js";
+import { OUTFITS, OUTFIT_SLOTS, THEMES, ACHIEVEMENTS } from "./fun.js";
 
 const $ = (id) => document.getElementById(id);
 // The same SVG icon can appear twice (toolbar + a hidden drawer); url(#id)
@@ -28,6 +30,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
   shape: "flower",  // jelly shape id (core/shapes.js)
   gemColor: 0,      // index into GEM_COLORS, -1 = random
   base: "berry",
+  theme: "basic",   // plate / background theme (render/stage.js THEME_LOOKS); validated against progress.themes() at boot
 });
 
 export function loadSettings() {
@@ -64,8 +67,10 @@ function slider(container, { key, label, min, max, step, value }, onInput) {
 
 // Shared drag helper: pointer capture on the source button, a ghost that
 // follows the finger (drawn above it so the finger never hides the tip),
-// tap vs drag, and an optional "hold still to repeat" callback.
-function draggable(button, { ghostHTML, onTap, onDrop, onHold }) {
+// tap vs drag, and an optional "hold still to repeat" callback. onStart /
+// onEnd bracket a press (the rare-gem row waits for onEnd before it
+// re-renders: removing a button mid-drag would lose its pointer capture).
+function draggable(button, { ghostHTML, onTap, onDrop, onHold, onStart, onEnd }) {
   const ghost = $("drag-ghost");
   let drag = null;
   const ghostAt = (x, y) => { ghost.style.left = x + "px"; ghost.style.top = (y - 46) + "px"; };
@@ -86,6 +91,7 @@ function draggable(button, { ghostHTML, onTap, onDrop, onHold }) {
     event.preventDefault();
     button.setPointerCapture(event.pointerId);
     drag = { x0: event.clientX, y0: event.clientY, x: event.clientX, y: event.clientY, moved: false, held: false, timer: 0, still: { x: event.clientX, y: event.clientY } };
+    onStart?.();
   });
   button.addEventListener("pointermove", (event) => {
     if (!drag) return;
@@ -108,16 +114,20 @@ function draggable(button, { ghostHTML, onTap, onDrop, onHold }) {
     if (!drag) return;
     stopHold();
     const d = drag; drag = null; ghost.hidden = true;
-    if (cancelled) return;
-    if (!d.moved) { onTap(); return; }
-    const [x, y] = tip(event.clientX, event.clientY);
-    if (!d.held || Math.hypot(event.clientX - d.still.x, event.clientY - d.still.y) > 10) onDrop(x, y);
+    if (!cancelled) {
+      if (!d.moved) onTap();
+      else {
+        const [x, y] = tip(event.clientX, event.clientY);
+        if (!d.held || Math.hypot(event.clientX - d.still.x, event.clientY - d.still.y) > 10) onDrop(x, y);
+      }
+    }
+    onEnd?.();
   };
   button.addEventListener("pointerup", (event) => end(event, false));
   button.addEventListener("pointercancel", (event) => end(event, true));
 }
 
-export function buildUI({ settings, onSetting, onTexture, onShape, onPaintDrop, onPaintTap, onAdditiveDrop, onAdditiveTap, onGemDrop, onGemTap, onRareDrop, onRareTap, onScatter, onBase }) {
+export function buildUI({ settings, onSetting, onTexture, onShape, onPaintDrop, onPaintTap, onAdditiveDrop, onAdditiveTap, onGemDrop, onGemTap, onRareDrop, onRareTap, onScatter, onBase, onOutfit, onTheme }) {
   const change = (key, value) => { settings[key] = value; saveSettings(settings); onSetting(key, value); };
 
   // ---- pipette palette (paints the player has, then additives) ----
@@ -161,19 +171,34 @@ export function buildUI({ settings, onSetting, onTexture, onShape, onPaintDrop, 
   }
   setPalette(PAINTS.slice(0, 7).map((p) => p.id));
 
-  // ---- rare gems the player owns (gem drawer) ----
+  // ---- rare gems the player owns (gem drawer): a stock each ----
+  // list = progress.rareStock() order (most left first, empty ones last, grey)
+  // + label / icon (html) / thumb (Promise<dataURL|null>, the 3D render).
+  // A new list while a rare gem is being dragged waits for the drag to end.
   const rareRow = $("rare-row"), rareBox = $("rare-gems");
-  function setRareGems(list) {          // [{ index, tier, label, icon (html) }]
+  let rarePressed = 0, rarePending = null;
+  function setRareGems(list) {          // [{ index, tier, count, label, icon, thumb? }]
+    if (rarePressed) { rarePending = list; return; }
+    rarePending = null;
     rareRow.hidden = list.length === 0;
     rareBox.textContent = "";
     for (const r of list) {
-      const b = document.createElement("button");
-      b.className = `tier-${r.tier}`;
-      b.setAttribute("aria-label", r.label);
-      b.title = r.label;
-      b.innerHTML = r.icon;
+      const b = document.createElement("button"), empty = !(r.count > 0);
+      b.className = `tier-${r.tier}` + (empty ? " spent" : "");
+      const label = `${r.label} ${empty ? "다 썼어요" : `${r.count}개`}`;
+      b.setAttribute("aria-label", label);
+      b.title = label;
+      b.dataset.index = String(r.index);
+      b.innerHTML = `<span class="gem-icon">${r.icon}</span><i class="count">×${r.count || 0}</i>`;
       rareBox.appendChild(b);
-      draggable(b, { ghostHTML: () => r.icon, onTap: () => onRareTap(r.index, r.tier), onDrop: (x, y) => onRareDrop(r.index, r.tier, x, y) });
+      r.thumb?.then((url) => { if (url && b.isConnected) b.firstElementChild.innerHTML = `<img alt="" src="${url}">`; }).catch(() => {});
+      draggable(b, {
+        ghostHTML: () => r.icon,
+        onTap: () => onRareTap(r.index, r.tier),
+        onDrop: (x, y) => onRareDrop(r.index, r.tier, x, y),
+        onStart: () => { rarePressed++; },
+        onEnd: () => { rarePressed = Math.max(0, rarePressed - 1); if (!rarePressed && rarePending) setRareGems(rarePending); },
+      });
     }
   }
 
@@ -286,5 +311,52 @@ export function buildUI({ settings, onSetting, onTexture, onShape, onPaintDrop, 
   }
   paintGems();
   $("gem-scatter").addEventListener("click", () => onScatter(settings.gemColor));
-  return { setPalette, setRareGems, setShapes };
+
+  // ---- 토끼 꾸미기 (outfits, one per slot) + 접시·배경 테마 (settings sheet) ----
+  // state = { outfits: unlocked ids, worn: {head, face, neck, back},
+  //           themes: unlocked ids, theme: current id, looks: THEME_LOOKS }
+  const SLOT_LABELS = { head: "머리", face: "얼굴", neck: "목", back: "등" };
+  const outfitBox = $("outfits"), themeBox = $("themes");
+  function setDressUp({ outfits = [], worn = {}, themes = ["basic"], theme = "basic", looks = {} }) {
+    outfitBox.textContent = "";
+    for (const slot of OUTFIT_SLOTS) {
+      const row = document.createElement("div");
+      row.className = "outfit-row";
+      row.innerHTML = `<span class="slot-label">${SLOT_LABELS[slot]}</span>`;
+      const chips = document.createElement("div");
+      chips.className = "outfit-chips";
+      const none = document.createElement("button");
+      none.className = "outfit-chip none" + (worn[slot] ? "" : " active");
+      none.textContent = "없음";
+      none.setAttribute("aria-label", `${SLOT_LABELS[slot]}: 없음`);
+      none.setAttribute("aria-pressed", String(!worn[slot]));
+      none.addEventListener("click", () => onOutfit(slot, null));
+      chips.appendChild(none);
+      for (const o of OUTFITS.filter((x) => x.slot === slot)) {
+        const open = outfits.includes(o.id), b = document.createElement("button");
+        const lock = o.level ? `Lv${o.level}` : "업적";
+        const how = o.level ? `토끼 친밀도 Lv${o.level}` : `업적 '${ACHIEVEMENTS.find((a) => a.id === o.achievement)?.label || "?"}'`;
+        b.className = "outfit-chip" + (open ? "" : " locked") + (worn[slot] === o.id ? " active" : "");
+        b.innerHTML = `<span class="emoji">${o.emoji}</span><span>${o.label}</span>${open ? "" : `<i class="lv">${lock}</i>`}`;
+        b.setAttribute("aria-label", open ? o.label : `${o.label} (${how}에 열려요)`);
+        b.setAttribute("aria-pressed", String(worn[slot] === o.id));
+        b.addEventListener("click", () => onOutfit(slot, open ? o.id : undefined, o, how));
+        chips.appendChild(b);
+      }
+      row.appendChild(chips);
+      outfitBox.appendChild(row);
+    }
+    themeBox.textContent = "";
+    for (const t of THEMES) {
+      const open = themes.includes(t.id), b = document.createElement("button");
+      const cond = t.level ? `Lv${t.level}` : t.condText || "";
+      b.className = "theme-chip" + (open ? "" : " locked") + (theme === t.id ? " active" : "");
+      b.innerHTML = `<i class="swatch" style="background:${looks[t.id]?.swatch || "#eef2f3"}"></i><span>${t.label}</span>${open ? "" : `<small class="cond">${cond}</small>`}`;
+      b.setAttribute("aria-label", open ? `테마: ${t.label}` : `${t.label} (${t.level ? `토끼 친밀도 Lv${t.level}` : cond}에 열려요)`);
+      b.setAttribute("aria-pressed", String(theme === t.id));
+      b.addEventListener("click", () => onTheme(open ? t.id : null, t, t.level ? `토끼 친밀도 Lv${t.level}` : cond));
+      themeBox.appendChild(b);
+    }
+  }
+  return { setPalette, setRareGems, setShapes, setDressUp, change };
 }

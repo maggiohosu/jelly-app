@@ -431,7 +431,7 @@ button {
 .overlay-head .icon-button { margin-left: auto; }
 .small-pill { height: 28px; font-size: 13px; }
 .small-pill .coin-icon { width: 17px; height: 17px; }
-.gacha-hint { margin: 18px 0 0; color: var(--ink-soft); font-weight: 700; min-height: 22px; }
+.gacha-hint { margin: 8px 0 0; color: var(--ink-soft); font-weight: 700; min-height: 22px; }
 .cards { flex: 1; display: flex; align-items: center; justify-content: center; gap: 12px; perspective: 900px; width: 100%; }
 .card {
   position: relative; width: min(28vw, 132px); aspect-ratio: 0.68; border-radius: 16px;
@@ -507,3 +507,210 @@ button {
 .coin-fly { position: fixed; width: 22px; height: 22px; z-index: 61; pointer-events: none; border-radius: 50%;
   background: radial-gradient(circle at 38% 32%, #fff6c8 0 12%, #ffd34d 38%, #f0a400 72%, #c77a00 100%);
   box-shadow: inset 0 0 0 2px #ffcf3a, inset 0 0 0 3.5px #d68b00; }
+
+/* ---- v8: order kinds & time bonus, combo, rare stock, notices, gift box, book tabs, dress-up, themes ---- */
+.friend-col { display: grid; line-height: 1.05; }
+.friend-row { display: flex; align-items: center; gap: 5px; }
+.title-tag { font-size: 9.5px; font-weight: 800; color: #c23d6d; max-width: 84px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; letter-spacing: -0.2px; }
+.friend.titled #friend-level { font-size: 12.5px; }
+
+.order {
+  position: fixed; top: calc(var(--safe-top) + 52px); left: 0; right: 0; margin: 0 auto;
+  width: min(380px, calc(100vw - 24px)); max-width: none;
+  display: grid; grid-template-columns: 36px 1fr; grid-template-areas: "sw head" "sw text" "foot foot";
+  column-gap: 10px; row-gap: 2px; align-items: center;
+  padding: 8px 12px 10px 9px; border-radius: 18px; overflow: hidden; cursor: pointer;
+  background: var(--glass-strong); -webkit-backdrop-filter: blur(14px); backdrop-filter: blur(14px);
+  box-shadow: 0 4px 16px rgba(34, 49, 58, 0.12); text-align: left;
+}
+.order .order-swatch { grid-area: sw; align-self: start; margin-top: 3px; width: 36px; height: 36px; position: relative; display: grid; place-items: center; }
+.order-head { grid-area: head; display: flex; align-items: center; gap: 5px; flex-wrap: wrap; min-height: 18px; }
+.order-head small { font-size: 10.5px; color: var(--ink-soft); font-weight: 700; }
+.order-kind, .order-time, .combo-chip { font-style: normal; font-size: 10.5px; font-weight: 800; line-height: 17px; padding: 0 7px; border-radius: 9px; white-space: nowrap; }
+.order-kind { background: #efe9ff; color: #6a4bc4; }
+.order-chips { margin-left: auto; display: flex; gap: 4px; }
+.order-time { background: #fff0b8; color: #9a6200; }
+.order-time.late { background: #f6f0dc; color: #8f7a48; }
+.combo-chip { background: linear-gradient(135deg, #ff9a6b, #ff5f7e); color: #fff; animation: comboPulse 1.6s ease-in-out infinite; }
+@keyframes comboPulse { 50% { transform: scale(1.07); } }
+.order-text { grid-area: text; font-size: 13.5px; letter-spacing: -0.3px; line-height: 1.32; }
+.order-foot { grid-area: foot; display: flex; align-items: center; gap: 8px; margin-top: 5px; }
+.order-conds { display: flex; gap: 4px; flex-wrap: wrap; flex: 1; min-width: 0; }
+.cond { font-style: normal; display: inline-flex; align-items: center; gap: 1px; height: 26px; padding: 0 6px 0 3px; border-radius: 9px; background: rgba(255, 255, 255, 0.78); box-shadow: inset 0 0 0 1px rgba(34, 49, 58, 0.08); }
+.cond svg { width: 21px; height: 21px; display: block; }
+.cond b { font-size: 11.5px; font-weight: 800; color: var(--ink); }
+.cond.shape { padding: 0 3px; }
+.cond.shape svg { width: 23px; height: 23px; }
+.cond .dot { width: 15px; height: 15px; border-radius: 50%; margin: 0 3px 0 2px; box-shadow: 0 0 0 1.5px #fff; }
+.cond.add-glitter .dot { background: radial-gradient(circle at 30% 30%, #fff 0 10%, transparent 11%), conic-gradient(#ffd76a, #fff3c4, #ffb3d6, #b9f0ff, #ffd76a); }
+.cond.add-stars .dot { background: radial-gradient(circle at 35% 30%, #fff 0 18%, transparent 19%), conic-gradient(#ffb3d1, #fff1a8, #bfe6ff, #d9c7ff, #c6f5d4, #ffb3d1); }
+.cond.slime { background: linear-gradient(135deg, #ffd6e4, #d9ecff 55%, #fff1c9); padding: 0 8px; }
+.order-new { flex: 0 0 auto; height: 30px; padding: 0 12px; border-radius: 999px; background: var(--ink); color: #fff; font-size: 12px; font-weight: 800; letter-spacing: -0.3px; box-shadow: 0 3px 10px rgba(34, 49, 58, 0.2); transition: transform 0.12s, opacity 0.2s; }
+.order-new:active { transform: scale(0.94); }
+.order-new:disabled { opacity: 0.35; }
+.order-timebar { position: absolute; left: 0; bottom: 0; width: 100%; height: 3.5px; transform-origin: left center; background: linear-gradient(90deg, #ffc531, #ff9f1a); transition: transform 0.5s linear; pointer-events: none; }
+.order-timebar.late { background: linear-gradient(90deg, #ffe39a, #f5cf74); }
+/* 황금 주문: a gold card with a glint sweeping across (a transform-only
+   animation: no repaint per frame, no backdrop blur under it) */
+.order.kind-golden {
+  background: linear-gradient(115deg, #fff8dc 0%, #ffe48f 30%, #fff5cc 52%, #ffd660 78%, #ffe9a6 100%);
+  -webkit-backdrop-filter: none; backdrop-filter: none;
+  box-shadow: inset 0 0 0 2px #ffcf3a, 0 4px 20px rgba(240, 164, 0, 0.38);
+}
+.order.kind-golden::before {
+  content: ""; position: absolute; top: 0; bottom: 0; left: 0; width: 60%; pointer-events: none;
+  background: linear-gradient(105deg, transparent 0%, rgba(255, 255, 255, 0.75) 50%, transparent 100%);
+  transform: translateX(-120%); animation: goldGlint 2.8s ease-in-out infinite;
+}
+@keyframes goldGlint { 0%, 25% { transform: translateX(-120%); } 75%, 100% { transform: translateX(260%); } }
+.order.kind-golden .order-kind { background: linear-gradient(135deg, #ffcf3a, #f0a400); color: #fff; text-shadow: 0 1px 0 rgba(150, 80, 0, 0.45); }
+.order.kind-golden .cond { background: rgba(255, 255, 255, 0.85); }
+.order.kind-picky { box-shadow: inset 0 0 0 2px #cbbdf5, 0 4px 16px rgba(106, 75, 196, 0.18); }
+.order.kind-picky .order-kind { background: #6a4bc4; color: #fff; }
+.order.kind-memory .order-kind { background: #dcf1ff; color: #2c6f99; }
+.order.memo-hidden .order-swatch { background: repeating-linear-gradient(45deg, #e3e8ea 0 5px, #f3f5f6 5px 10px); }
+.order.memo-hidden .order-swatch::after { content: "?"; font-weight: 900; font-size: 18px; color: #8fa0a8; }
+.order.memo-hidden .order-conds { visibility: hidden; }
+.order.memo-hidden .order-text { color: #2c6f99; }
+
+/* rare gem stock in the drawer */
+.rare-gems button .gem-icon { display: grid; place-items: center; width: 100%; height: 100%; pointer-events: none; }
+.rare-gems .count, .book-cell .count { position: absolute; font-style: normal; font-size: 10px; font-weight: 900; line-height: 14px; padding: 0 3px; border-radius: 6px; background: rgba(255, 255, 255, 0.92); color: var(--ink); box-shadow: 0 1px 2px rgba(34, 49, 58, 0.15); pointer-events: none; }
+.rare-gems .count { right: 1px; bottom: 1px; }
+.rare-gems button.spent .gem-icon { filter: grayscale(1); opacity: 0.35; }
+.rare-gems button.spent::after { background: none; -webkit-mask: none; mask: none; border: 0; box-shadow: inset 0 0 0 2px #dfe4e6; }
+.rare-gems button.spent .count { color: #a3afb4; }
+
+/* reward card (over the order card) + notices + breakdown */
+.reward { top: calc(var(--safe-top) + 58px); z-index: 56; }
+.reward-break { display: flex; flex-wrap: wrap; justify-content: center; gap: 4px; margin-top: 7px; max-width: 300px; }
+.reward-break span { font-size: 11.5px; font-weight: 800; padding: 2px 8px; border-radius: 9px; background: #eef2f3; color: var(--ink-soft); }
+.reward-break .rare { background: #ffe4ef; color: #c23d6d; }
+.reward-break .combo { background: #ffe5d6; color: #d2541f; }
+.reward-break .kind { background: #fff0b8; color: #9a6200; }
+.reward-break .time { background: #fff6cc; color: #9a7400; }
+.reward-card.kick { background: #fff3ea; }
+.reward-card.golden { background: linear-gradient(160deg, #fffaf0, #ffe9a8); }
+.notice-card { display: grid; justify-items: center; gap: 3px; min-width: 230px; max-width: min(330px, calc(100vw - 40px)); }
+.notice-icon { font-size: 34px; line-height: 1.15; min-height: 36px; display: grid; place-items: center; }
+.notice-title { font-weight: 900; font-size: 16px; letter-spacing: -0.3px; }
+.notice-text { text-align: center; }
+.notice-card.gold { background: linear-gradient(160deg, #fffdf3, #ffeeb5); }
+.notice-card.secret { background: linear-gradient(160deg, #fff4fb, #ece2ff); }
+.color-dot { display: inline-block; width: 38px; height: 38px; border-radius: 50% 50% 46% 46% / 58% 58% 42% 42%; background: var(--c); box-shadow: inset -4px -6px 10px rgba(0, 0, 0, 0.12), inset 4px 5px 8px rgba(255, 255, 255, 0.7), 0 0 0 2px #fff; }
+.big-emoji { font-size: 46px; line-height: 1; }
+.mini-card { display: inline-grid; place-items: center; width: 30px; height: 42px; border-radius: 7px; color: #fff; font-size: 15px;
+  background: radial-gradient(circle at 50% 50%, #fff 0 13%, transparent 14%), repeating-conic-gradient(from 0deg, #ffb3cf 0 15deg, #ffd3e2 15deg 30deg);
+  box-shadow: inset 0 0 0 3px #fff, inset 0 0 0 4px #ffb3cf, 0 4px 10px rgba(160, 80, 120, 0.25); }
+.toast { z-index: 57; }
+
+/* level-up gift box */
+.overlay.gift { z-index: 58; justify-content: center; background: radial-gradient(circle at 50% 42%, rgba(255, 246, 251, 0.95), rgba(236, 222, 245, 0.97)); }
+.gift-card { width: min(340px, 100%); padding: 20px 18px 18px; border-radius: 26px; background: #fff; text-align: center; box-shadow: 0 16px 40px rgba(120, 70, 140, 0.22); }
+.gift-title { margin: 0; font-size: 19px; font-weight: 900; letter-spacing: -0.4px; }
+.gift-hint { margin: 2px 0 0; color: var(--ink-soft); font-weight: 700; font-size: 14px; }
+.gift-box { position: relative; display: block; width: 132px; height: 126px; margin: 12px auto 2px; animation: giftWobble 1.15s ease-in-out infinite; }
+.gift-body { position: absolute; left: 12px; right: 12px; bottom: 0; height: 76px; border-radius: 10px;
+  background: linear-gradient(90deg, transparent 43%, #ffd34d 43% 57%, transparent 57%), linear-gradient(160deg, #ffa2c2, #ff6b9a);
+  box-shadow: inset 0 -8px 0 rgba(0, 0, 0, 0.07), 0 10px 22px rgba(200, 60, 110, 0.3); }
+.gift-lid { position: absolute; left: 4px; right: 4px; top: 30px; height: 26px; border-radius: 8px; z-index: 1;
+  background: linear-gradient(90deg, transparent 43%, #ffd34d 43% 57%, transparent 57%), linear-gradient(160deg, #ffbad2, #ff7fa9);
+  box-shadow: 0 4px 0 rgba(0, 0, 0, 0.06); transition: transform 0.45s cubic-bezier(.3, 1.4, .5, 1), opacity 0.45s; }
+.gift-lid::before, .gift-lid::after { content: ""; position: absolute; top: -21px; width: 26px; height: 20px; border: 6px solid #ffd34d; border-radius: 50%; }
+.gift-lid::before { left: calc(50% - 31px); transform: rotate(-22deg); }
+.gift-lid::after { right: calc(50% - 31px); transform: rotate(22deg); }
+.gift-box.open { animation: none; }
+.gift-box.open .gift-lid { transform: translateY(-74px) rotate(-30deg); opacity: 0; }
+.gift-box.open .gift-body { animation: giftGone 0.42s ease-in forwards; }
+@keyframes giftWobble { 0%, 100% { transform: rotate(0) scale(1); } 15% { transform: rotate(-8deg) scale(1.05); } 30% { transform: rotate(7deg) scale(1.03); } 45% { transform: rotate(-4deg) scale(1); } 60% { transform: rotate(2deg); } }
+@keyframes giftGone { 60% { transform: scale(1.12); } to { transform: scale(0.5); opacity: 0; } }
+.gift-content { animation: pop2 0.5s cubic-bezier(.2, 1.6, .4, 1); }
+.gift-prize { display: grid; justify-items: center; gap: 1px; margin: 10px 0 12px; }
+.gift-prize b { font-size: 28px; font-weight: 900; color: #c27a00; line-height: 1.1; }
+.gift-prize > span:last-child { font-weight: 800; color: var(--ink-soft); font-size: 14px; }
+.coin-icon.big { width: 56px; height: 56px; box-shadow: inset 0 0 0 4px #ffcf3a, inset 0 0 0 6.5px #d68b00; }
+.prize-gem { display: grid; place-items: center; width: 84px; height: 84px; }
+.prize-gem img, .prize-gem svg { width: 100%; height: 100%; }
+.gift-prize .mini-card { width: 46px; height: 64px; font-size: 22px; }
+.gift-rewards b { display: block; font-size: 12.5px; color: var(--ink-soft); margin-bottom: 6px; }
+.gift-rewards div { display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; }
+.gift-chip { display: inline-flex; align-items: center; gap: 5px; min-height: 30px; padding: 2px 11px 2px 6px; border-radius: 999px; background: #f6f1fb; font-size: 13px; font-weight: 700; }
+.gift-chip svg { width: 24px; height: 24px; }
+.gift-chip .dot { width: 16px; height: 16px; border-radius: 50%; background: radial-gradient(circle at 35% 30%, #fff 0 16%, var(--c) 62%); box-shadow: 0 0 0 1.5px #fff; }
+.gift-chip .swatch { width: 20px; height: 20px; border-radius: 6px; box-shadow: 0 0 0 1.5px #fff; }
+.gift-chip .emoji { font-size: 17px; }
+.gift-chip em { font-style: normal; color: #c27a00; font-size: 11.5px; font-weight: 800; }
+.gift-tip { margin: 10px 0 0; }
+#gift-ok { margin-top: 14px; min-width: 170px; height: 48px; }
+
+/* gacha: free cards, bundle count, the shape card */
+.overlay-head > b { white-space: nowrap; }
+.gacha-free-row { display: flex; justify-content: center; margin-top: 10px; min-height: 28px; }
+.free-pill { display: inline-flex; align-items: center; height: 28px; padding: 0 10px; border-radius: 999px; background: linear-gradient(135deg, #fff3c4, #ffd56a); color: #8a5a00; font-size: 12px; font-weight: 800; white-space: nowrap; }
+.card .front .bundle { position: absolute; top: 8px; right: 8px; font-weight: 900; font-size: 13px; background: #fff; border-radius: 8px; padding: 1px 6px; box-shadow: 0 1px 4px rgba(0, 0, 0, 0.15); }
+.card.shape-card .front { background: radial-gradient(circle at 50% 42%, #fffbe8 0 34%, transparent 35%), linear-gradient(160deg, #fff7da, #ffd56a 55%, #f0a400); }
+.card .front .shape-face { display: grid; place-items: center; width: 78%; }
+.card .front .shape-face svg { width: 100%; height: auto; }
+.card.glow-more .front { box-shadow: inset 0 0 0 4px #fff, 0 0 26px 6px rgba(255, 206, 110, 0.75); }
+
+/* book: five tabs, counts, colour book, achievements & titles, secrets */
+.book-tabs { display: flex; gap: 6px; width: min(520px, 100%); margin-top: 12px; overflow-x: auto; scrollbar-width: none; flex: 0 0 auto; }
+.book-tabs::-webkit-scrollbar { display: none; }
+.book-tabs button { flex: 0 0 auto; height: 32px; padding: 0 12px; border-radius: 999px; background: rgba(255, 255, 255, 0.7); font-size: 13px; font-weight: 700; color: var(--ink-soft); }
+.book-tabs button.active { background: var(--ink); color: #fff; }
+.book-count b { color: var(--ink); }
+.book-cell .gem-icon { display: grid; place-items: center; width: 90%; }
+.book-cell .gem-icon img, .book-cell .gem-icon svg { width: 100%; }
+.book-cell .count { top: 4px; right: 4px; }
+.book-cell.spent .gem-icon { filter: grayscale(1); opacity: 0.4; }
+.color-grid, .ach-list, .secret-grid { width: min(520px, 100%); overflow-y: auto; display: grid; gap: 8px; padding-bottom: 20px; }
+.color-grid { grid-template-columns: repeat(4, 1fr); }
+.color-cell { display: grid; justify-items: center; align-content: start; gap: 4px; padding: 9px 3px 7px; border-radius: 14px; background: rgba(255, 255, 255, 0.75); text-align: center; }
+.color-cell .swatch { display: grid; place-items: center; width: 40px; height: 40px; border-radius: 50% 50% 46% 46% / 58% 58% 42% 42%; background: var(--c); font-style: normal; font-weight: 900; color: #b4bfc4;
+  box-shadow: inset -4px -6px 10px rgba(0, 0, 0, 0.12), inset 4px 5px 8px rgba(255, 255, 255, 0.7), 0 0 0 2px #fff; }
+.color-cell span { font-size: 11px; font-weight: 700; line-height: 1.2; }
+.color-cell.unfound { background: rgba(255, 255, 255, 0.35); }
+.color-cell.unfound .swatch { background: #e5e9eb; box-shadow: inset 0 0 0 2px #fff; }
+.color-cell.unfound span { color: #a3afb4; }
+.ach-list { gap: 6px; align-content: start; }
+.title-row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 9px 10px; border-radius: 14px; background: rgba(255, 255, 255, 0.85); }
+.title-row > b { font-size: 13px; margin-right: 2px; }
+.title-chip { height: 30px; padding: 0 11px; border-radius: 999px; background: #f1edf7; font-size: 12.5px; font-weight: 700; color: var(--ink-soft); }
+.title-chip.active { background: #c23d6d; color: #fff; }
+.ach { display: flex; align-items: center; gap: 10px; width: 100%; padding: 8px 12px; border-radius: 14px; background: rgba(255, 255, 255, 0.45); text-align: left; color: var(--ink-soft); }
+.ach.done { background: rgba(255, 255, 255, 0.88); color: var(--ink); }
+.ach.worn { box-shadow: inset 0 0 0 2px #c23d6d; }
+.ach .medal { font-size: 22px; }
+.ach:not(.done) .medal { filter: grayscale(1); opacity: 0.5; }
+.ach-body { flex: 1; display: grid; gap: 1px; }
+.ach-body b { font-size: 13.5px; }
+.ach-body span { font-size: 11.5px; color: var(--ink-soft); }
+.ach-body em { font-style: normal; font-size: 11px; color: #c23d6d; font-weight: 700; }
+.ach-coins { font-weight: 800; color: #c27a00; font-size: 13px; white-space: nowrap; }
+.secret-grid { grid-template-columns: repeat(2, 1fr); align-content: start; }
+.secret-card { display: grid; justify-items: center; align-content: start; gap: 3px; padding: 12px 8px; border-radius: 16px; background: rgba(255, 255, 255, 0.45); text-align: center; border: 2px dashed rgba(34, 49, 58, 0.13); }
+.secret-card.found { background: linear-gradient(160deg, #ffffff, #fbefff); border: 2px solid #f1c6e6; }
+.secret-card .emoji { font-size: 32px; line-height: 1.2; }
+.secret-card:not(.found) .emoji { opacity: 0.55; }
+.secret-card b { font-size: 13.5px; }
+.secret-card .small { font-size: 11px; line-height: 1.45; }
+
+/* settings: 토끼 꾸미기 + 테마 */
+.outfits { display: grid; gap: 8px; }
+.outfit-row { display: grid; grid-template-columns: 34px 1fr; align-items: center; gap: 8px; }
+.slot-label { font-size: 13px; color: var(--ink-soft); font-weight: 700; }
+.outfit-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+.outfit-chip { display: inline-flex; align-items: center; gap: 4px; height: 34px; padding: 0 12px 0 9px; border-radius: 999px; background: #eef2f3; font-size: 13px; font-weight: 700; color: var(--ink-soft); }
+.outfit-chip.none { padding: 0 12px; }
+.outfit-chip .emoji { font-size: 17px; }
+.outfit-chip.active { background: #fff; color: var(--ink); box-shadow: 0 0 0 2px var(--ink) inset; }
+.outfit-chip.locked { opacity: 0.55; }
+.outfit-chip.locked .emoji { filter: grayscale(1); }
+.outfit-chip .lv { font-style: normal; font-size: 9.5px; color: #fff; background: #9aa7ad; border-radius: 6px; padding: 0 4px; margin-left: 2px; }
+.themes { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; }
+.theme-chip { display: grid; justify-items: center; align-content: start; gap: 3px; padding: 6px 2px; border-radius: 14px; background: #eef2f3; font-size: 11px; font-weight: 700; color: var(--ink-soft); line-height: 1.2; }
+.theme-chip .swatch { width: 44px; height: 44px; border-radius: 12px; box-shadow: 0 0 0 2px #fff, 0 2px 6px rgba(0, 0, 0, 0.12); }
+.theme-chip.active { background: #fff; color: var(--ink); box-shadow: 0 0 0 2px var(--ink) inset; }
+.theme-chip.locked .swatch { filter: grayscale(0.85) opacity(0.55); }
+.theme-chip .cond { font-size: 9.5px; color: #8e9ba1; text-align: center; }
+#reward-coins.loss { color: #e0475c; }

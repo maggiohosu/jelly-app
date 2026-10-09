@@ -1,5 +1,10 @@
 // 말랑젤리 plush bunny: hops in, grabs the jelly with both paws, eats it in a
-// few bites, reacts with a mood and hops away (~8 s).
+// few bites, reacts with a mood and hops away (~8 s). Other visits: one bite
+// and 퉤 ("spit"), or no bite at all — it sniffs the jelly on the tray, shakes
+// its head 절레절레, turns round and kicks it with a hind foot ("kick").
+// Dress-up: setOutfit() puts procedural items on the rig (ribbon / crown /
+// flower band, round glasses, knitted scarf, fairy wings / star cape); a
+// picky visit wears a monocle on a gold chain.
 //
 // Look: a cream needle-felt bunny (big upright ears with pink insides, bead
 // eyes, pink nose and blush, chubby cheeks, round paws and feet). It is built
@@ -10,7 +15,9 @@
 // streamed to the shader as a uniform array each frame.
 //
 // Draw calls while visible: bunny 1 + contact shadow 1 (+ hearts 1 during the
-// happy reaction). Shells per quality: high 14, medium 7, low 0 (velvet only).
+// happy reaction) + outfit ≤ 2 (solid pieces 1, glass pieces 1: lenses, wings).
+// Shells per quality: high 14, medium 7, low 0 (velvet only); outfit pieces
+// have no shells and cost the same at every quality.
 //
 // Frames: the bunny lives in the tray group (y up, floor y = 0). "Rig space"
 // is the bunny's own frame: origin on the floor under it, +z = facing,
@@ -19,7 +26,7 @@
 // API: see the class doc below.
 import * as THREE from "three/webgpu";
 import { float, length, smoothstep, uniform, uv, vec3 } from "three/tsl";
-import { BONE_STRIDE, createBlobMaterial, createCandyMaterial, createFurMaterial } from "./rabbit-fur.js";
+import { BONE_STRIDE, createBlobMaterial, createCandyMaterial, createFurMaterial, createOutfitMaterials } from "./rabbit-fur.js";
 
 // ---------------------------------------------------------------------------
 // Tunables
@@ -32,6 +39,18 @@ const BITE_SHRINK = 0.87;      // the app shrinks the jelly ~13 % (linear) per b
 
 const T_ARRIVE = 1.2, T_REACH = 0.55, T_LIFT = 0.6, T_BITE = 0.72, T_FINISH = 0.45, T_REACT = 1.25, T_LEAVE = 1.05;
 const BITE_CONTACT = 0.26, BITE_CHEW = 0.4;
+// "kick": approach (two hops) · sniff · head shake · hop-turn · kick · 흥 (grumpy).
+const T_APPROACH = 1.0, T_SNIFF = 1.2, T_SHAKE = 0.9, T_TURN = 0.4, T_KICK = 0.6, T_HMPH = 1.0;
+const KICK_CONTACT = 0.3;      // s into the kick segment when the foot hits the jelly
+const KICK_REACH = 0.047;      // root → foot sole at full extension (m, rig space)
+const KICK_SWING = 0.38;       // rad the kicking spot is swung sideways (three-quarter view; stays in a phone frame)
+const KICK_SIDE = 0.8;         // rad: it turns its back-side to the jelly (profile kick) and
+                               // the foot shoots back-and-out at this angle
+const KICK_STRENGTH = 0.8;
+const SHAKE_HZ = 2.1;          // 절레절레: ≈ 3.8 swings in T_SHAKE
+// The tray rim (stage.js: TRAY_RADIUS 0.075 + tube 0.0028 at y = 0.7·tube): the
+// kicking bunny perches on it while it stands across it.
+const RIM_R = 0.0778, RIM_TOP = 0.0048;
 
 // Palette colours are given as the colour they should DISPLAY at nominal
 // lighting (irradiance 1, the app's ACES tone mapping at exposure 1.12), so
@@ -66,6 +85,7 @@ const COLORS = {
   blush: display("#f39aa6"),
   tongue: display("#ee8296"),
   heart: display("#ff7aa2"),
+  pad: display("#f59aae"),
   sparkle: display("#fff1b8"),
 };
 
@@ -298,6 +318,12 @@ function rigLayout() {
     add(`shoulder${side}`, "chest", shoulder, aq);
     add(`paw${side}`, `shoulder${side}`, shoulder.clone().addScaledVector(armDir(s), ARM_LEN), aq.clone());
   }
+  // Outfit bones (no fur geometry of their own): the collar carries the neck and
+  // back pieces; the scarf tails and the cape hem swing on springs; wings flutter.
+  add("collar", "chest", v3(0, 0.04, 0));
+  add("scarfTail", "collar", SCARF_KNOT.clone());
+  add("capeHem", "collar", v3(0, 0.0435, -0.017));
+  for (const [s, side] of [[1, "L"], [-1, "R"]]) add(`wing${side}`, "collar", WING_ROOT(s));
   return { nodes, eye };
 }
 
@@ -358,16 +384,24 @@ function buildGeometry(rig) {
   }));
   occ.push({ parts: [tail], c: [0, 0.0118, -0.0262], r: 0.0058 });
 
-  // Feet: oval, flat soles, toes forward.
+  // Feet: oval, flat soles, toes forward. Pink paw pads on the soles (only
+  // seen when a foot is lifted: kick, thump); the sole fur is short there.
   const feet = [];
+  const soles = [];
   for (const s of [1, -1]) {
     const c = v3(s * 0.0135, 0.0042, 0.0165);
+    const bone = B(s > 0 ? "footL" : "footR");
     feet.push(pb.add(sphereGeometry(22, 16, (x, y, z) => {
       let Y = c.y + y * 0.0045;
       if (Y < 0.0007) Y = 0.0007 - (0.0007 - Y) * 0.1;
       return v3(c.x + x * 0.0066, Y, c.z + z * 0.0102);
-    }), (p) => ({ b0: B(s > 0 ? "footL" : "footR"), len: 0.0018, density: 2900, comb: v3(0, 0, 0.6), color: mixColor(C.fur, C.furLight, sstep(0.016, 0.026, p.z)) })));
+    }), (p, n) => ({ b0: bone, len: n.y < -0.97 && p.y < 0.00075 ? 0.0004 : 0.0018, density: 2900, comb: v3(0, 0, 0.6), color: mixColor(C.fur, C.furLight, sstep(0.016, 0.026, p.z)) })));
     occ.push({ parts: [feet[feet.length - 1]], c: [c.x, c.y + 0.001, c.z], r: 0.0058 });
+    const from = pb.position.length / 3;
+    for (const [x, z, rx, rz] of [[0, -0.0014, 0.0029, 0.0034], [-0.0021, 0.0043, 0.001, 0.0011], [0, 0.0049, 0.0011, 0.0012], [0.0021, 0.0043, 0.001, 0.0011]]) {
+      pb.add(sphereGeometry(14, 8, (X, Y, Z) => v3(c.x + x + X * rx, 0.00048 + Y * 0.0003, c.z + z + Z * rz)), () => ({ b0: bone, len: 0, gloss: 0.18, color: C.pad }));
+    }
+    soles.push([from, pb.position.length / 3]);
   }
 
   // Head: round, short face fur near the eyes / nose, lighter muzzle.
@@ -535,10 +569,11 @@ function buildGeometry(rig) {
   // Arms move a lot: the body does not occlude them in the bake.
   for (const o of occ) if (o.parts.includes(body)) o.skip = arms.slice();
   pb.bakeOcclusion(occ);
+  for (const [a, b] of soles) for (let i = a; i < b; i += 1) pb.fur[i * 4 + 3] = 0.9; // paw pads: no floor AO
   return pb.build();
 }
 
-function heartGeometry() {
+function heartGeometry(curveSegments = 14, bevelSegments = 5) {
   const s = new THREE.Shape();
   s.moveTo(5, 5);
   s.bezierCurveTo(5, 5, 4, 0, 0, 0);
@@ -547,7 +582,7 @@ function heartGeometry() {
   s.bezierCurveTo(12, 15.4, 16, 11, 16, 7);
   s.bezierCurveTo(16, 7, 16, 0, 10, 0);
   s.bezierCurveTo(7, 0, 5, 5, 5, 5);
-  const g = new THREE.ExtrudeGeometry(s, { depth: 3, bevelEnabled: true, bevelThickness: 3, bevelSize: 2.4, bevelSegments: 5, curveSegments: 14 });
+  const g = new THREE.ExtrudeGeometry(s, { depth: 3, bevelEnabled: true, bevelThickness: 3, bevelSize: 2.4, bevelSegments, curveSegments });
   g.deleteAttribute("uv");
   g.center();
   g.rotateZ(Math.PI);
@@ -570,6 +605,777 @@ function sparkleGeometry() {
   g.center();
   g.computeVertexNormals();
   return g;
+}
+
+// ---------------------------------------------------------------------------
+// Outfits: procedural dress-up pieces in bind pose (rig space), skinned to the
+// rig's bones by the outfit materials (rabbit-fur.js). Every piece is built
+// once (lazily, cached) as a chunk of attributes; the worn set is merged into
+// one solid + one glass geometry (≤ 2 draws). Pieces are placed against an
+// analytic model of the bunny's parts (insideBunny) so they sit on the fur
+// without poking into it.
+// ---------------------------------------------------------------------------
+
+export const OUTFIT_SLOTS = Object.freeze({
+  head: Object.freeze(["ribbon", "crown", "flowerband"]),
+  face: Object.freeze(["glasses"]),
+  neck: Object.freeze(["scarf"]),
+  back: Object.freeze(["wings", "cape"]),
+});
+
+// Solid colours are calibrated like the fur palette (display()); near-whites
+// keep some headroom (the inverse tone curve explodes at 1.0) and a colour the
+// inverse cannot reach falls back to its plain value. Glass colours are blended
+// before tone mapping, so they are plain linear values.
+function paint(hex) {
+  const c = display(hex), goal = new THREE.Color(hex);
+  const y = aces([c.r, c.g, c.b]);
+  return Math.max(Math.abs(y[0] - goal.r), Math.abs(y[1] - goal.g), Math.abs(y[2] - goal.b)) < 0.05 ? c : goal;
+}
+const OC = {
+  ribbon: paint("#f87fae"), ribbonDeep: paint("#e8689a"),
+  gold: paint("#e2ae45"), goldPale: paint("#f0d26a"),
+  gemPink: paint("#f4467f"), gemBlue: paint("#4b9ff2"), gemMint: paint("#36c795"),
+  petals: [paint("#f7a6c4"), paint("#f0e8e4"), paint("#c6b2f0"), paint("#f5bf98")],
+  flowerHeart: paint("#eecb52"), leaf: paint("#78c06e"), band: paint("#9ccf89"),
+  frame: paint("#5e3c35"), lens: new THREE.Color(0.72, 0.8, 0.88),
+  scarf: paint("#e8566a"), scarfStripe: paint("#f3e6d4"),
+  wingA: new THREE.Color(0.95, 0.66, 1.0), wingB: new THREE.Color(0.55, 0.86, 1.0),
+  cape: paint("#5a63c4"), capeLining: paint("#f6a3bd"), star: paint("#f0d26a"),
+  dot: paint("#f0e8e4"),
+};
+// mat = [gloss, metal, sheen, pattern] (the "surf" attribute)
+const MAT = {
+  satin: [0.38, 0, 0.75, 0], gold: [0.85, 1, 0, 0], gem: [1, 0, 0, 0], petal: [0.12, 0, 0.6, 0],
+  leaf: [0.25, 0, 0.3, 0], frame: [0.75, 0, 0, 0], knit: [0, 0, 0.9, 3], cape: [0.06, 0, 0.7, 1],
+  lining: [0.1, 0, 0.6, 0], band: [0.2, 0, 0.4, 0],
+};
+const UP = v3(0, 1, 0);
+
+class OutfitBuilder {
+  constructor() { this.position = []; this.normal = []; this.skin = []; this.color = []; this.surf = []; this.puv = []; this.index = []; }
+  get count() { return this.position.length / 3; }
+  // attr(p, n, i) → { b0, b1?, w?, color, mat: [4] (→ "surf"), uv?: [u, v] }
+  add(geometry, attr) {
+    const base = this.count;
+    const p = geometry.attributes.position, n = geometry.attributes.normal;
+    const P = v3(), N = v3();
+    for (let i = 0; i < p.count; i += 1) {
+      P.fromBufferAttribute(p, i); N.fromBufferAttribute(n, i);
+      const a = attr(P, N, i);
+      this.position.push(P.x, P.y, P.z);
+      this.normal.push(N.x, N.y, N.z);
+      this.skin.push(a.b0, a.b1 ?? a.b0, a.w ?? 0, 0);
+      this.color.push(a.color.r, a.color.g, a.color.b);
+      this.surf.push(...a.mat);
+      this.puv.push(a.uv ? a.uv[0] : 0, a.uv ? a.uv[1] : 0);
+    }
+    const index = geometry.index;
+    if (index) for (let i = 0; i < index.count; i += 1) this.index.push(base + index.getX(i));
+    else for (let i = 0; i < p.count; i += 1) this.index.push(base + i);
+    geometry.dispose();
+  }
+  chunk() {
+    if (!this.count) return null;
+    return {
+      position: new Float32Array(this.position), normal: new Float32Array(this.normal), skin: new Float32Array(this.skin),
+      color: new Float32Array(this.color), surf: new Float32Array(this.surf), puv: new Float32Array(this.puv), index: this.index.slice(),
+    };
+  }
+}
+
+const CHUNK_ATTRS = [["position", 3], ["normal", 3], ["skin", 4], ["color", 3], ["surf", 4], ["puv", 2]];
+function mergeChunks(chunks) {
+  const g = new THREE.BufferGeometry();
+  const count = chunks.reduce((n, c) => n + c.position.length / 3, 0);
+  for (const [name, size] of CHUNK_ATTRS) {
+    const out = new Float32Array(count * size);
+    let o = 0;
+    for (const c of chunks) { out.set(c[name], o); o += c[name].length; }
+    g.setAttribute(name, new THREE.BufferAttribute(out, size));
+  }
+  const total = chunks.reduce((n, c) => n + c.index.length, 0);
+  const index = count > 65535 ? new Uint32Array(total) : new Uint16Array(total);
+  let o = 0, base = 0;
+  for (const c of chunks) { for (let i = 0; i < c.index.length; i += 1) index[o + i] = c.index[i] + base; o += c.index.length; base += c.position.length / 3; }
+  g.setIndex(new THREE.BufferAttribute(index, 1));
+  g.boundingSphere = new THREE.Sphere(v3(0, 0.05, 0), 0.14);
+  return g;
+}
+
+// Orthonormal frame (x = left, y = up, z = forward) from an up vector and a forward hint.
+function frame(up, fwd) {
+  const y = up.clone().normalize();
+  const z = fwd.clone().addScaledVector(y, -fwd.dot(y)).normalize();
+  const x = y.clone().cross(z);
+  return { x, y, z };
+}
+function place(g, origin, f) {
+  g.applyMatrix4(new THREE.Matrix4().makeBasis(f.x, f.y, f.z).setPosition(origin));
+  return g;
+}
+const ellipsoid = (rx, ry, rz, ws = 16, hs = 12) => sphereGeometry(ws, hs, (x, y, z) => v3(x * rx, y * ry, z * rz));
+
+// Tube along a sampled path with an explicit cross-section frame:
+// at(t) → { p, n, b, r1, r2, e = 1 }: section point p + n·r1·c + b·r2·s
+// (superellipse exponent e: < 1 squarer). Seams duplicated (continuous pattern
+// uvs), normals welded, winding made outward. userData.tv/av: path / section param.
+function sweep(segments, radial, at, { closed = false, caps = true } = {}) {
+  const pos = [], tv = [], av = [], index = [];
+  const centers = [];
+  const ring = radial + 1;
+  for (let i = 0; i <= segments; i += 1) {
+    const t = i / segments;
+    const f = at(closed && i === segments ? 0 : t);
+    const e = f.e ?? 1;
+    centers.push(f.p);
+    for (let j = 0; j <= radial; j += 1) {
+      const a = (j / radial) * Math.PI * 2;
+      const c = Math.cos(a), s = Math.sin(a);
+      const cc = Math.sign(c) * Math.pow(Math.abs(c), e), ss = Math.sign(s) * Math.pow(Math.abs(s), e);
+      pos.push(f.p.x + f.n.x * f.r1 * cc + f.b.x * f.r2 * ss, f.p.y + f.n.y * f.r1 * cc + f.b.y * f.r2 * ss, f.p.z + f.n.z * f.r1 * cc + f.b.z * f.r2 * ss);
+      tv.push(t); av.push(j / radial);
+    }
+  }
+  for (let i = 0; i < segments; i += 1) {
+    for (let j = 0; j < radial; j += 1) {
+      const a = i * ring + j, b = a + ring;
+      index.push(a, a + 1, b, b, a + 1, b + 1);
+    }
+  }
+  if (!closed && caps) {
+    for (const [i, sgn] of [[0, -1], [segments, 1]]) {
+      const c = centers[i];
+      const ci = pos.length / 3;
+      pos.push(c.x, c.y, c.z); tv.push(i / segments); av.push(0);
+      for (let j = 0; j < radial; j += 1) {
+        const a = i * ring + j;
+        if (sgn > 0) index.push(ci, a, a + 1); else index.push(ci, a + 1, a);
+      }
+    }
+  }
+  const g = new THREE.BufferGeometry();
+  g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+  g.setIndex(index);
+  g.computeVertexNormals();
+  // Outward check on a side vertex; flip the winding if needed.
+  const k = Math.floor(segments / 2) * ring + 1;
+  const P = v3().fromBufferAttribute(g.attributes.position, k), N = v3().fromBufferAttribute(g.attributes.normal, k);
+  if (N.dot(P.sub(centers[Math.floor(segments / 2)])) < 0) {
+    const idx = g.index.array;
+    for (let i = 0; i < idx.length; i += 3) { const tmp = idx[i + 1]; idx[i + 1] = idx[i + 2]; idx[i + 2] = tmp; }
+    g.computeVertexNormals();
+  }
+  weldNormals(g);
+  g.userData.tv = tv; g.userData.av = av;
+  return g;
+}
+
+// Analytic bind-pose model of the bunny (body, head, cheeks, chin, pads, tail,
+// arm roots), grown by margin m (fur clearance). Used to sit pieces on the fur.
+const ARM_ROOTS = [1, -1].map((s) => {
+  const d = v3(-s * 0.17, -0.62, 0.72).normalize(), sh = v3(s * 0.0172, 0.0405, 0.0125);
+  return { a: sh.clone().addScaledVector(d, -0.004), b: sh.clone().addScaledVector(d, 0.011), r: 0.0052 };
+});
+const PARTS = [
+  { c: HEAD_C, r: v3(HEAD_R.x * 1.03, HEAD_R.y, HEAD_R.z * 1.03), fur: 0.0018 },
+  ...[1, -1].map((s) => ({ c: v3(s * 0.0112, 0.0425, 0.0105), r: v3(0.0096, 0.0082, 0.0088), fur: 0.0022 })),
+  { c: v3(0, 0.0386, 0.0158), r: v3(0.0048, 0.0032, 0.0048), fur: 0.0012 },
+  ...[1, -1].map((s) => ({ c: v3(s * 0.0036, 0.0425, 0.0186), r: v3(0.0049, 0.004, 0.0047), fur: 0.0009 })),
+  { c: v3(0, 0.0118, -0.0262), r: v3(0.0058, 0.0056, 0.0052), fur: 0.0036 },
+];
+const _q1 = v3(), _q2 = v3();
+// arms: include the arm roots; head: include the head parts (head, cheeks, chin, pads).
+function insideBunny(p, m, arms = true, head = true) {
+  const t = (p.y - BODY_C.y) / BODY_R.y;
+  if (t > -1 && t < 1 + m / BODY_R.y) {
+    const tt = Math.min(1, t);
+    const narrow = tt > 0 ? 1 - 0.2 * tt * tt : 1 + 0.03 * (1 - (tt + 1) * (tt + 1));
+    const k = Math.sqrt(Math.max(0, 1 - tt * tt));
+    const ex = BODY_R.x * narrow * k + m + 0.0024, ez = BODY_R.z * narrow * k + m + 0.0024;
+    const dz = p.z - BODY_C.z - (p.z > BODY_C.z ? 0.0018 * Math.max(0, 1 - Math.abs(tt + 0.25) * 1.4) : 0);
+    if ((p.x / ex) ** 2 + (dz / ez) ** 2 <= 1) return true;
+  }
+  for (const q of PARTS) {
+    if (!head && q !== PARTS[PARTS.length - 1]) continue;
+    const g = m + q.fur;
+    if (((p.x - q.c.x) / (q.r.x + g)) ** 2 + ((p.y - q.c.y) / (q.r.y + g)) ** 2 + ((p.z - q.c.z) / (q.r.z + g)) ** 2 <= 1) return true;
+  }
+  if (arms) {
+    for (const a of ARM_ROOTS) {
+      _q1.subVectors(a.b, a.a); _q2.subVectors(p, a.a);
+      const h = clamp01(_q2.dot(_q1) / _q1.lengthSq());
+      if (_q2.addScaledVector(_q1, -h).length() <= a.r + 0.0019 + m) return true;
+    }
+  }
+  return false;
+}
+// Farthest distance along a ray (from o, direction d) that is still inside:
+// coarse march inward from max (parts are thicker than the step), then bisect.
+function surfaceAlong(o, d, m, arms = true, max = 0.045, head = true) {
+  const p = v3(), step = 0.0008;
+  let r = max;
+  while (r > 0 && !insideBunny(p.copy(o).addScaledVector(d, r), m, arms, head)) r -= step;
+  if (r <= 0) return 0;
+  let lo = r, hi = r + step;
+  for (let k = 0; k < 10; k += 1) { const mid = (lo + hi) / 2; if (insideBunny(p.copy(o).addScaledVector(d, mid), m, arms, head)) lo = mid; else hi = mid; }
+  return hi;
+}
+const smoothLoop = (arr, passes = 3) => {
+  let a = arr.slice();
+  for (let k = 0; k < passes; k += 1) a = a.map((v, i) => (a[(i - 1 + a.length) % a.length] + 2 * v + a[(i + 1) % a.length]) / 4);
+  return a;
+};
+
+// Head surface helpers for head-worn pieces.
+function onHead(dir, lift) {
+  const p = headSurface(dir), n = headNormal(p);
+  return { p: p.addScaledVector(n, lift), n };
+}
+
+// Scarf ring: a rolled knit band around the neck, low in front (under the
+// chin), high at the back, over the arm roots. Shared with the rig (tail bone).
+// (The cheeks and chin rest on it: the head parts are left out of its fit.)
+// It sinks into the fur (snug) and the arms hang in front of it.
+const SCARF = { segs: 96, y: (th) => 0.0338 - 0.0005 * Math.cos(th), r1: 0.0022, r2: 0.0041, knotTh: 1.72 };
+let scarfRingCache = null;
+function scarfRing() {
+  if (scarfRingCache) return scarfRingCache;
+  const radii = [];
+  for (let i = 0; i < SCARF.segs; i += 1) {
+    const th = (i / SCARF.segs) * Math.PI * 2;
+    const d = v3(Math.sin(th), 0, Math.cos(th));
+    let r = 0;
+    for (const dy of [-SCARF.r2 * 0.7, 0, SCARF.r2 * 0.7]) r = Math.max(r, surfaceAlong(v3(0, SCARF.y(th) + dy, -0.002), d, -0.0015, false, 0.045, false));
+    radii.push(r + SCARF.r1 * 0.62);
+  }
+  const r = smoothLoop(radii, 4);
+  const at = (th) => {
+    const u = (((th / (Math.PI * 2)) % 1) + 1) % 1 * SCARF.segs;
+    const i = Math.floor(u), f = u - i;
+    const R = lerp(r[i % SCARF.segs], r[(i + 1) % SCARF.segs], f);
+    const n = v3(Math.sin(th), 0, Math.cos(th));
+    return { p: v3(0, SCARF.y(th), -0.002).addScaledVector(n, R), n, R };
+  };
+  scarfRingCache = { at, length: r.reduce((s, x) => s + x, 0) / SCARF.segs * Math.PI * 2 };
+  return scarfRingCache;
+}
+function scarfKnot() {
+  const k = scarfRing().at(SCARF.knotTh);
+  return k.p.clone().addScaledVector(k.n, SCARF.r1 * 0.9);
+}
+
+// ---- items --------------------------------------------------------------------
+// Each builder(ctx) → { solid: OutfitBuilder, glass: OutfitBuilder } filled in rig space.
+const ITEMS = {
+  ribbon({ B, solid }) {
+    // Big pink bow between the ears: a knot and two puffy loops with a crease,
+    // two short tails, all leaning back with the head's curve.
+    const BOW = 1.3;
+    const base = onHead(v3(0, 0.93, 0.37), 0.0016);
+    const f = frame(base.n.clone().lerp(UP, 0.35), v3(0, 0, 1));
+    const head = B("head");
+    const sat = (c) => () => ({ b0: head, color: c, mat: MAT.satin });
+    for (const s of [1, -1]) {
+      const g = sphereGeometry(30, 20, (x, y, z) => {
+        const a = (x * s + 1) / 2; // 0 at the knot → 1 at the loop's end
+        const flare = Math.pow(Math.sin(Math.PI * Math.min(1, 0.16 + 0.92 * a)), 0.55);
+        const H = 0.0017 + 0.0047 * flare, T = 0.0011 + 0.0016 * Math.sin(Math.PI * Math.min(1, a * 1.05));
+        const crease = 1 - 0.32 * Math.exp(-Math.pow(y / 0.35, 2)) * Math.max(0, z) * sstep(0.2, 0.6, a);
+        const X = s * (0.0012 + a * 0.0118);
+        return v3(X, y * H + a * a * 0.0034, z * T * crease);
+      });
+      g.rotateZ(s * -0.06);
+      g.scale(BOW, BOW, BOW);
+      solid.add(place(g, base.p, f), sat(OC.ribbon));
+      // tails: short ribbons hanging down the back of the bow, notched ends
+      const tail = sweep(14, 10, (t) => {
+        const p = v3(s * (0.0012 + 0.0048 * t), -0.0016 - 0.0062 * t, -0.0016 - 0.0006 * t);
+        return { p, n: v3(0, 0, 1), b: v3(1, -0.15 * s, 0).normalize(), r1: 0.0006, r2: 0.0019 * (1 + 0.25 * t), e: 0.5 };
+      });
+      tail.rotateX(-0.15);
+      tail.scale(BOW, BOW, BOW);
+      solid.add(place(tail, base.p, f), sat(OC.ribbonDeep));
+    }
+    const knot = sphereGeometry(18, 14, (x, y, z) => v3(x * 0.0026, y * 0.0031 + 0.0003, z * 0.0021 + 0.0004));
+    knot.scale(BOW, BOW, BOW);
+    solid.add(place(knot, base.p, f), sat(OC.ribbonDeep));
+  },
+
+  crown({ B, solid }) {
+    // Small gold crown: flared band with five points and pearl tips, a heart
+    // gem in front and round gems around; tilted a little for charm.
+    const base = onHead(v3(0.04, 0.92, 0.39), 0.0003);
+    const f = frame(base.n.clone().lerp(UP, 0.45).applyAxisAngle(v3(0, 0, 1), -0.1), v3(0, 0, 1));
+    const head = B("head");
+    const gold = { b0: head, color: OC.gold, mat: MAT.gold };
+    const R0 = 0.0053, H0 = 0.0028, HP = 0.0036, WALL = 0.00055;
+    const top = (a) => { const k = Math.abs(((a / (Math.PI * 2)) * 5 + 0.5) % 1 - 0.5) * 2; return H0 + HP * Math.pow(1 - k, 1.6); };
+    const N = 60, M = 4;
+    const pos = [], index = [];
+    const vert = (a, v, inner) => {
+      const h = top(a) * v, r = R0 + 0.0011 * v - (inner ? WALL : 0);
+      return [Math.sin(a) * r, h, Math.cos(a) * r];
+    };
+    // outer wall, inner wall, top lip (between them), bottom lip
+    for (const layer of [0, 1]) {
+      const o = pos.length / 3;
+      for (let i = 0; i <= N; i += 1) for (let j = 0; j <= M; j += 1) pos.push(...vert((i / N) * Math.PI * 2, j / M, layer === 1));
+      for (let i = 0; i < N; i += 1) for (let j = 0; j < M; j += 1) {
+        const a = o + i * (M + 1) + j, b = a + M + 1;
+        if (layer === 0) index.push(a, b, a + 1, b, b + 1, a + 1); else index.push(a, a + 1, b, b, a + 1, b + 1);
+      }
+    }
+    const lip = (j) => {
+      const o = pos.length / 3;
+      for (let i = 0; i <= N; i += 1) { pos.push(...vert((i / N) * Math.PI * 2, j, false)); pos.push(...vert((i / N) * Math.PI * 2, j, true)); }
+      for (let i = 0; i < N; i += 1) {
+        const a = o + i * 2, b = a + 2;
+        if (j > 0) index.push(a, b, a + 1, b, b + 1, a + 1); else index.push(a, a + 1, b, b, a + 1, b + 1);
+      }
+    };
+    lip(1); lip(0);
+    const wall = new THREE.BufferGeometry();
+    wall.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+    wall.setIndex(index);
+    wall.computeVertexNormals();
+    solid.add(place(wall, base.p, f), () => gold);
+    // band rings (bottom rim + a beaded top line of the band)
+    for (const [y, r, tube] of [[0.00045, R0 + 0.0001, 0.0006], [H0 * 0.92, R0 + 0.0011 * (H0 * 0.92) / (H0 + HP) + 0.0001, 0.00042]]) {
+      const ring = new THREE.TorusGeometry(r, tube, 6, 48);
+      ring.deleteAttribute("uv");
+      ring.rotateX(Math.PI / 2);
+      ring.translate(0, y, 0);
+      solid.add(place(ring, base.p, f), () => gold);
+    }
+    // pearls on the points
+    for (let k = 0; k < 5; k += 1) {
+      const a = (k / 5) * Math.PI * 2;
+      const [x, y, z] = vert(a, 1, false);
+      const pearl = ellipsoid(0.0009, 0.0009, 0.0009, 10, 6);
+      pearl.translate(x * 0.97, y + 0.0004, z * 0.97);
+      solid.add(place(pearl, base.p, f), () => ({ b0: head, color: OC.goldPale, mat: MAT.gold }));
+    }
+    // gems on the band: heart in front, round gems on the sides
+    const heart = heartGeometry(4, 1);
+    heart.scale(0.0042, 0.0042, 0.0028);
+    heart.translate(0, H0 * 0.5, R0 + 0.0011 * 0.18 + 0.0006);
+    solid.add(place(heart, base.p, f), () => ({ b0: head, color: OC.gemPink, mat: MAT.gem }));
+    for (const [a, c] of [[1.1, OC.gemBlue], [-1.1, OC.gemBlue], [2.2, OC.gemMint], [-2.2, OC.gemMint]]) {
+      const gem = sphereGeometry(10, 6, (x, y, z) => v3(x * 0.00095, y * 0.00095, z * 0.0006));
+      gem.rotateY(a);
+      const r = R0 + 0.0011 * 0.18 + 0.0004;
+      gem.translate(Math.sin(a) * r, H0 * 0.5, Math.cos(a) * r);
+      solid.add(place(gem, base.p, f), () => ({ b0: head, color: c, mat: MAT.gem }));
+    }
+  },
+
+  flowerband({ B, solid }) {
+    // Flower crown: a slim green band over the head in front of the ears with
+    // little five-petal flowers and leaves.
+    const head = B("head");
+    const tilt = 0.5;
+    const dirAt = (phi) => v3(Math.sin(phi), Math.cos(phi) * Math.cos(tilt), Math.cos(phi) * Math.sin(tilt));
+    const PH = 1.22;
+    const band = sweep(48, 8, (t) => {
+      const phi = lerp(-PH, PH, t);
+      const s = onHead(dirAt(phi), 0.0011);
+      const tan = onHead(dirAt(phi + 0.01), 0.0011).p.sub(s.p).normalize();
+      return { p: s.p, n: s.n, b: s.n.clone().cross(tan).normalize(), r1: 0.0006, r2: 0.0011, e: 0.8 };
+    });
+    solid.add(band, () => ({ b0: head, color: OC.band, mat: MAT.band }));
+    const flowers = [[0, 1.45, 0], [0.42, 1.25, 1], [-0.42, 1.25, 2], [0.8, 1.12, 3], [-0.8, 1.12, 1], [1.12, 0.95, 0], [-1.12, 0.95, 2]];
+    for (const [phi, size, ci] of flowers) {
+      const s = onHead(dirAt(phi), 0.0019);
+      const tan = onHead(dirAt(phi + 0.01), 0.0019).p.sub(s.p).normalize();
+      const f = frame(s.n, tan.clone().cross(s.n).negate().lerp(v3(0, 0, 1), 0.2));
+      const twist = phi * 2.3;
+      for (let k = 0; k < 5; k += 1) {
+        const a = twist + (k / 5) * Math.PI * 2;
+        const petal = sphereGeometry(10, 6, (x, y, z) => {
+          const along = (x + 1) / 2;
+          const w = Math.sin(Math.PI * Math.min(1, 0.2 + along)) * (1 - 0.15 * along);
+          return v3(x * 0.0018, y * 0.00055 + 0.0006 * along * along, z * 0.0015 * w);
+        });
+        petal.translate(0.0016, 0, 0);
+        petal.rotateY(a);
+        petal.scale(size, size, size);
+        const c = OC.petals[ci];
+        solid.add(place(petal, s.p, f), (p, n) => ({ b0: head, color: c, mat: MAT.petal }));
+      }
+      const heart = ellipsoid(0.00095 * size, 0.0007 * size, 0.00095 * size, 12, 8);
+      heart.translate(0, 0.0007 * size, 0);
+      solid.add(place(heart, s.p, f), () => ({ b0: head, color: OC.flowerHeart, mat: [0.3, 0, 0.5, 0] }));
+    }
+    for (const phi of [0.2, -0.2, 0.6, -0.6, 0.95, -0.95]) {
+      const s = onHead(dirAt(phi), 0.0014);
+      const tan = onHead(dirAt(phi + 0.01), 0.0014).p.sub(s.p).normalize();
+      const f = frame(s.n, tan);
+      const leaf = sphereGeometry(12, 8, (x, y, z) => {
+        const w = Math.pow(Math.max(0, 1 - x * x), 0.7);
+        return v3(x * 0.0021, y * 0.0003 + 0.0004 * (1 - x * x), z * 0.0009 * w);
+      });
+      leaf.rotateY(Math.PI / 2 + (phi > 0 ? 0.6 : -0.6));
+      leaf.translate(0, 0, 0.0004);
+      solid.add(place(leaf, s.p, f), () => ({ b0: head, color: OC.leaf, mat: MAT.leaf }));
+    }
+  },
+
+  glasses({ B, rig, solid, glass }) {
+    // Round glasses: two thin cocoa rings in front of the bead eyes, a curved
+    // bridge over the nose and temples running back into the head fur.
+    const head = B("head");
+    const lens = [];
+    for (const s of [1, -1]) {
+      const e = rig.eye(s);
+      const n = e.normal.clone().lerp(v3(0, 0, 1), 0.5).normalize();
+      const c = e.pos.clone().addScaledVector(n, 0.0041).add(v3(s * 0.0004, 0.0003, 0));
+      const fr = frame(v3(0, 1, 0).addScaledVector(n, -n.y).normalize(), n); // y = up on the lens plane, z = lens normal
+      lens.push({ c, n, fr });
+      const ring = new THREE.TorusGeometry(0.0047, 0.00058, 10, 48);
+      ring.deleteAttribute("uv");
+      solid.add(place(ring, c, fr), () => ({ b0: head, color: OC.frame, mat: MAT.frame }));
+      const disc = new THREE.CircleGeometry(0.0046, 32);
+      disc.deleteAttribute("uv");
+      // slight dome
+      const pp = disc.attributes.position;
+      for (let i = 0; i < pp.count; i += 1) { const r = Math.hypot(pp.getX(i), pp.getY(i)) / 0.0046; pp.setZ(i, 0.0005 * (1 - r * r)); }
+      disc.computeVertexNormals();
+      glass.add(place(disc, c, fr), () => ({ b0: head, color: OC.lens, mat: [0.07, 0, 0, 0] }));
+    }
+    // bridge
+    const [L, R] = lens;
+    const a = L.c.clone().addScaledVector(L.fr.x, -0.0047).addScaledVector(L.fr.y, 0.0012);
+    const b = R.c.clone().addScaledVector(R.fr.x, 0.0047).addScaledVector(R.fr.y, 0.0012);
+    const mid = a.clone().lerp(b, 0.5).add(v3(0, 0.0014, 0.0012));
+    const curve = new THREE.QuadraticBezierCurve3(a, mid, b);
+    const bridge = sweep(16, 8, (t) => {
+      const p = curve.getPoint(t), tan = curve.getTangent(t);
+      const n = v3(0, 0, 1).addScaledVector(tan, -tan.z).normalize();
+      return { p, n, b: tan.clone().cross(n).normalize(), r1: 0.00045, r2: 0.00045 };
+    });
+    solid.add(bridge, () => ({ b0: head, color: OC.frame, mat: MAT.frame }));
+    // temples: from the outer rim straight back along the side of the head
+    for (const [k, s] of [[0, 1], [1, -1]]) {
+      const l = lens[k];
+      const start = l.c.clone().addScaledVector(l.fr.x, s * 0.0047).addScaledVector(l.fr.y, 0.0008);
+      const pts = [start];
+      for (let i = 1; i <= 6; i += 1) {
+        const z = lerp(start.z, -0.002, i / 6);
+        const dir = v3(s * 1, (start.y + 0.0006 * i / 6 - HEAD_C.y) / HEAD_R.y * 0.8, (z - HEAD_C.z) / HEAD_R.z * 0.9);
+        const q = onHead(dir, 0.0012).p;
+        pts.push(v3(q.x, start.y + 0.0006 * i / 6, z));
+      }
+      const tc = new THREE.CatmullRomCurve3(pts);
+      const temple = sweep(20, 6, (t) => {
+        const p = tc.getPoint(t), tan = tc.getTangent(t);
+        const n = v3(s, 0, 0).addScaledVector(tan, -tan.x * s).normalize();
+        return { p, n, b: tan.clone().cross(n).normalize(), r1: 0.0004, r2: 0.00045 };
+      });
+      solid.add(temple, () => ({ b0: head, color: OC.frame, mat: MAT.frame }));
+    }
+  },
+
+  monocle({ B, rig, solid, glass, wearing }) {
+    // Monocle on the right eye: gold ring, clear lens, and a fine bead chain
+    // that hangs from the ring down to a little pin on the chest (or on the scarf).
+    const head = B("head"), collar = B("collar");
+    const e = rig.eye(-1);
+    const n = e.normal.clone().lerp(v3(0, 0, 1), 0.45).normalize();
+    const c = e.pos.clone().addScaledVector(n, 0.0043).add(v3(-0.0005, 0.0002, 0));
+    const fr = frame(v3(0, 1, 0).addScaledVector(n, -n.y).normalize(), n);
+    const R = 0.0054;
+    const ring = new THREE.TorusGeometry(R, 0.00068, 10, 52);
+    ring.deleteAttribute("uv");
+    solid.add(place(ring, c, fr), () => ({ b0: head, color: OC.gold, mat: MAT.gold }));
+    const disc = new THREE.CircleGeometry(R - 0.0002, 32);
+    disc.deleteAttribute("uv");
+    glass.add(place(disc, c, fr), () => ({ b0: head, color: OC.lens, mat: [0.09, 0, 0, 0] }));
+    // eyelet at the bottom-outer edge
+    const ea = -2.2;
+    const eye = c.clone().addScaledVector(fr.x, Math.cos(ea) * (R + 0.0009)).addScaledVector(fr.y, Math.sin(ea) * (R + 0.0009));
+    const loop = new THREE.TorusGeometry(0.0007, 0.00025, 6, 16);
+    loop.deleteAttribute("uv");
+    solid.add(place(loop, eye, frame(fr.z, fr.x)), () => ({ b0: head, color: OC.gold, mat: MAT.gold }));
+    // anchor: a pin on the chest, or on the front of the scarf
+    let anchor;
+    if (wearing.neck === "scarf") {
+      const k = scarfRing().at(-0.42);
+      anchor = k.p.clone().addScaledVector(k.n, SCARF.r1 * 0.75).add(v3(0, SCARF.r2 * 0.55, 0));
+    } else {
+      const o = v3(-0.0085, 0.0312, 0);
+      anchor = o.clone().add(v3(0, 0, surfaceAlong(o, v3(0, 0, 1), -0.0012, false)));
+    }
+    const pin = ellipsoid(0.0011, 0.0011, 0.0008, 12, 8);
+    pin.translate(anchor.x, anchor.y, anchor.z);
+    solid.add(pin, () => ({ b0: collar, color: OC.gold, mat: MAT.gold }));
+    // chain: sagging curve, pushed out of the fur (cheek, chest)
+    const start = eye.clone().addScaledVector(fr.y, -0.0006);
+    const pts = [];
+    for (let i = 0; i <= 24; i += 1) {
+      const t = i / 24;
+      const p = start.clone().lerp(anchor, t);
+      p.y -= 0.0042 * Math.sin(Math.PI * t);
+      p.x -= 0.0028 * Math.sin(Math.PI * t);
+      for (let k = 0; k < 40 && insideBunny(p, 0.0009, true); k += 1) p.z += 0.0003;
+      pts.push(p);
+    }
+    const cc = new THREE.CatmullRomCurve3(pts);
+    const len = cc.getLength();
+    const chain = sweep(120, 6, (t) => {
+      const p = cc.getPoint(t), tan = cc.getTangent(t);
+      const nn = v3(0, 0, 1).addScaledVector(tan, -tan.z).normalize();
+      const bead = 0.00023 + 0.00013 * Math.abs(Math.sin((t * len) / 0.0009 * Math.PI));
+      return { p, n: nn, b: tan.clone().cross(nn).normalize(), r1: bead, r2: bead };
+    });
+    const tv = chain.userData.tv;
+    solid.add(chain, (p, nrm, i) => ({ b0: head, b1: collar, w: sstep(0.3, 0.8, tv[i]), color: OC.gold, mat: MAT.gold }));
+  },
+
+  scarf({ B, solid }) {
+    // Knitted scarf: a rolled striped band around the neck, a knot on the left
+    // side and two fringed tails that swing on their own bone.
+    const collar = B("collar"), tailBone = B("scarfTail");
+    const ring = scarfRing();
+    const rows = ring.length / 0.00115;
+    const band = sweep(SCARF.segs, 14, (t) => {
+      const th = t * Math.PI * 2, k = ring.at(th);
+      const soft = 1 + 0.07 * Math.sin(th * 7 + 0.5) + 0.04 * Math.sin(th * 13);
+      return { p: k.p.clone().add(v3(0, 0.0004 * Math.sin(th * 5), 0)), n: k.n, b: UP, r1: SCARF.r1 * soft, r2: SCARF.r2 * (2 - soft), e: 0.75 };
+    }, { closed: true });
+    const tv = band.userData.tv, av = band.userData.av;
+    solid.add(band, (p, n, i) => ({ b0: collar, color: OC.scarf, mat: MAT.knit, uv: [tv[i] * Math.round(rows / 7) * 7, av[i] * 8] }));
+    const K = scarfKnot();
+    const kn = ring.at(SCARF.knotTh).n;
+    const knot = sphereGeometry(20, 14, (x, y, z) => v3(x * 0.0036, y * 0.0042, z * 0.0034));
+    const kf = frame(UP, kn);
+    place(knot, K, kf);
+    const ku = knot.userData.unit;
+    solid.add(knot, (p, n, i) => ({ b0: collar, color: OC.scarf, mat: MAT.knit, uv: [Math.atan2(ku[i * 3], ku[i * 3 + 2]) * 2.2 + 3.5, ku[i * 3 + 1] * 3] }));
+    // tails hang down the side, following the body
+    for (const [dth, len, wide] of [[-0.12, 0.024, 0.0031], [0.3, 0.019, 0.0028]]) {
+      const pts = [];
+      for (let i = 0; i <= 10; i += 1) {
+        const t = i / 10;
+        const th = SCARF.knotTh + dth * t + 0.08 * t * t;
+        const y = K.y - 0.002 - len * t;
+        const d = v3(Math.sin(th), 0, Math.cos(th));
+        const r = surfaceAlong(v3(0, y, -0.002), d, 0.0012, false);
+        pts.push(v3(0, y, -0.002).addScaledVector(d, Math.max(r + 0.0012, 0.0015 * (1 - t))));
+      }
+      pts[0].lerp(K, 0.85);
+      const curve = new THREE.CatmullRomCurve3(pts);
+      const strip = sweep(30, 10, (t) => {
+        const p = curve.getPoint(t), tan = curve.getTangent(t);
+        const out = v3(p.x, 0, p.z + 0.002).normalize();
+        const n = out.addScaledVector(tan, -out.dot(tan)).normalize();
+        return { p, n, b: tan.clone().cross(n).normalize(), r1: 0.0009, r2: wide * (1 - 0.1 * t), e: 0.55 };
+      });
+      const stv = strip.userData.tv, sav = strip.userData.av;
+      solid.add(strip, (p, n, i) => ({ b0: collar, b1: tailBone, w: sstep(0, 0.35, stv[i]), color: OC.scarf, mat: MAT.knit, uv: [stv[i] * Math.round(len / 0.00115) + 1.5, sav[i] * 5] }));
+      // fringe
+      const end = curve.getPoint(1), tan = curve.getTangent(1);
+      const side = tan.clone().cross(v3(end.x, 0, end.z + 0.002).normalize()).normalize();
+      for (let k = 0; k < 4; k += 1) {
+        const o = end.clone().addScaledVector(side, (k / 3 - 0.5) * wide * 1.5);
+        const fr = sweep(4, 5, (t) => ({ p: o.clone().addScaledVector(tan, t * 0.0026), n: side, b: side.clone().cross(tan).normalize(), r1: 0.00042 * (1 - 0.4 * t), r2: 0.00042 * (1 - 0.4 * t) }));
+        solid.add(fr, () => ({ b0: tailBone, color: OC.scarfStripe, mat: [0, 0, 0.9, 0] }));
+      }
+    }
+  },
+
+  wings({ B, glass }) {
+    // Fairy wings: two pairs of rounded, softly cupped lobes on the upper back,
+    // translucent with an opaque rim and radial veins; they flutter on their bones.
+    for (const s of [1, -1]) {
+      const bone = B(s > 0 ? "wingL" : "wingR");
+      const root = WING_ROOT(s);
+      const beta = 0.38;
+      const out = v3(s * Math.cos(beta), 0, -Math.sin(beta));
+      const nrm = out.clone().cross(UP).multiplyScalar(s).normalize(); // points backward-ish
+      for (const [phi, L, span, color] of [[0.62, 0.041, 1.3, OC.wingA], [-0.36, 0.029, 1.1, OC.wingB]]) {
+        const A = 40, P = 7;
+        const pos = [], mat = [], index = [];
+        for (let i = 0; i <= A; i += 1) {
+          const th = lerp(-span / 2, span / 2, i / A);
+          const r = L * Math.pow(Math.cos((th / span) * Math.PI), 0.42) * (1 + 0.1 * Math.sin(th * 2.2 + phi));
+          for (let j = 0; j <= P; j += 1) {
+            const rho = j / P;
+            const a = phi + th;
+            const d = out.clone().multiplyScalar(Math.cos(a) * r * rho).addScaledVector(UP, Math.sin(a) * r * rho);
+            const cup = 0.0045 * Math.pow(rho, 1.6) * (0.6 + 0.4 * Math.cos((th / span) * Math.PI));
+            const p = root.clone().add(d).addScaledVector(nrm, cup);
+            pos.push(p.x, p.y, p.z);
+            mat.push(rho, th / span * Math.PI * 2 * 3.5);
+          }
+        }
+        for (let i = 0; i < A; i += 1) for (let j = 0; j < P; j += 1) {
+          const a = i * (P + 1) + j, b = a + P + 1;
+          index.push(a, b, a + 1, b, b + 1, a + 1);
+        }
+        const g = new THREE.BufferGeometry();
+        g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+        g.setIndex(index);
+        g.computeVertexNormals();
+        glass.add(g, (p, n, i) => ({ b0: bone, color, mat: [0.3, 1, mat[i * 2], mat[i * 2 + 1]] }));
+      }
+    }
+  },
+
+  cape({ B, solid, wearing }) {
+    // Little star cape: wraps the shoulders and back (behind the arms), flares
+    // to a scalloped hem above the tail; indigo with gold stars, pink lining,
+    // gold piping and a star clasp on a cord under the chin.
+    const collar = B("collar"), hem = B("capeHem");
+    const TH0 = 1.2, TH1 = Math.PI * 2 - 1.2;
+    const NA = 44, NV = 12;
+    const yTop = (th) => 0.0428 - 0.0016 * Math.cos(th);
+    // hem: lowest at the back (just above the tail), rising toward the front
+    // corners, with five soft scallops
+    const yHem = (th) => 0.0214 + 0.0062 * sstep(0.7, 1.95, Math.abs(th - Math.PI)) - 0.0012 * (0.5 - 0.5 * Math.cos(((th - TH0) / (TH1 - TH0)) * Math.PI * 2 * 5));
+    const grid = [];
+    for (let i = 0; i <= NA; i += 1) {
+      const th = lerp(TH0, TH1, i / NA);
+      const d = v3(Math.sin(th), 0, Math.cos(th));
+      const col = [];
+      const top = surfaceAlong(v3(0, yTop(th), -0.002), d, 0.0004) + 0.0006;
+      for (let j = 0; j <= NV; j += 1) {
+        const v = j / NV;
+        const y = lerp(yTop(th), yHem(th), v);
+        const body = surfaceAlong(v3(0, y, -0.002), d, 0.0007) + 0.0006;
+        const flare = top + (0.0025 + 0.0075 * Math.sin(th / 2) ** 2) * Math.pow(v, 1.25);
+        col.push(v3(0, y, -0.002).addScaledVector(d, Math.max(body, flare)));
+      }
+      grid.push(col);
+    }
+    // smooth across θ for a soft drape
+    for (let pass = 0; pass < 2; pass += 1) {
+      for (let j = 0; j <= NV; j += 1) {
+        const row = grid.map((c) => c[j].clone());
+        for (let i = 1; i < NA; i += 1) grid[i][j].copy(row[i - 1]).add(row[i].clone().multiplyScalar(2)).add(row[i + 1]).multiplyScalar(0.25);
+      }
+    }
+    const surface = (inner) => {
+      const pos = [], index = [], uv = [], vv = [];
+      for (let i = 0; i <= NA; i += 1) for (let j = 0; j <= NV; j += 1) {
+        const p = grid[i][j];
+        const q = inner ? p.clone().sub(v3(0, p.y, -0.002)).setY(0).normalize().multiplyScalar(-0.00055).add(p) : p;
+        pos.push(q.x, q.y, q.z);
+        const th = lerp(TH0, TH1, i / NA);
+        uv.push(th * 0.03 / 0.0052, p.y / 0.0052);
+        vv.push(j / NV);
+      }
+      for (let i = 0; i < NA; i += 1) for (let j = 0; j < NV; j += 1) {
+        const a = i * (NV + 1) + j, b = a + NV + 1;
+        if (inner) index.push(a, a + 1, b, b, a + 1, b + 1); else index.push(a, b, a + 1, b, b + 1, a + 1);
+      }
+      const g = new THREE.BufferGeometry();
+      g.setAttribute("position", new THREE.Float32BufferAttribute(pos, 3));
+      g.setIndex(index);
+      g.computeVertexNormals();
+      // outward check
+      const k = Math.floor(NA / 2) * (NV + 1) + Math.floor(NV / 2);
+      const P = v3().fromBufferAttribute(g.attributes.position, k), N = v3().fromBufferAttribute(g.attributes.normal, k);
+      const outward = v3(P.x, 0, P.z + 0.002).normalize();
+      if ((N.dot(outward) < 0) !== inner) {
+        const idx = g.index.array;
+        for (let t = 0; t < idx.length; t += 3) { const tmp = idx[t + 1]; idx[t + 1] = idx[t + 2]; idx[t + 2] = tmp; }
+        g.computeVertexNormals();
+      }
+      return { g, uv, vv };
+    };
+    const skinAt = (v) => ({ b0: collar, b1: hem, w: sstep(0.15, 1, v) });
+    const outer = surface(false);
+    solid.add(outer.g, (p, n, i) => ({ ...skinAt(outer.vv[i]), color: OC.cape, mat: MAT.cape, uv: [outer.uv[i * 2], outer.uv[i * 2 + 1]] }));
+    const inner = surface(true);
+    solid.add(inner.g, (p, n, i) => ({ ...skinAt(inner.vv[i]), color: OC.capeLining, mat: MAT.lining }));
+    // piping around the whole edge (hides the seam between outer and lining)
+    const edge = [];
+    for (let i = 0; i <= NA; i += 1) edge.push([grid[i][0], 0]);
+    for (let j = 1; j <= NV; j += 1) edge.push([grid[NA][j], j / NV]);
+    for (let i = NA - 1; i >= 0; i -= 1) edge.push([grid[i][NV], 1]);
+    for (let j = NV - 1; j >= 1; j -= 1) edge.push([grid[0][j], j / NV]);
+    const ec = new THREE.CatmullRomCurve3(edge.map(([p]) => p), true, "centripetal");
+    const ev = edge.map(([, v]) => v);
+    const piping = sweep(edge.length * 2, 5, (t) => {
+      const p = ec.getPoint(t), tan = ec.getTangent(t);
+      const out = v3(p.x, 0, p.z + 0.002).normalize();
+      const n = out.addScaledVector(tan, -out.dot(tan)).normalize();
+      return { p, n, b: tan.clone().cross(n).normalize(), r1: 0.00062, r2: 0.00062 };
+    }, { closed: true });
+    const ptv = piping.userData.tv;
+    solid.add(piping, (p, n, i) => {
+      const k = ptv[i] * edge.length;
+      const v = lerp(ev[Math.floor(k) % edge.length], ev[Math.ceil(k) % edge.length], k % 1);
+      return { ...skinAt(v), color: OC.gold, mat: MAT.gold };
+    });
+    // cord under the chin from corner to corner, with a star clasp (not under a scarf)
+    if (wearing.neck === "scarf") return;
+    const cA = grid[0][0], cB = grid[NA][0];
+    const pts = [];
+    for (let i = 0; i <= 16; i += 1) {
+      const t = i / 16;
+      const th = lerp(TH0, -TH0, t);
+      const y = lerp(yTop(TH0), 0.0322, Math.sin(Math.PI * t) ** 0.7) - 0.0004;
+      const d = v3(Math.sin(th), 0, Math.cos(th));
+      const r = surfaceAlong(v3(0, y, -0.002), d, 0.0009);
+      pts.push(v3(0, y, -0.002).addScaledVector(d, r + 0.0005));
+    }
+    pts[0].copy(cA); pts[16].copy(cB);
+    const cord = new THREE.CatmullRomCurve3(pts);
+    const cordG = sweep(40, 6, (t) => {
+      const p = cord.getPoint(t), tan = cord.getTangent(t);
+      const n = v3(p.x, 0, p.z + 0.002).normalize();
+      n.addScaledVector(tan, -n.dot(tan)).normalize();
+      return { p, n, b: tan.clone().cross(n).normalize(), r1: 0.00045, r2: 0.00045 };
+    });
+    solid.add(cordG, () => ({ b0: collar, color: OC.gold, mat: MAT.gold }));
+    const clasp = starGeometry(0.0026, 0.0011, 0.0009);
+    const cp = cord.getPoint(0.5);
+    place(clasp, cp.clone().add(v3(0, 0, 0.0006)), frame(v3(0, 1, 0), v3(0, -0.15, 1)));
+    solid.add(clasp, () => ({ b0: collar, color: OC.gold, mat: MAT.gold }));
+  },
+};
+
+// Wing roots on the upper back and the scarf knot (rig space), shared with the
+// rig's bones (pivots). SCARF_KNOT ≈ scarfKnot() (kept constant so building the
+// rig never needs the ring).
+const WING_ROOT = (s) => v3(s * 0.0042, 0.0362, -0.0232);
+const SCARF_KNOT = v3(0.0263, 0.034, -0.006);
+
+// Five-point puffy star (clasp).
+function starGeometry(r, rIn, depth) {
+  const shape = new THREE.Shape();
+  for (let i = 0; i <= 10; i += 1) {
+    const a = (i / 10) * Math.PI * 2 + Math.PI / 2;
+    const rr = i % 2 === 0 ? r : rIn;
+    if (i === 0) shape.moveTo(Math.cos(a) * rr, Math.sin(a) * rr); else shape.lineTo(Math.cos(a) * rr, Math.sin(a) * rr);
+  }
+  const g = new THREE.ExtrudeGeometry(shape, { depth: depth * 0.4, bevelEnabled: true, bevelThickness: depth * 0.3, bevelSize: r * 0.12, bevelSegments: 2 });
+  g.deleteAttribute("uv");
+  g.center();
+  g.computeVertexNormals();
+  return g;
+}
+
+function buildOutfitItem(id, rig, wearing) {
+  const solid = new OutfitBuilder(), glass = new OutfitBuilder();
+  const B = (name) => rig.bones[name].userData.index;
+  ITEMS[id]({ B, rig, solid, glass, wearing });
+  return { solid: solid.chunk(), glass: glass.chunk() };
+}
+
+// Small spring (pitch, roll) for swinging pieces (scarf tails, cape hem).
+class Swing {
+  constructor(hz, damping) { this.w = 2 * Math.PI * hz; this.z = damping; this.a = [0, 0]; this.v = [0, 0]; }
+  step(dt, target, force) {
+    const n = Math.max(1, Math.ceil(dt / (1 / 240))), h = dt / n;
+    for (let k = 0; k < n; k += 1) for (let j = 0; j < 2; j += 1) {
+      const acc = this.w * this.w * (target[j] - this.a[j]) - 2 * this.z * this.w * this.v[j] + force[j];
+      this.v[j] += acc * h; this.a[j] += this.v[j] * h;
+    }
+  }
+  reset() { this.a.fill(0); this.v.fill(0); }
 }
 
 // ---------------------------------------------------------------------------
@@ -611,6 +1417,19 @@ function buildTimeline(outcome, bites, mood) {
   let t = 0;
   const add = (name, dur, extra = {}) => { const seg = { name, t0: t, t1: t + dur, dur, ...extra }; segs.push(seg); t += dur; return seg; };
   add("arrive", T_ARRIVE);
+  if (outcome === "kick") {
+    // No grab / lift / carry: the jelly stays on the tray until it is kicked.
+    const T = { approach: add("approach", T_APPROACH).t0 };
+    T.sniff = add("sniff", T_SNIFF).t0;
+    T.shake = add("shake", T_SHAKE).t0;
+    T.turn = add("turn", T_TURN).t0;
+    T.kick = add("kick", T_KICK).t0 + KICK_CONTACT;
+    T.react = add("hmph", T_HMPH).t0;
+    const leave = add("leave", T_LEAVE);
+    T.leave = leave.t0;
+    T.done = leave.t1;
+    return { segs, T };
+  }
   const reach = add("grab", T_REACH);
   add("lift", T_LIFT);
   const T = { grab: reach.t1 };
@@ -642,9 +1461,14 @@ function buildTimeline(outcome, bites, mood) {
  * Plush bunny that comes to taste the jelly.
  *
  *   const rabbit = new Rabbit(tray, { quality: "high" });   // hidden until play()
+ *   rabbit.setOutfit({ head: "ribbon", face: "glasses", neck: "scarf", back: "wings" });
+ *   //   persists across plays (also before the first); null / undefined / unknown id =
+ *   //   empty slot. Ids: OUTFIT_SLOTS (head ribbon|crown|flowerband · face glasses ·
+ *   //   neck scarf · back wings|cape). rabbit.outfit → a copy of the current choice.
  *   rabbit.play({ position: [x, 0, z], faceTo: [x, y, z], jelly: { center, width, height },
- *                 outcome: "eat" | "refuse" | "spit", bites: 4,
+ *                 outcome: "eat" | "spit" | "kick" | "refuse", bites: 4,
  *                 mood: "happy" | "ok" | "sad" | "special", jellyColor: "#rrggbb",
+ *                 picky: false,   // true: a monocle for this visit (replaces the glasses)
  *                 onEvent(type, data) {} });
  *   // every frame (jelly = the app's current jelly, or null):
  *   const { hold, paws, mouth, phase } = rabbit.update(dt, { center, bounds });
@@ -664,6 +1488,15 @@ function buildTimeline(outcome, bites, mood) {
  *           · refuse 4.05 {mood} · leave 5.25 · done 6.30
  * "spit":   … lift · bite 2.61 · chew 2.75 · putDown 3.50 {to} · release 4.10
  *           · spit 4.35 {from, velocity} · react 4.95 {mood:"grumpy"} · leave 6.05 · done 7.10
+ * "kick" (no grab / lift / release / bite / chew; `hold` and `paws` stay null):
+ *           arrive 0 · hop 0.38/0.88 · approach 1.20 {to} · hop 1.60/2.08
+ *           · sniff 2.20 {duration} · shake 3.40 {duration, swings} · turn 4.30 · hop 4.68
+ *           · kick 5.00 {dir:[dx,dz] (unit, tray space, bunny → jelly), strength 0.8,
+ *             point:[x,y,z] (the foot at contact)} · react 5.30 {mood:"grumpy"}
+ *           · leave 6.30 · hop ×2 · done 7.35
+ *   It hops right up to the jelly (perching on the tray rim where it stands across it)
+ *   so that its extended hind foot reaches the jelly's near side.
+ * "hop" events are cosmetic; skip() does not replay them.
  */
 export class Rabbit {
   constructor(parent, { quality = "high" } = {}) {
@@ -713,13 +1546,31 @@ export class Rabbit {
     parent.add(this.chunk);
     this.chunkSim = null;
 
+    // Outfit: one solid + one glass (lenses, wings) mesh; their geometry is the
+    // merge of the worn pieces, rebuilt only when the worn set changes.
+    this.outfitMaterials = createOutfitMaterials(this.fur, { star: OC.star, dot: OC.dot, stripe: OC.scarfStripe });
+    this.outfitMeshes = [this.outfitMaterials.solid, this.outfitMaterials.glass].map((material, i) => {
+      const mesh = new THREE.Mesh(new THREE.BufferGeometry(), material);
+      mesh.name = i ? "RabbitOutfitGlass" : "RabbitOutfit";
+      mesh.frustumCulled = false;
+      mesh.visible = false;
+      mesh.renderOrder = i ? 3 : 0;
+      this.root.add(mesh);
+      return mesh;
+    });
+    this._outfit = { head: null, face: null, neck: null, back: null };
+    this._outfitParts = new Map();
+    this._outfitKey = "";
+    this.swings = { scarf: new Swing(2.4, 0.22), cape: new Swing(1.9, 0.28) };
+    this._wingPhase = 0;
+
     this.ears = [new EarSpring(), new EarSpring()];
     this.state = null;
     this.quality = "high";
     this.setQuality(quality);
     this._m = new THREE.Matrix4(); this._n = new THREE.Matrix3(); this._q = new THREE.Quaternion();
     this._rootInv = new THREE.Matrix4();
-    this._sunA = v3(); this._sunB = v3(); this._e = new THREE.Euler();
+    this._sunA = v3(); this._sunB = v3(); this._e = new THREE.Euler(); this._eYXZ = new THREE.Euler(0, 0, 0, "YXZ");
   }
 
   setQuality(q) {
@@ -734,19 +1585,71 @@ export class Rabbit {
 
   get busy() { return this.state !== null; }
 
+  /** Current outfit (copy): { head, face, neck, back }, each an id or null. */
+  get outfit() { return { ...this._outfit }; }
+
+  /** Dress up (persists across plays). Unknown ids / null / undefined = empty slot. */
+  setOutfit({ head = null, face = null, neck = null, back = null } = {}) {
+    const pick = (slot, id) => (OUTFIT_SLOTS[slot].includes(id) ? id : null);
+    this._outfit = { head: pick("head", head), face: pick("face", face), neck: pick("neck", neck), back: pick("back", back) };
+    this._syncOutfit();
+  }
+
+  // Worn pieces right now: the outfit, with the monocle replacing the face slot on a picky visit.
+  _wornItems() {
+    const o = this._outfit;
+    return [o.head, this.state?.picky ? "monocle" : o.face, o.neck, o.back].filter(Boolean);
+  }
+
+  // Pieces that adapt to a worn scarf: the monocle's chain hangs to it, the
+  // cape leaves out its cord and clasp (the scarf covers the neck).
+  _outfitVariant(id) {
+    return (id === "monocle" || id === "cape") && this._outfit.neck === "scarf" ? `${id}/scarf` : id;
+  }
+
+  _outfitPart(id) {
+    const key = this._outfitVariant(id);
+    let part = this._outfitParts.get(key);
+    if (!part) {
+      part = buildOutfitItem(id, this.rig, { ...this._outfit });
+      this._outfitParts.set(key, part);
+    }
+    return part;
+  }
+
+  _syncOutfit(ids = this._wornItems()) {
+    const key = ids.map((id) => this._outfitVariant(id)).join("+");
+    if (key === this._outfitKey) return;
+    this._outfitKey = key;
+    const parts = ids.map((id) => this._outfitPart(id));
+    ["solid", "glass"].forEach((kind, i) => {
+      const mesh = this.outfitMeshes[i];
+      const chunks = parts.map((p) => p[kind]).filter(Boolean);
+      mesh.geometry.dispose();
+      mesh.geometry = chunks.length ? mergeChunks(chunks) : new THREE.BufferGeometry();
+      mesh.visible = chunks.length > 0;
+    });
+  }
+
   /** Optional: compile every pipeline the bunny can use ahead of the first play() (avoids a hitch). */
   async precompile(renderer, camera, scene) {
-    const parts = [this.root, this.hearts, this.sparkles, this.chunk];
+    // Outfit pipelines (solid + glass) do not depend on which pieces are worn:
+    // compile them with a small representative piece that has both parts.
+    this._syncOutfit(["glasses"]);
+    const parts = [this.root, this.hearts, this.sparkles, this.chunk, ...this.outfitMeshes];
     const was = parts.map((o) => o.visible);
     for (const o of parts) o.visible = true;
     try {
       await renderer.compileAsync(this.root, camera, scene);
       await renderer.compileAsync(this.chunk, camera, scene);
-    } finally { parts.forEach((o, i) => { o.visible = was[i]; }); }
+    } finally {
+      parts.forEach((o, i) => { o.visible = was[i]; });
+      this._syncOutfit();
+    }
   }
 
   // -------------------------------------------------------------------------
-  play({ position = [0, 0, -0.111], faceTo = [0, 0.02, 0], jelly = null, bites = 4, mood = "happy", outcome = "eat", jellyColor = "#ff8fb1", onEvent = null } = {}) {
+  play({ position = [0, 0, -0.111], faceTo = [0, 0.02, 0], jelly = null, bites = 4, mood = "happy", outcome = "eat", jellyColor = "#ff8fb1", picky = false, onEvent = null } = {}) {
     if (this.state) this._finish();
     const P = v3(position[0], 0, position[2]);
     const face = v3(faceTo[0], 0, faceTo[2]);
@@ -760,7 +1663,7 @@ export class Rabbit {
     outward.normalize();
     const side = v3(outward.z, 0, -outward.x);
     const j = jelly || { center: [0, 0.018, 0], width: 0.072, height: 0.036 };
-    outcome = outcome === "refuse" || outcome === "spit" ? outcome : "eat";
+    outcome = outcome === "refuse" || outcome === "spit" || outcome === "kick" ? outcome : "eat";
     mood = mood === "ok" || mood === "sad" || mood === "special" ? mood : "happy";
     bites = outcome === "eat" ? Math.max(1, Math.min(8, Math.round(bites))) : 1;
     try { this.blob.color.value.set(jellyColor); } catch { this.blob.color.value.set("#ff8fb1"); }
@@ -784,9 +1687,12 @@ export class Rabbit {
       twitch: { next: 0.6 },
       prevHead: null, prevVel: v3(), accel: v3(),
       lastPose: null, pawsTray: null,
+      picky: Boolean(picky), kick: null, leaveFrom: null, leaveYaw: null,
     };
     this._buildEvents();
+    this._syncOutfit();
     for (const e of this.ears) e.reset();
+    this.swings.scarf.reset(); this.swings.cape.reset();
     this.root.visible = true;
     this.hearts.visible = false;
     this.sparkles.visible = false;
@@ -796,7 +1702,12 @@ export class Rabbit {
   skip() {
     const s = this.state;
     if (!s || s.t >= s.T.leave) return;
-    this._ensureGrab();
+    if (s.T.grab !== undefined) this._ensureGrab();
+    if (s.outcome === "kick") {
+      this._kickPlan();
+      // not at its kicking spot yet: leave from where it is
+      if (s.t < s.T.sniff && s.lastPose) this._setExit(s.lastPose.pos.clone().setY(0), s.lastPose.yaw);
+    }
     // Emit everything that would have happened before leaving, in order.
     for (const e of s.events) {
       if (e.t < s.T.leave && !s.emitted.has(e.id)) {
@@ -820,7 +1731,8 @@ export class Rabbit {
     this.chunk.removeFromParent();
     this.geometry.dispose();
     this.fur.material.dispose();
-    for (const m of [this.shadow, this.hearts, this.sparkles, this.chunk]) { m.geometry.dispose(); m.material.dispose(); }
+    for (const m of [this.shadow, this.hearts, this.sparkles, this.chunk, ...this.outfitMeshes]) { m.geometry.dispose(); m.material.dispose(); }
+    this._outfitParts.clear();
   }
 
   // -------------------------------------------------------------------------
@@ -840,8 +1752,10 @@ export class Rabbit {
     ev("arrive", 0, "arrive", () => ({ position: toArr(s.seat) }));
     ev("hop-a0", HOP.crouch + HOP.air, "hop", () => ({ phase: "arrive", index: 0 }));
     ev("hop-a1", 0.5 + HOP.crouch + HOP.air, "hop", () => ({ phase: "arrive", index: 1 }));
-    ev("grab", T.grab, "grab", () => ({ paws: this._jellySides(T.grab).map(toArr), hold: toArr(s.liftFrom) }));
-    ev("lift", T.grab + 1e-4, "lift", () => ({ hold: toArr(s.holdPoint) }));
+    if (T.grab !== undefined) {
+      ev("grab", T.grab, "grab", () => ({ paws: this._jellySides(T.grab).map(toArr), hold: toArr(s.liftFrom) }));
+      ev("lift", T.grab + 1e-4, "lift", () => ({ hold: toArr(s.holdPoint) }));
+    }
     for (const seg of s.segs) {
       if (seg.name === "bite") {
         const i = seg.index;
@@ -858,6 +1772,21 @@ export class Rabbit {
       } else if (seg.name === "spit") {
         ev("spit", seg.t0 + SPIT_AT, "spit", () => this._launchChunk());
       } else if (seg.name === "grumpy") {
+        ev("react", seg.t0, "react", () => ({ mood: "grumpy" }));
+      } else if (seg.name === "approach") {
+        ev("approach", seg.t0, "approach", () => ({ to: toArr(this._kickPlan().spot) }));
+        ev("hop-p0", seg.t0 + 0.02 + HOP.crouch + HOP.air, "hop", () => ({ phase: "approach", index: 0 }));
+        ev("hop-p1", seg.t0 + 0.5 + HOP.crouch + HOP.air, "hop", () => ({ phase: "approach", index: 1 }));
+      } else if (seg.name === "sniff") {
+        ev("sniff", seg.t0, "sniff", () => ({ duration: seg.dur }));
+      } else if (seg.name === "shake") {
+        ev("shake", seg.t0, "shake", () => ({ duration: seg.dur, swings: 4 }));
+      } else if (seg.name === "turn") {
+        ev("turn", seg.t0, "turn", () => ({}));
+        ev("hop-t", seg.t0 + HOP.crouch + HOP.air, "hop", () => ({ phase: "turn", index: 0 }));
+      } else if (seg.name === "kick") {
+        ev("kick", seg.t0 + KICK_CONTACT, "kick", (skipped) => this._kickEvent(skipped));
+      } else if (seg.name === "hmph") {
         ev("react", seg.t0, "react", () => ({ mood: "grumpy" }));
       } else if (seg.name === "finish") {
         ev("finish", seg.t0, "finish", () => ({}));
@@ -890,6 +1819,114 @@ export class Rabbit {
     const hold = this._holdAt(t);
     const center = hold || (j && j.center ? v3(...j.center) : (s.liftFrom || s.jelly0.center).clone());
     return { center, hw: (s.jelly0.width / 2) * k, hd: (s.jelly0.width / 2) * k, hh: (s.jelly0.height / 2) * k };
+  }
+
+  // Kick plan (computed once, when the approach starts or on skip): where the
+  // bunny stands to sniff and kick, which way it turns, which foot kicks, how it
+  // stands for its 흥 and where it leaves to. Frames: u = from the jelly toward the
+  // bunny; the spot is u·(jelly half extent along u + KICK_REACH) from the jelly.
+  _kickPlan() {
+    const s = this.state;
+    if (s.kick) return s.kick;
+    const j = s.jellyNow;
+    const b = j && j.bounds ? j.bounds : null;
+    const J = b ? v3((b[0] + b[3]) / 2, 0, (b[2] + b[5]) / 2) : j && j.center ? v3(j.center[0], 0, j.center[2]) : s.jelly0.center.clone().setY(0);
+    const top = b ? b[4] : (j && j.center ? j.center[1] : s.jelly0.center.y) + s.jelly0.height / 2;
+    const ext = (d) => (b ? Math.hypot(d.x * (b[3] - b[0]) / 2, d.z * (b[5] - b[2]) / 2) : s.jelly0.width / 2);
+    // Swing the approach a little to the side (seen from where it faced on
+    // arrival = the viewer), so sniffing and kicking read in three-quarter view.
+    const u0 = s.seat.clone().sub(J).setY(0);
+    if (u0.lengthSq() < 1e-8) u0.copy(s.F).negate();
+    u0.normalize();
+    const cands = [KICK_SWING, -KICK_SWING].map((a) => u0.clone().applyAxisAngle(UP, a));
+    const u = Math.abs(cands[0].dot(s.X)) >= Math.abs(cands[1].dot(s.X)) ? cands[0] : cands[1];
+    const spot = J.clone().addScaledVector(u, ext(u) + KICK_REACH);
+    const sniffSpot = J.clone().addScaledVector(u, ext(u) + KICK_REACH - 0.011); // a step closer to sniff
+    const faceYaw = Math.atan2(-u.x, -u.z);
+    // Turn its back-side to the jelly: the jelly ends up behind it, KICK_SIDE
+    // toward the kicking foot, and that foot's side faces the viewer (profile kick).
+    const options = [1, -1].map((foot) => {
+      const yaw = Math.atan2(u.x, u.z) + foot * KICK_SIDE; // jelly behind it, toward the foot's side
+      const left = v3(Math.cos(yaw), 0, -Math.sin(yaw));
+      return { foot, yaw, show: foot * left.dot(s.F) };
+    });
+    const { foot, yaw: backYaw } = options[0].show >= options[1].show ? options[0] : options[1];
+    let turn = (backYaw - faceYaw) % (Math.PI * 2);
+    if (turn > Math.PI) turn -= Math.PI * 2;
+    if (turn < -Math.PI) turn += Math.PI * 2;
+    // 흥: faces the viewer again (a little away from the jelly), nose turned away
+    const hf = s.F.clone().addScaledVector(u, 0.45).normalize();
+    const hmphYaw = Math.atan2(hf.x, hf.z);
+    let hmphTurn = (hmphYaw - backYaw) % (Math.PI * 2);
+    if (hmphTurn > Math.PI) hmphTurn -= Math.PI * 2;
+    if (hmphTurn < -Math.PI) hmphTurn += Math.PI * 2;
+    const jellyLeft = J.clone().sub(spot).dot(v3(hf.z, 0, -hf.x)) >= 0 ? 1 : -1;
+    s.kick = {
+      J, top, u, spot, faceYaw, backYaw, turn, foot, hmphYaw, hmphTurn,
+      hmphHead: -jellyLeft * 0.5,
+      mid: s.seat.clone().lerp(sniffSpot, 0.5), sniffSpot,
+      sniffAt: J.clone().addScaledVector(u, ext(u) * 0.72).setY(top + 0.007),
+      dir: u.clone().negate(),
+    };
+    this._setExit(spot, hmphYaw);
+    return s.kick;
+  }
+
+  // Leave path for "kick": hop away from the tray centre (and from the jelly).
+  _setExit(from, yaw) {
+    const s = this.state;
+    const out = from.clone().setY(0);
+    if (out.lengthSq() < 1e-8) out.copy(s.outward);
+    out.normalize();
+    const side = v3(out.z, 0, -out.x);
+    const k = s.kick && side.dot(s.kick.u) < 0 ? -1 : 1;
+    s.leaveFrom = from.clone();
+    s.leaveYaw = yaw;
+    s.exitA = from.clone().addScaledVector(out, 0.036).addScaledVector(side, 0.014 * k);
+    s.exitB = from.clone().addScaledVector(out, 0.074).addScaledVector(side, 0.032 * k);
+  }
+
+  _jellyCenterNow() {
+    const s = this.state, j = s.jellyNow;
+    if (j && j.bounds) { const b = j.bounds; return v3((b[0] + b[3]) / 2, (b[1] + b[4]) / 2, (b[2] + b[5]) / 2); }
+    if (j && j.center) return v3(...j.center);
+    return s.jelly0.center.clone();
+  }
+
+  // "kick" event data at contact: direction bunny → jelly (tray xz, unit), the foot.
+  _kickEvent(skipped) {
+    const s = this.state, K = this._kickPlan();
+    const jc = this._jellyCenterNow();
+    const d = jc.clone().sub(K.spot).setY(0);
+    if (d.lengthSq() < 1e-8) d.copy(K.dir);
+    d.normalize();
+    let point;
+    if (skipped) {
+      point = jc.clone().addScaledVector(d, -this._extentAlong(d)).setY(0.012);
+    } else {
+      const foot = K.foot > 0 ? this.rig.bones.footL : this.rig.bones.footR;
+      point = v3(0, -0.004, -0.002).applyMatrix4(foot.matrixWorld).applyMatrix4(this.root.matrix);
+    }
+    return { dir: [d.x, d.z], strength: KICK_STRENGTH, point: toArr(point) };
+  }
+
+  _extentAlong(d) {
+    const s = this.state, j = s.jellyNow;
+    if (j && j.bounds) { const b = j.bounds; return Math.hypot(d.x * (b[3] - b[0]) / 2, d.z * (b[5] - b[2]) / 2); }
+    return s.jelly0.width / 2;
+  }
+
+  // Standing across the tray rim: lift the body onto it, feet stay where they
+  // are (on the plate, on the rim or on the bench).
+  _perch(pose) {
+    const c = Math.cos(pose.yaw + pose.yawExtra), sn = Math.sin(pose.yaw + pose.yawExtra);
+    const over = (x, z, inner, outer) => {
+      const tx = pose.pos.x + x * c + z * sn, tz = pose.pos.z - x * sn + z * c;
+      return RIM_TOP * (1 - sstep(inner, outer, Math.abs(Math.hypot(tx, tz) - RIM_R)));
+    };
+    pose.perch = over(0, -0.004, 0.011, 0.021);
+    pose.footLiftL = over(0.0135, 0.0165, 0.006, 0.0115);
+    pose.footLiftR = over(-0.0135, 0.0165, 0.006, 0.0115);
   }
 
   // Grab bookkeeping: where the jelly is lifted from and where it is held.
@@ -1060,6 +2097,7 @@ export class Rabbit {
     this.root.visible = false;
     this.hearts.visible = false;
     this.sparkles.visible = false;
+    this._syncOutfit(); // a picky visit's monocle comes off
   }
 
   // -------------------------------------------------------------------------
@@ -1230,6 +2268,136 @@ export class Rabbit {
         pose.squash = 1 - 0.05 * pulse(u, 0.05, 0.25);
         break;
       }
+      case "approach": {
+        // Two hops up to the jelly (onto the rim), turning to face it.
+        const K = this._kickPlan();
+        const hi = u < 0.5 ? 0 : 1;
+        const hu = u - 0.02 - hi * 0.48;
+        const [a, b] = hi === 0 ? [s.seat, K.mid] : [K.mid, K.sniffSpot];
+        const h = hopShape(hu, hi === 0 ? 0.016 : 0.013);
+        pose.pos.copy(a).lerp(b, easeInOut(h.k));
+        pose.hopY = h.y; pose.squash = h.s;
+        const travel = Math.atan2(K.sniffSpot.x - s.seat.x, K.sniffSpot.z - s.seat.z);
+        pose.yaw = hi === 0 ? angleLerp(s.yaw, travel, easeInOut(u / 0.3)) : angleLerp(travel, K.faceYaw, easeInOut((hu - 0.05) / 0.35));
+        pose.look.copy(K.sniffAt);
+        pose.earPerk = h.k > 0 && h.k < 1 ? -0.15 : 0.4;
+        pose.pawTuck = h.y > 0 ? 1 : 0;
+        pose.headPitch = -0.07 * Math.sin(Math.PI * clamp01(h.k));
+        pose.eyesWide = 0.35;
+        break;
+      }
+      case "sniff": {
+        // Leans in over the jelly: quick sniffs (nose twitching, little forward
+        // pecks, cheeks puffing), ears perked, curious head tilt; then recoils.
+        const K = this._kickPlan();
+        pose.pos.copy(K.sniffSpot); pose.yaw = K.faceYaw;
+        pose.squash = hopShape(u + T_APPROACH - 0.5, 0.013).s;
+        const lean = easeInOut(sstep(0.05, 0.4, u));
+        const recoil = sstep(1.0, 1.18, u);
+        const peck = Math.max(0, Math.sin(u * 2 * Math.PI * 3.3));
+        const on = lean * (1 - recoil);
+        // sits up tall to peer over the jelly, paws held up at its chest
+        const tall = easeInOut(sstep(0, 0.35, u));
+        pose.headUp = 0.011 * tall; pose.rise = 0.006 * tall; pose.stretch = 1 + 0.11 * tall;
+        pose.pawTogether = tall; pose.pawPat = 0.6 * tall;
+        pose.biteTarget.copy(K.sniffAt);
+        pose.lunge = (0.82 + 0.18 * peck) * on - 0.2 * recoil;
+        pose.lungeMax = 0.027;
+        pose.leanExtra = 0.1 * on;
+        pose.look.copy(K.sniffAt);
+        pose.noseTwitch = Math.sin(u * 2 * Math.PI * 9.5) * on;
+        pose.cheekPuff = (0.18 + 0.2 * peck) * on + 0.45 * recoil;
+        pose.earPerk = 0.8 * on - 0.2 * recoil; pose.earSplay = -0.12 * on;
+        pose.eyesWide = 0.6 * on;
+        pose.squint = 0.7 * recoil;
+        pose.headRoll = 0.12 * Math.sin(u * 2 * Math.PI * 0.7) * on;
+        pose.headPitch = 0.05 * peck * on;
+        pose.tailWag = 0.4 * on;
+        break;
+      }
+      case "shake": {
+        // 절레절레: head shakes "no" (≈ 4 swings), eyes squeezed shut, ears flopping.
+        const K = this._kickPlan();
+        pose.pos.copy(K.sniffSpot); pose.yaw = K.faceYaw;
+        const env = sstep(0, 0.1, u) * (1 - sstep(0.72, 0.9, u));
+        const w = 2 * Math.PI * SHAKE_HZ, ph = w * u;
+        pose.headYaw = 0.42 * Math.sin(ph) * env;
+        pose.headRoll = -0.1 * Math.sin(ph) * env;
+        pose.earSwing = -0.42 * w * w * Math.sin(ph) * env;
+        pose.scrunch = sstep(0, 0.08, u) * (1 - sstep(0.78, 0.9, u));
+        pose.squint = 0.6 * sstep(0.78, 0.9, u);
+        pose.cheekPuff = 0.45;
+        pose.earDroop = 0.22 * env; pose.earPerk = -0.25 * env;
+        pose.lunge = -0.2 * (1 - sstep(0.55, 0.9, u));
+        pose.leanExtra = -0.03 * env;
+        const tall = 1 - easeInOut(sstep(0.6, 0.9, u));
+        pose.headUp = 0.011 * tall; pose.rise = 0.006 * tall; pose.stretch = 1 + 0.11 * tall;
+        pose.pawTogether = tall; pose.pawPat = 0.6 * tall;
+        pose.look.copy(K.sniffAt);
+        pose.squash = 1 - 0.02 * env;
+        break;
+      }
+      case "turn": {
+        // Hop-turn: turns its back(-side) on the jelly, hopping back a step.
+        const K = this._kickPlan();
+        const h = hopShape(u, 0.012);
+        pose.pos.copy(K.sniffSpot).lerp(K.spot, easeInOut(h.k));
+        pose.hopY = h.y; pose.squash = h.s;
+        pose.yaw = K.faceYaw + K.turn * easeInOut(sstep(0.04, 0.36, u));
+        pose.look.set(pose.pos.x + Math.sin(pose.yaw) * 0.1, 0.035, pose.pos.z + Math.cos(pose.yaw) * 0.1);
+        pose.pawTuck = h.y > 0 ? 1 : 0;
+        pose.squint = 0.6; pose.cheekPuff = 0.4;
+        pose.earPerk = -0.1; pose.earDroop = 0.1;
+        break;
+      }
+      case "kick": {
+        // Gathers (leans forward on its front paws, tucks the foot along its
+        // side, glances back over its shoulder), snaps the foot back into the
+        // jelly (contact at KICK_CONTACT), holds, and puts it down again.
+        const K = this._kickPlan();
+        pose.yaw = K.backYaw;
+        const F = v3(Math.sin(K.backYaw), 0, Math.cos(K.backYaw));
+        const wind = easeOut(sstep(0, 0.2, u));
+        const out = easeOut(sstep(0.21, KICK_CONTACT - 0.015, u));
+        const back = easeInOut(sstep(0.42, 0.6, u));
+        pose.pos.copy(K.spot).addScaledVector(F, 0.003 * pulse(u, 0.22, 0.55));
+        pose.kickSide = K.foot;
+        pose.kickWind = back > 0 ? 0 : wind;
+        pose.kickLeg = out * (1 - back);
+        const gather = Math.max(wind * (1 - back), 0);
+        pose.leanExtra = 0.3 * gather + 0.08 * pulse(u, KICK_CONTACT - 0.03, 0.45);
+        pose.pawBrace = gather;
+        pose.squash = hopShape(u + T_TURN, 0.012).s * (1 - 0.06 * wind * (1 - out) + 0.05 * pulse(u, 0.22, 0.4));
+        pose.headYaw = K.foot * 0.75 * gather;
+        pose.look.set(pose.pos.x + F.x * 0.1, 0.035, pose.pos.z + F.z * 0.1);
+        pose.scrunch = sstep(0.22, 0.27, u) * (1 - sstep(0.4, 0.48, u));
+        pose.squint = 0.55 * wind;
+        pose.cheekPuff = 0.45 * wind;
+        pose.earPerk = -0.35 * wind; pose.earDroop = 0.12 * wind;
+        break;
+      }
+      case "hmph": {
+        // 흥: hop-turns back toward the viewer, crosses its arms, nose up and
+        // turned away from the jelly, eyes shut; a little foot thump.
+        const K = this._kickPlan();
+        pose.pos.copy(K.spot);
+        const h = hopShape(u, 0.008);
+        pose.hopY = h.y; pose.squash = h.s;
+        pose.yaw = K.backYaw + K.hmphTurn * easeInOut(sstep(0.04, 0.34, u));
+        const e = easeOut(sstep(0.2, 0.45, u));
+        pose.look.copy(s.faceTo);
+        pose.pawCross = easeOut(sstep(0.12, 0.4, u));
+        pose.headYaw = K.hmphHead * e;
+        pose.headPitch = -0.2 * e;
+        pose.blink = Math.max(pose.blink, 0.8 * sstep(0.35, 0.45, u) * (1 - sstep(0.85, 0.95, u)));
+        pose.squint = 0.6 * e;
+        pose.cheekPuff = 0.6 * pulse(u, 0.32, 0.8);
+        pose.earDroop = 0.22 * e; pose.earPerk = -0.15;
+        pose.squash *= 1 - 0.05 * pulse(u, 0.38, 0.55);
+        pose.kickSide = -K.foot;
+        pose.thump = pulse(u, 0.55, 0.72) * (u < 0.66 ? 1 : 0.6);
+        break;
+      }
       case "finish": {
         if (k < 0.35) hugJelly(1 - easeOut(k / 0.35));
         pose.look.copy(s.faceTo);
@@ -1250,8 +2418,9 @@ export class Rabbit {
         break;
       }
       default: { // leave
-        const legs = [[s.seat, s.exitA], [s.exitA, s.exitB]];
-        const away = Math.atan2(s.exitA.x - s.seat.x, s.exitA.z - s.seat.z);
+        const from = s.leaveFrom || s.seat;
+        const legs = [[from, s.exitA], [s.exitA, s.exitB]];
+        const away = Math.atan2(s.exitA.x - from.x, s.exitA.z - from.z);
         const hi = u < 0.55 ? 0 : 1;
         const hu = u - 0.05 - hi * 0.5;
         const [a, b] = legs[hi];
@@ -1259,7 +2428,7 @@ export class Rabbit {
         const h = hopShape(hu, (hi === 0 ? 0.02 : 0.024) * low);
         pose.pos.copy(a).lerp(b, easeInOut(h.k));
         pose.hopY = h.y; pose.squash = h.s;
-        const startYaw = s.outcome === "spit" ? s.yaw + 0.5 : s.yaw;
+        const startYaw = s.leaveYaw ?? (s.outcome === "spit" ? s.yaw + 0.5 : s.yaw);
         pose.yaw = angleLerp(startYaw, away, easeInOut(u / 0.2));
         pose.appear = 1 - easeIn((u - 0.55) / (T_LEAVE - 0.55));
         pose.pawTuck = h.y > 0 ? 1 : 0;
@@ -1278,13 +2447,14 @@ export class Rabbit {
       if (bt > 0.14) b.next = t + 2 + Math.random() * 2.2;
     }
     const tw = s.twitch;
-    if (t >= tw.next) {
+    if (t >= tw.next && pose.noseTwitch === 0) {
       const nt = t - tw.next;
       pose.noseTwitch = Math.sin(nt * 2 * Math.PI * 9) * pulse(nt, 0, 0.45);
       if (nt > 0.45) tw.next = t + 1.2 + Math.random() * 1.6;
     }
     if (T.holdEnd !== undefined && t >= T.holdEnd) s.pawsTray = null;
     else if (pose.pawMode > 0) s.pawsTray = [pose.pawL.clone(), pose.pawR.clone()];
+    if (s.outcome === "kick") this._perch(pose);
     return pose;
   }
 
@@ -1440,6 +2610,10 @@ export class Rabbit {
       idleL.lerp(v3(-0.0068, 0.033, 0.031), pose.pawCross);
       idleR.lerp(v3(0.0068, 0.0365, 0.029), pose.pawCross);
     }
+    if (pose.pawBrace > 0) { // front paws planted on the ground ahead (kick)
+      idleL.lerp(v3(0.0112, 0.0075, 0.035), pose.pawBrace);
+      idleR.lerp(v3(-0.0112, 0.0075, 0.035), pose.pawBrace);
+    }
     if (pose.pawMode > 0) {
       pawL.copy(pose.pawL).applyMatrix4(this._rootInv);
       pawR.copy(pose.pawR).applyMatrix4(this._rootInv);
@@ -1456,9 +2630,14 @@ export class Rabbit {
 
     // Base: hop + squash/stretch (volume preserving), feet stay planted.
     const sq = pose.squash;
-    R.base.position.y = pose.hopY;
+    R.base.position.y = pose.hopY + pose.perch;
     R.base.scale.set(1 / Math.sqrt(sq), sq, 1 / Math.sqrt(sq));
     if (pose.hopY > 0) { R.footL.position.y += 0.002; R.footR.position.y += 0.002; }
+    if (pose.perch || pose.footLiftL || pose.footLiftR) {
+      R.footL.position.y += (pose.footLiftL - pose.perch) / sq;
+      R.footR.position.y += (pose.footLiftR - pose.perch) / sq;
+    }
+    if (pose.kickWind > 0 || pose.kickLeg > 0 || pose.thump > 0) this._kickFoot(pose);
     R.hips.position.z += slide;
     R.hips.position.y += rise;
     R.hips.rotation.set(lean, 0, pose.shudder * 0.05 * Math.sin(t * 2 * Math.PI * 16));
@@ -1466,6 +2645,7 @@ export class Rabbit {
     R.body.scale.set(breath, stretch * (1 + 0.006 * pose.breath), breath);
     R.chest.position.y += (stretch - 1) * 0.034 + 0.0003 * pose.breath;
     R.tail.position.y += (stretch - 1) * 0.008;
+    R.collar.position.y -= (stretch - 1) * 0.0215; // outfit collar rides the body surface, not the chest
 
     // Head: look direction + expression offsets.
     this.rig.skel.updateMatrixWorld(true);
@@ -1521,6 +2701,7 @@ export class Rabbit {
     // Ears: springs around an expressive target, driven by head acceleration.
     this.rig.skel.updateMatrixWorld(true);
     this._earDynamics(pose, dt);
+    if (this._outfitKey) this._outfitDynamics(pose, dt);
 
     // Arms (IK with plush stretch) after the body/head are posed.
     this.rig.skel.updateMatrixWorld(true);
@@ -1535,6 +2716,56 @@ export class Rabbit {
     this._updateSun();
   }
 
+  // Kicking / thumping hind foot (base space): tucked along the side (wind),
+  // stretched back with the sole toward the jelly (leg), or lifted (thump).
+  _kickFoot(pose) {
+    const k = pose.kickSide >= 0 ? 1 : -1;
+    const foot = k > 0 ? this.rig.bones.footL : this.rig.bones.footR;
+    const p = foot.position;
+    if (pose.kickWind > 0 || pose.kickLeg > 0) {
+      const dy = p.y - foot.userData.restPos.y; // perch compensation (fades as the foot lifts)
+      const reach = 0.0415, sd = Math.sin(KICK_SIDE), cd = Math.cos(KICK_SIDE);
+      p.copy(foot.userData.restPos).lerp(v3(k * 0.0192, 0.0078, 0.001), pose.kickWind).lerp(v3(k * (0.004 + reach * sd), 0.0135, -reach * cd), pose.kickLeg);
+      p.y += dy * (1 - Math.max(pose.kickWind, pose.kickLeg));
+      const pitch = lerp(lerp(0, 0.55, pose.kickWind), 2.05, pose.kickLeg);
+      const turn = lerp(k * 0.25 * pose.kickWind, -k * KICK_SIDE, pose.kickLeg);
+      foot.quaternion.copy(foot.userData.restQuat).multiply(this._q.setFromEuler(this._eYXZ.set(pitch, turn, 0)));
+      const st = 1 + 0.12 * pose.kickLeg;
+      foot.scale.set(1 / Math.sqrt(st), 1 / Math.sqrt(st), st);
+    }
+    if (pose.thump > 0) {
+      p.y += 0.0042 * pose.thump;
+      foot.quaternion.multiply(this._q.setFromEuler(this._e.set(-0.35 * pose.thump, 0, 0)));
+    }
+  }
+
+  // Swinging / fluttering outfit bones (scarf tails, cape hem, wings).
+  _outfitDynamics(pose, dt) {
+    const R = this.rig.bones, o = this._outfit;
+    const local = this._localAcc || v3();
+    const air = clamp01(pose.hopY / 0.008);
+    if (o.neck === "scarf") {
+      // tails lag behind the body; they never swing into it (roll ≥ 0 = outward)
+      const sw = this.swings.scarf;
+      sw.step(dt, [0.04 + 0.12 * air, 0.1 + 0.15 * air], [local.z * 9, (-local.x - 0.6 * local.y) * 9]);
+      R.scarfTail.quaternion.multiply(this._q.setFromEuler(this._e.set(Math.max(-0.25, sw.a[0]), 0, Math.max(0, sw.a[1]))));
+    }
+    if (o.back === "cape") {
+      const sw = this.swings.cape;
+      sw.step(dt, [0.03 + 0.22 * air, 0], [(local.z * 0.8 + local.y * 0.35) * 8, -local.x * 6]);
+      R.capeHem.quaternion.multiply(this._q.setFromEuler(this._e.set(Math.max(0, sw.a[0]), 0, Math.max(-0.3, Math.min(0.3, sw.a[1])))));
+    }
+    if (o.back === "wings") {
+      // gentle flutter; quick beats while airborne or cheering
+      const excited = Math.max(air, pose.hearts >= 0 ? 1 : 0, pose.pawCheer);
+      this._wingPhase += dt * 2 * Math.PI * lerp(2.2, 7.5, excited);
+      const f = Math.sin(this._wingPhase) * lerp(0.13, 0.42, excited) + 0.05;
+      for (const [b, side] of [[R.wingL, 1], [R.wingR, -1]]) {
+        b.quaternion.multiply(this._q.setFromEuler(this._e.set(0.04 * Math.sin(this._wingPhase + 0.6), side * f, 0)));
+      }
+    }
+  }
+
   // Chest-space head offset that brings the mouth to the bite target.
   _chestDelta(pose, amount) {
     const R = this.rig.bones;
@@ -1542,7 +2773,7 @@ export class Rabbit {
     const delta = amount < 0
       ? v3(0, 0.004, -0.008).multiplyScalar(-amount)
       : pose.biteTarget.clone().applyMatrix4(this._rootInv).sub(mouth).multiplyScalar(amount);
-    if (delta.length() > 0.022) delta.setLength(0.022);
+    if (delta.length() > pose.lungeMax) delta.setLength(pose.lungeMax);
     const m = this._m.copy(R.chest.matrixWorld).setPosition(0, 0, 0).invert();
     return delta.applyMatrix4(m);
   }
@@ -1579,6 +2810,7 @@ export class Rabbit {
     }
     s.prevHead = head;
     const local = s.accel.clone().applyAxisAngle(v3(0, 1, 0), -(pose.yaw + pose.yawExtra));
+    this._localAcc = local;
     const G = 20; // rad/s² per m/s² of head acceleration
     const forcePitch = (local.z * 0.8 + local.y * 0.55) * G;
     const perk = pose.earPerk, droop = pose.earDroop;
@@ -1593,7 +2825,8 @@ export class Rabbit {
         -0.1 * perk + 0.7 * droop + 0.5 * Math.max(0, tilt),
         0.45 * droop,
       ];
-      const forceOut = (-local.x * side + 0.3 * local.y) * G;
+      // (earSwing: the head shake's angular acceleration, flops both ears sideways)
+      const forceOut = (-local.x * side + 0.3 * local.y) * G + pose.earSwing * 1.6 * side;
       this.ears[i].step(dt, target, [forcePitch, forceOut], wob * side);
       const a = this.ears[i].a;
       const e1 = i === 0 ? R.ear1L : R.ear1R, e2 = i === 0 ? R.ear2L : R.ear2R;
@@ -1707,13 +2940,14 @@ function defaultPose() {
     pos: v3(), yaw: 0, yawExtra: 0, appear: 1, hopY: 0, squash: 1,
     stretch: 1, leanExtra: 0, rise: 0, breath: 0, shudder: 0,
     look: v3(), headPitch: 0, headYaw: 0, headRoll: 0, headUp: 0, lookDown: 0,
-    lunge: 0, biteTarget: v3(),
+    lunge: 0, lungeMax: 0.022, biteTarget: v3(),
     pawMode: 0, pawL: v3(), pawR: v3(), pawTuck: 0, pawTogether: 0, pawCheer: 0, pawClap: 0, pawPat: 0, pawLow: 0,
     pawWave: 0, wave: 0, pawCross: 0,
     earPerk: 0, earSplay: 0, earDroop: 0, earWobble: 0, earTilt: 0,
     blink: 0, squint: 0, eyesWide: 0, happyEyes: 0, scrunch: 0,
     mouthOpen: 0, chew: 0, cheekPuff: 0, blush: 0, noseTwitch: 0, tailWag: 0, tongue: 0,
     hearts: -1, sparkles: -1,
+    kickWind: 0, kickLeg: 0, kickSide: 1, thump: 0, pawBrace: 0, earSwing: 0, perch: 0, footLiftL: 0, footLiftR: 0,
   };
 }
 

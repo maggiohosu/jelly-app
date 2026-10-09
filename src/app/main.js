@@ -2,7 +2,7 @@
 // Threads: main (render, input, audio), sim worker (240 Hz XPBD jelly, paint
 // field, gems), optics worker (receiver shadow + view thickness).
 import * as THREE from "three/webgpu";
-import { createStage, TRAY_RADIUS } from "../render/stage.js";
+import { createStage, TRAY_RADIUS, THEME_LOOKS } from "../render/stage.js";
 import { createJellyView } from "../render/jelly-view.js";
 import { createInput } from "../render/input.js";
 import { createGemLibrary, GemLayer, GEM_SHAPES } from "../render/gems.js";
@@ -10,17 +10,18 @@ import { BeadLayer } from "../render/beads.js";
 import { AdditiveLayer } from "../render/additives.js";
 import { CoinShower } from "../render/coins.js";
 import { Rabbit } from "../render/rabbit.js";
-import { createRareGemLibrary, RareGemLayer, RARE_GEMS, RARE_SIZE, rareGemIconSVG } from "../render/rare-gems.js";
+import { createRareGemLibrary, RareGemLayer, RARE_GEMS, RARE_SIZE, MAX_RARE_GEMS, rareGemIconSVG } from "../render/rare-gems.js";
 import { createThumbnailer } from "../render/thumbnail.js";
 import { PAINTS } from "../core/world.js";
-import { Progress } from "./progress.js";
-import { makeOrder, scoreOrder, rollOutcome, nameColor, sigmaToHex } from "./orders.js";
+import { Progress, MEMORY_PEEK_COST, TIER_LABELS } from "./progress.js";
+import { scoreOrder, rollOutcome, nameColor, familyOf, sigmaToHex, colorInfo, COLOR_NAMES } from "./orders.js";
+import { findSecret, OUTFITS } from "./fun.js";
 import { SHAPES, signatureSigma } from "../core/shapes.js";
 import { DecorLayer } from "../render/decor.js";
 import { createGameUI } from "./game-ui.js";
 import { JellyAudio } from "./audio.js";
 import { QualityGovernor } from "./quality.js";
-import { buildUI, loadSettings, physicsParams } from "./ui.js";
+import { buildUI, loadSettings, saveSettings, physicsParams } from "./ui.js";
 
 const $ = (id) => document.getElementById(id);
 const params = new URLSearchParams(location.search);
@@ -29,7 +30,10 @@ const isIOS = /iP(hone|ad|od)/.test(navigator.userAgent) || (navigator.platform 
 
 let toastTimer = 0;
 function toast(message, ms = 2200) {
-  const el = $("toast");
+  const el = $("toast"), order = $("order");
+  // just below the order card (its height depends on the order)
+  const below = order && !order.hidden ? order.getBoundingClientRect().bottom : 0;
+  el.style.top = below > 0 ? `${Math.round(below + 10)}px` : "";
   el.textContent = message;
   el.classList.add("show");
   clearTimeout(toastTimer);
@@ -40,6 +44,12 @@ function fatal(message) {
   $("start").hidden = true;
   $("fatal").hidden = false;
   if (message) $("fatal-message").textContent = message;
+}
+
+// 을/를 after a Korean word (by its last syllable's final consonant)
+function objectJosa(word) {
+  const c = String(word).trim().slice(-1).charCodeAt(0) - 0xac00;
+  return c >= 0 && c < 11172 && c % 28 ? "을" : "를";
 }
 
 function once(worker, type) {
@@ -70,6 +80,8 @@ async function boot() {
   // progress (coins, friendship…) — also decides which shapes may be used
   const progress = new Progress();
   if (!progress.shapes().includes(settings.shape)) settings.shape = "flower";
+  // plate / background theme: only an unlocked one (applied before the first render, below)
+  if (!progress.themes().includes(settings.theme)) settings.theme = "basic";
 
   // ---- workers ----
   const sim = new Worker(new URL("../workers/sim-worker.js", import.meta.url), { type: "module" });
@@ -105,6 +117,7 @@ async function boot() {
   audio.setVolumes({ master: settings.master, crunch: settings.crunch, gems: settings.gems, boing: settings.boing, effects: settings.effects });
   audio.setTexture(settings.texture);
   audio.onNote((pulse) => { view.pulse(0.08 + 0.22 * pulse.velocity); needsRender = true; });
+  rabbit.setOutfit?.(progress.outfit);
 
   // GPU errors only affect the caustic passes: drop those. A lost device leaves
   // a frozen canvas: reload once; twice within a minute → WebGL2 lite mode.
@@ -184,6 +197,10 @@ async function boot() {
     view.sync(data, (buffer) => freeBuffers.push(buffer));
     splitGems(data.gems, data.gemCount);
     if (data.decor && !view.hidden) { decorLayer.update(data.decor, data.decorCount || 0); needsRender = true; }
+    // what is in the jelly (for the order score): glitter / star candies and the mean pearl / glow
+    if (data.additiveCounts) jellyExtras.additives = { glitter: data.additiveCounts.glitter || 0, stars: data.additiveCounts.stars || 0 };
+    else if (data.additives) jellyExtras.additives = countAdditives(data.additives);
+    if (data.meanFx) jellyExtras.fx = [data.meanFx[0] || 0, data.meanFx[1] || 0];
     if (data.additives && !view.hidden) { additiveLayer.update(data.additives); if (data.additives.length) freeBuffers.push(data.additives.buffer); needsRender = true; }
     if (data.beads && !view.hidden) { beadLayer.update(data.beads); if (data.beads.length) freeBuffers.push(data.beads.buffer); needsRender = true; }
     if (data.gems) freeBuffers.push(data.gems.buffer);
@@ -205,11 +222,16 @@ async function boot() {
       switch (e.type) {
         case "release": audio.pop(0.35 + Math.min(0.65, e.stretch / 0.03)); break;
         case "clink": audio.clink(e.strength, e.seed); break;
-        case "gemFull": toast("보석이 가득 찼어요"); break;
-        case "rareFull": toast("레어 보석은 젤리 하나에 4개까지 넣을 수 있어요"); break;
+        // a rejected rare gem comes back (it was deducted when dropped / tapped)
+        case "gemFull": toast("보석이 가득 찼어요"); if (e.rare) refundRejected(e); break;
+        case "rareFull": toast(`레어 보석은 젤리 하나에 ${MAX_RARE_GEMS}개까지 넣을 수 있어요`); if (e.rare) refundRejected(e); break;
+        case "reset": onWorldReset(e); break;
+        case "motion": onMotion(e); break;
+        case "motionCue": onMotionCue(e); break;
         case "additiveFull": toast(e.kind === "glitter" ? "글리터가 가득해요" : "별사탕이 가득해요"); break;
         case "additive": audio.drip(0.5, e.kind === "glitter" ? 1.6 : 1.3); audio.crunch(0.35); break;
         case "gemIn": case "gemScatter": audio.clink(e.rare ? 0.8 : 0.45, (e.gem || e.count || 1) * 13); break;
+        case "kicked": audio.boing(0.55, 1.1, "drop"); break;
         case "bounced": audio.boing(0.5 + 0.3 * Math.min(1, e.strength), 1.25, "drop"); break;
         case "recovered": toast("젤리가 너무 늘어나서 처음 모양으로 돌아왔어요"); break;
       }
@@ -217,22 +239,71 @@ async function boot() {
     if (data.impact > 0.22) audio.crunch((data.impact - 0.12) / 0.6);
     else if (data.wallImpact > 0.12) audio.crunch((data.wallImpact - 0.08) / 0.4 * 0.7);
   };
-  const EMPTY = new Float32Array(0);
-  // Gem states (stride 10) carry both kinds: colour ≥ 100 marks a rare gem.
+  // Gem states (stride 10) carry both kinds: colour ≥ 100 marks a rare gem
+  // (shape = its index, colour − 100 = its tier).
   const normalStates = new Float32Array(24 * 10), rareStates = new Float32Array(8 * 10);
-  const jellyGems = { shapes: [], rareCount: 0 };
+  const jellyGems = { shapes: [], rare: [], rareCount: 0 };
+  const jellyExtras = { additives: { glitter: 0, stars: 0 }, fx: [0, 0] };
   function splitGems(states, count = 0) {
     let n = 0, r = 0;
     jellyGems.shapes.length = 0;
+    jellyGems.rare.length = 0;
     for (let i = 0; i < count; i++) {
       const o = i * 10;
       if (states[o + 1] >= 100) {
-        if (r < 8) { rareStates.set(states.subarray(o, o + 10), r * 10); rareStates[r * 10 + 1] = states[o + 1] - 100; r++; }
+        if (r < 8) {
+          rareStates.set(states.subarray(o, o + 10), r * 10); rareStates[r * 10 + 1] = states[o + 1] - 100; r++;
+          jellyGems.rare.push({ index: Math.round(states[o]), tier: Math.round(states[o + 1] - 100) });
+        }
       } else if (n < 24) { normalStates.set(states.subarray(o, o + 10), n * 10); jellyGems.shapes.push(states[o]); n++; }
     }
     jellyGems.rareCount = r;
     gemLayer.update(normalStates, n);
     rareLayer.update(rareStates, r);
+  }
+  // additive states (stride 5): kind 0 = glitter, 1 = star candy
+  function countAdditives(states) {
+    const out = { glitter: 0, stars: 0 };
+    for (let o = 3; o < states.length; o += 5) { if (states[o] < 0.5) out.glitter++; else out.stars++; }
+    return out;
+  }
+
+  // ---- rare gems are a stock: one is used when dropped / tapped in ----
+  // A rejected one comes back; a jelly replaced without being eaten (new
+  // jelly, shape change, "이 주문으로 새 젤리") gives back the rare gems
+  // still in it — except the reset right after the bunny ate it (eatResets
+  // counts those resets in flight; the world answers every reset in order).
+  let eatResets = 0;
+  function refundRejected(e) {
+    const n = Math.max(1, Math.round(e.count) || 1);
+    progress.refundRare(Array.from({ length: n }, () => e.rare));
+  }
+  function onWorldReset(e) {
+    if (eatResets > 0) { eatResets--; return; }
+    const list = Array.isArray(e.rare) ? e.rare : [];
+    if (!list.length) return;
+    const n = progress.refundRare(list);
+    if (n) toast(`💎 젤리 속 레어 보석 ${n}개가 보석함으로 돌아왔어요`);
+  }
+  function useRareGem(index) {
+    if (!progress.useRare(index)) { toast("보석이 없어요"); return null; }
+    dismissHint();
+    return { index, tier: Math.max(0, progress.state.rare[index]) };
+  }
+
+  // ---- idle motions of the cat / bird jellies: their sounds ----
+  // yawn / flap at the start of the move; punches, chirps and the plop on
+  // their own cues (world.js MOVES … cues), so each sound meets its pose.
+  function onMotion(e) {
+    needsRender = true;
+    if (e.name === "yawn") audio.catYawn?.();
+    else if (e.name === "flap") audio.birdFlap?.(Math.min(1.6, 0.7 * (e.duration || 2.2)));
+  }
+  function onMotionCue(e) {
+    needsRender = true;
+    if (e.cue === "punch") audio.catPunch?.((e.index | 0) % 2);
+    else if (e.cue === "chirp") audio.birdChirp?.(1);
+    else if (e.cue === "plop" || e.cue === "land") audio.birdPlop?.();
   }
 
   // ---- optics worker ----
@@ -334,11 +405,16 @@ async function boot() {
     },
     onAdditiveTap: (kind) => { const hit = topHit(); if (hit) pendingEvents.push({ type: "additive", kind, point: hit.point }); },
     onRareDrop: (index, tier, x, y) => {
+      if (!(progress.rareCountOf(index) > 0)) { toast("보석이 없어요"); return; }
       const hit = pickAt(x, y);
       if (!hit) { toast("젤리 위에 놓아 주세요"); return; }
-      pendingEvents.push({ type: "gemAdd", a: hit.a, b: hit.b, c: hit.c, bary: hit.bary, shape: index, color: 0, radius: rareRadius(index), rare: { index, tier } });
+      const rare = useRareGem(index);
+      if (rare) pendingEvents.push({ type: "gemAdd", a: hit.a, b: hit.b, c: hit.c, bary: hit.bary, shape: index, color: 0, radius: rareRadius(index), rare });
     },
-    onRareTap: (index, tier) => pendingEvents.push({ type: "gemScatter", count: 1, shape: index, color: 0, radius: rareRadius(index), rare: { index, tier } }),
+    onRareTap: (index) => {
+      const rare = useRareGem(index);
+      if (rare) pendingEvents.push({ type: "gemScatter", count: 1, shape: index, color: 0, radius: rareRadius(index), rare });
+    },
     onGemDrop: (shape, color, x, y) => {
       const hit = pickAt(x, y);
       if (!hit) { toast("젤리 위에 놓아 주세요"); return; }
@@ -349,13 +425,40 @@ async function boot() {
     onScatter: (color) => pendingEvents.push({ type: "gemScatter", count: 6, shape: -1, color, radius: gemRadius(-1), shapes: GEM_SHAPES.length }),
     onBase: (base) => { pendingEvents.push({ type: "base", base }); needsRender = true; },
     onShape: (id, info) => {
-      if (!id) { toast(`🐰 토끼와 Lv${info.level}까지 친해지면 '${info.label}' 모양이 열려요`); return; }
+      if (!id) { toast(`🐰 토끼와 Lv${info.level}까지 친해지면 '${info.label}' 모양이 열려요 (카드 뽑기 모양 카드로도!)`); return; }
       if (eating) return;
       pendingEvents.push({ type: "shape", shape: id, base: settings.base });
       toast(`${info.label} 모양 젤리가 나왔어요`);
       dismissHint();
     },
+    onOutfit: (slot, id, item, how) => {
+      if (id === undefined) { toast(`🔒 ${item.emoji} ${item.label} — ${how}에 열려요`); return; }
+      if (!progress.setOutfit(slot, id)) return;
+      rabbit.setOutfit?.(progress.outfit);
+      refreshDressUp();
+      const o = OUTFITS.find((x) => x.id === id);
+      toast(o ? `${o.emoji} 다음에 토끼가 ${o.label}${objectJosa(o.label)} 하고 와요` : "벗었어요");
+    },
+    onTheme: (id, theme, how) => {
+      if (!id) { toast(`🔒 '${theme.label}' 테마 — ${how}에 열려요`); return; }
+      settings.theme = id;
+      saveSettings(settings);
+      applyTheme(id);
+      refreshDressUp();
+    },
   });
+  function applyTheme(id) {
+    const applied = stage.setTheme ? stage.setTheme(id) : "basic";
+    const bg = THEME_LOOKS?.[applied]?.background;
+    if (bg) {
+      document.documentElement.style.setProperty("--bg", bg);
+      document.querySelector('meta[name="theme-color"]')?.setAttribute("content", bg);
+    }
+    needsRender = true; opticsDirty = true;
+  }
+  function refreshDressUp() {
+    ui.setDressUp({ outfits: progress.outfits(), worn: progress.outfit, themes: progress.themes(), theme: settings.theme, looks: THEME_LOOKS });
+  }
   function rareRadius(index) {
     const r = rareLibrary.gems?.[index]?.radius || RARE_SIZE / 2;
     return Math.max(0.0038, Math.min(0.0058, r * 0.85));
@@ -377,6 +480,16 @@ async function boot() {
   function bounce(strength) { pendingEvents.push({ type: "bounce", strength }); dismissHint(); }
   $("nudge").addEventListener("click", () => bounce(1));
   $("reset").addEventListener("click", () => { if (eating) return; pendingEvents.push({ type: "reset", base: settings.base, lift: 0.05 }); $("sheet").hidden = true; });
+  $("order-new").addEventListener("click", () => {
+    if (eating || !started) return;
+    const order = progress.order;
+    if (!order) return;
+    $("gem-drawer").hidden = true; $("gems").classList.remove("on");
+    $("shape-drawer").hidden = true; $("shape-button").classList.remove("on");
+    prepareJellyFor(order, { lift: 0.06 });
+    toast(order.shape ? `🐰 ${SHAPES.find((x) => x.id === order.shape)?.label || ""} 모양 새 젤리가 나왔어요 — 주문대로 꾸며 보세요` : "🐰 주문에 맞춘 새 젤리가 나왔어요 — 물감을 떨어뜨려 보세요");
+    dismissHint();
+  });
   $("sound").addEventListener("click", () => {
     soundOn = !soundOn;
     audio.setEnabled(soundOn);
@@ -411,6 +524,11 @@ async function boot() {
 
   // ---- the bunny game: orders, feeding, coins, cards, book ----
   let eating = false, lastFrame = null, carrying = false;
+  function setEating(on) {
+    eating = on;
+    $("feed").disabled = on;
+    $("order-new").disabled = on;
+  }
   const thumbCache = new Map();
   function rareThumb(index, tier) {
     const key = `${index}:${tier}`;
@@ -425,31 +543,78 @@ async function boot() {
     rareInfo: (i) => RARE_GEMS[i],
     rareIcon: (i, t) => rareGemIconSVG(i, t),
     rareThumb,
-    onPull: () => { const r = progress.pull(); if (r) refreshRareDrawer(); return r; },
-    sounds: { cardFlip: () => audio.cardFlip?.(), cardShake: () => audio.cardShake?.(), reveal: (k) => audio.reveal?.(k), levelUp: () => audio.levelUp?.(), coinLoss: (n) => audio.coinLoss?.(n) },
+    themeLooks: THEME_LOOKS,
+    onPull: () => {
+      // a free card first when there is one
+      const r = progress.pull({ free: progress.freeCards > 0 });
+      if (r?.type === "shape") ui.setShapes(progress.shapes(), [r.id]);
+      if (r) refreshDressUp();
+      return r;
+    },
+    sounds: {
+      cardFlip: () => audio.cardFlip?.(), cardShake: () => audio.cardShake?.(), reveal: (k) => audio.reveal?.(k), levelUp: () => audio.levelUp?.(),
+      coinLoss: (n) => audio.coinLoss?.(n), goldenOrder: () => audio.goldenOrder?.(), giftOpen: () => audio.giftOpen?.(), achievement: () => audio.achievement?.(),
+    },
   });
+  // The gem drawer's rare row: stock order, re-rendered after every change.
   function refreshRareDrawer() {
-    const owned = progress.ownedRare();
-    ui.setRareGems(owned.map((r) => ({ ...r, label: `${RARE_GEMS[r.index].label} (${["글리터", "금빛", "무지개빛"][r.tier]})`, icon: rareGemIconSVG(r.index, r.tier) })));
-    // swap in the 3D renders once they are ready
-    owned.forEach((r) => rareThumb(r.index, r.tier).then((url) => {
-      if (!url) return;
-      const btn = document.querySelector(`#rare-gems button[title^="${RARE_GEMS[r.index].label} "]`);
-      if (btn) { btn.innerHTML = `<img alt="" src="${url}">`; }
-    }));
+    ui.setRareGems(progress.rareStock().map((r) => ({
+      ...r, label: `${RARE_GEMS[r.index].label} (${TIER_LABELS[r.tier]})`, icon: rareGemIconSVG(r.index, r.tier), thumb: rareThumb(r.index, r.tier),
+    })));
   }
+  progress.onChange(refreshRareDrawer);
   function refreshPalette(fresh = []) { ui.setPalette(progress.paints(), progress.additives(), fresh); }
-  // A shape's signature colour (mean σ of its look) — the starting colour of
-  // orders for that shape; null for plain shapes (they take the base colour).
-  // a shape's signature colour (mean σ) is an order's starting colour
-  const shapeBase = (id) => signatureSigma(id);
+
+  // ---- orders: a visible-time stopwatch (time bonus), memory peeks ----
+  // It stops while the app is in the background and while a level-up gift
+  // box (a modal) is open.
+  const orderClock = { acc: 0, since: performance.now(), running: true, holds: 0 };
+  let orderPeeks = 0;
+  function orderElapsed() { return (orderClock.acc + (orderClock.running ? performance.now() - orderClock.since : 0)) / 1000; }
+  function syncOrderClock() {
+    const paused = document.hidden || orderClock.holds > 0, now = performance.now();
+    if (paused && orderClock.running) { orderClock.acc += now - orderClock.since; orderClock.running = false; }
+    else if (!paused && !orderClock.running) { orderClock.since = now; orderClock.running = true; }
+  }
+  function holdOrderClock(on) { orderClock.holds = Math.max(0, orderClock.holds + (on ? 1 : -1)); syncOrderClock(); }
+  function presentOrder(order, { announce = true } = {}) {
+    orderPeeks = 0;
+    orderClock.acc = 0; orderClock.since = performance.now(); orderClock.running = true;
+    syncOrderClock();
+    gameUI.showOrder(order, { announce });
+  }
+  setInterval(() => { if (started && !document.hidden && progress.order) gameUI.setOrderTime(orderElapsed()); }, 500);
+  // a new order (kind scheduling in progress.js); shape orders start from the shape's signature colour
   function newOrder() {
-    const shapes = progress.shapes().map((id) => SHAPES.find((x) => x.id === id)).filter(Boolean);
-    const order = makeOrder({ paints: progress.paints(), level: progress.level.level, id: Date.now(), shapes, shape: settings.shape, shapeBase });
-    progress.setOrder(order);
-    gameUI.showOrder(order);
+    const order = progress.newOrder({ shapeBase: signatureSigma });
+    presentOrder(order);
     return order;
   }
+  // A fresh jelly for an order: its shape (switching the toolbar shape) and
+  // its starting colour — a plain base even on a shaped jelly.
+  function prepareJellyFor(order, { lift = 0.06 } = {}) {
+    if (!order) return;
+    const plain = !Array.isArray(order.base);
+    if (order.shape && order.shape !== settings.shape && progress.shapes().includes(order.shape)) {
+      settings.shape = order.shape;
+      saveSettings(settings);
+      ui.setShapes(progress.shapes());
+      pendingEvents.push({ type: "shape", shape: order.shape, base: order.base, plain });
+    } else pendingEvents.push({ type: "reset", base: order.base, plain, lift });
+    needsRender = true;
+  }
+  $("order").addEventListener("click", (event) => {
+    if (event.target.closest("#order-new")) return;
+    const order = progress.order;
+    if (!order) return;
+    if (gameUI.orderHidden) {
+      // 기억 주문: another 5 s look costs a few coins
+      if (progress.memoryPeek()) { orderPeeks++; gameUI.peekOrder(); gameUI.loseCoins(MEMORY_PEEK_COST); }
+      else toast(`금화가 부족해요 (${MEMORY_PEEK_COST}개)`);
+      return;
+    }
+    toast(`🐰 ${order.text} 비슷할수록 금화를 많이 줘요`, 2800);
+  });
 
   // Album card: a square render of the jelly from the current view direction.
   async function captureWork() {
@@ -464,25 +629,38 @@ async function boot() {
     } catch (error) { console.warn("capture", error); return null; }
   }
 
+  // What the bunny gets (orders.js scoreOrder / progress.feed): mean colour,
+  // shape, texture, gems, rare gems, toppings and the mean pearl / glow.
+  function jellyDescriptor() {
+    return {
+      sigma: view.state.meanDye.slice(), shape: settings.shape, texture: settings.texture,
+      gems: jellyGems.shapes.slice(), rare: jellyGems.rare.map((r) => ({ ...r })), rareCount: jellyGems.rareCount,
+      additives: { ...jellyExtras.additives }, fx: jellyExtras.fx.slice(),
+    };
+  }
+  const colorSwatch = (name) => `<i class="color-dot" style="--c:${colorInfo(name)?.hex || "#ddd"}"></i>`;
+
   async function feed() {
     if (eating || rabbit.busy || coinShower.busy || view.hidden || !lastFrame) return;
-    eating = true;
-    $("feed").disabled = true;
+    setEating(true);
     input.cancel();
     dismissHint();
     $("gem-drawer").hidden = true; $("gems").classList.remove("on");
     $("shape-drawer").hidden = true; $("shape-button").classList.remove("on");
     const order = progress.order || newOrder();
-    const sigma = view.state.meanDye.slice();
-    const rareCount = jellyGems.rareCount;
-    const result = scoreOrder(order, { sigma, gems: jellyGems.shapes, texture: settings.texture, rareCount, shape: settings.shape });
-    // ★1 only: 1/20 퉤 (coins taken), 1/5 a head-shake after one bite (a few coins)
-    // (?outcome=refuse|spit|eat forces an outcome — for testing the animations)
+    const elapsed = orderElapsed(), peeks = orderPeeks;
+    const jelly = jellyDescriptor(), sigma = jelly.sigma;
+    const result = scoreOrder(order, jelly);
+    // ★1 only: 1/3 퉤 (one bite), 1/5 a sniff, a head shake and a kick (no bite)
+    // (?outcome=eat|spit|kick forces an outcome — for testing the animations)
     const forced = params.get("outcome");
-    const outcome = ["eat", "refuse", "spit"].includes(forced) ? forced : rollOutcome(result.stars);
+    const outcome = ["eat", "spit", "kick"].includes(forced) ? forced : rollOutcome(result.stars);
+    // a secret recipe about to be found: the bunny's special reaction
+    const colorName = nameColor(sigma);
+    const secretAhead = outcome === "eat" && findSecret(jelly, colorName, familyOf(colorName), progress.state.secrets);
     const thumb = outcome === "eat" ? await captureWork() : null;
     const shapeInfo = SHAPES.find((x) => x.id === settings.shape);
-    const card = { id: Date.now(), date: Date.now(), stars: result.stars, name: nameColor(sigma), hex: sigmaToHex(sigma), texture: settings.texture, shape: settings.shape, shapeLabel: settings.shape !== "flower" ? shapeInfo?.label : "", thumb, gems: jellyGems.shapes.length + rareCount };
+    const card = { id: Date.now(), date: Date.now(), stars: result.stars, name: colorName, hex: sigmaToHex(sigma), texture: settings.texture, shape: settings.shape, shapeLabel: settings.shape !== "flower" ? shapeInfo?.label : "", thumb, gems: jelly.gems.length + jelly.rareCount };
     // the bunny sits behind the jelly, a little to the side, facing the camera
     const toCam = tray.worldToLocal(camera.position.clone()).setY(0).normalize();
     const side = new THREE.Vector3(-toCam.z, 0, toCam.x);
@@ -490,11 +668,14 @@ async function boot() {
     const b = lastFrame.bounds, jc = lastFrame.center.slice();
     let reward = null;
     carrying = false;
+    // the cat / bird hold still while the bunny visits
+    pendingEvents.push({ type: "motions", enabled: false });
     rabbit.play({
       position: [seat.x, 0, seat.z],
       faceTo: [toCam.x * 0.3, 0.04, toCam.z * 0.3],
       jelly: { center: lastFrame.center.slice(), width: b[3] - b[0], height: b[4] - b[1] },
-      bites: outcome === "eat" ? 4 : 1, mood: result.mood, outcome,
+      bites: outcome === "eat" ? 4 : 1, mood: secretAhead ? "special" : result.mood, outcome,
+      picky: order.kind === "picky",
       jellyColor: sigmaToHex(sigma),
       onEvent: (type, data = {}) => {
         needsRender = true;
@@ -519,24 +700,27 @@ async function boot() {
             carrying = false;
             pendingEvents.push({ type: "carry", target: null });
             break;
+          case "sniff": audio.sniff?.(); break;
+          case "shake": audio.squeak?.("no"); break;
+          case "kick": {
+            // 뻥: the jelly tumbles across the tray into the rim and stays there
+            if (data.dir) pendingEvents.push({ type: "kick", dir: data.dir, strength: data.strength ?? 0.8 });
+            audio.kick?.();
+            const lost = progress.kick();
+            gameUI.enqueue(() => gameUI.showReward({ kind: "kick", coins: lost.lost }));
+            if (lost.lost > 0) gameUI.loseCoins(lost.lost);
+            gameUI.showAchievements(lost.achievements);
+            gameUI.renderHud({ animateCoins: true });
+            break;
+          }
           case "finish":
+            // eaten: the rest of its gems go with it (no refund for this reset)
             carrying = false;
             pendingEvents.push({ type: "carry", target: null });
             view.setHidden(true); hideCarried(true);
-            pendingEvents.push({ type: "reset", base: Array.isArray(order.base) ? settings.base : order.base, lift: 0.4 }, { type: "pause", paused: true });
+            eatResets++;
+            pendingEvents.push({ type: "reset", base: settings.base, lift: 0.4 }, { type: "pause", paused: true });
             break;
-          case "refuse": {
-            audio.squeak?.("no");
-            reward = progress.refuse();
-            gameUI.showReward({ kind: "refuse", coins: reward.coins, xp: reward.xp, levelUps: reward.levelUps });
-            coinShower.pour({
-              count: reward.coins, at: [jc[0], 0.04, jc[2]],
-              collectAt: () => gameUI.coinCounterNDC(),
-              onCollect: () => { gameUI.addCoin(1); audio.coin(0.3, 7); },
-              onDone: () => gameUI.renderHud(),
-            });
-            break;
-          }
           case "spit": {
             {
               // 퉤 now, splat when the chunk lands (ballistic time to the tray)
@@ -545,16 +729,18 @@ async function boot() {
               audio.spit(0.8, land);
             }
             const lost = progress.spit();
-            gameUI.showReward({ kind: "spit", coins: lost.lost });
+            gameUI.enqueue(() => gameUI.showReward({ kind: "spit", coins: lost.lost }));
             if (lost.lost > 0) gameUI.loseCoins(lost.lost);
+            gameUI.showAchievements(lost.achievements);
+            gameUI.renderHud({ animateCoins: true });
             break;
           }
           case "react": {
             if (outcome !== "eat") { audio.squeak?.("grumpy"); break; }
-            audio.squeak?.(result.mood === "special" ? "happy" : result.mood);
+            audio.squeak?.(result.mood === "special" || secretAhead ? "happy" : result.mood);
             if (result.stars === 4) audio.special?.();
-            reward = progress.feed({ stars: result.stars, rareCount, card });
-            gameUI.showReward({ kind: "eat", ...result, coins: reward.coins, xp: reward.xp, levelUps: reward.levelUps });
+            reward = progress.feed({ stars: result.stars, order, result, jelly, card, elapsed, peeks });
+            queueFollowUps(reward, result, order);
             const per = Math.max(1, Math.round(reward.coins / 14)), n = Math.ceil(reward.coins / per);
             let collected = 0;
             coinShower.pour({
@@ -564,32 +750,69 @@ async function boot() {
               onDone: () => gameUI.renderHud(),
             });
             audio.coinShower?.(n, 1.2);
+            if (reward.streak >= 2) audio.comboUp?.(reward.streak);
+            gameUI.renderHud({ animateCoins: true });
             break;
           }
           case "done": {
             carrying = false;
-            if (reward?.levelUps?.length) applyLevelUps(reward.levelUps);
+            pendingEvents.push({ type: "motions", enabled: true });
             if (outcome === "eat") {
-              // a fresh jelly drops in for the next order
+              // a fresh jelly for the next order (its shape and starting colour)
               const next = newOrder();
-              pendingEvents.push({ type: "pause", paused: false }, { type: "reset", base: Array.isArray(next.base) ? settings.base : next.base, lift: 0.06 });
+              pendingEvents.push({ type: "pause", paused: false });
+              prepareJellyFor(next, { lift: 0.06 });
               view.setHidden(false); hideCarried(false);
             } else {
-              // refused / spat out: the (bitten) jelly stays — fix it and try again
+              // spat out / kicked: the jelly stays — fix it and try again
               pendingEvents.push({ type: "carry", target: null });
             }
-            eating = false; $("feed").disabled = false;
-            gameUI.renderHud();
+            setEating(false);
+            gameUI.renderHud({ animateCoins: coinShower.busy });
             break;
           }
         }
       },
     });
   }
+  // After a meal, one after another: the reward card (with its breakdown),
+  // a new colour, colour-book milestones, a secret recipe, the golden free
+  // card, achievements, then a gift box per level-up.
+  function queueFollowUps(r, result, order) {
+    gameUI.enqueue(() => gameUI.showReward({
+      kind: "eat", ...result, coins: r.coins, xp: r.xp, levelUps: r.levelUps, breakdown: r.breakdown, orderKind: order.kind, streak: r.streak,
+    }));
+    if (r.newColor) {
+      const found = progress.state.colorBook.length;
+      gameUI.enqueue(() => { audio.discovery?.(); return gameUI.notice({ icon: colorSwatch(r.newColor), title: `새 색 발견! ${r.newColor}`, text: `색 도감 ${found} / ${COLOR_NAMES.length}`, tone: "color" }); });
+    }
+    for (const c of r.colorRewards || []) {
+      const what = [c.coins ? `금화 +${c.coins}` : "", c.theme ? `'${THEME_LOOKS[c.theme]?.label || c.theme}' 테마` : "", c.freeCards ? `무료 카드 ${c.freeCards}장` : "", c.title ? `칭호 '${c.title}'` : ""].filter(Boolean).join(" · ");
+      gameUI.enqueue(() => { audio.achievement?.(); refreshDressUp(); return gameUI.notice({ icon: "🎨", title: c.at >= COLOR_NAMES.length ? "색 도감 완성!" : `색 도감 ${c.at}개 달성!`, text: what, tone: "gold" }); });
+    }
+    if (r.secret) {
+      gameUI.enqueue(() => {
+        audio.discovery?.();
+        gameUI.confetti.burst({ x: innerWidth / 2, y: innerHeight * 0.22, kind: "sparkle", count: 90 });
+        return gameUI.notice({ icon: `<span class="big-emoji">${r.secret.emoji}</span>`, title: `숨은 레시피 발견! ${r.secret.label}`, text: `토끼가 깜짝 놀랐어요 · 금화 +${r.secret.coins} · 📖 도감에 적어 뒀어요`, tone: "secret", ms: 3000 });
+      });
+    }
+    if (order.kind === "golden" && result.stars >= 3) {
+      gameUI.enqueue(() => gameUI.notice({ icon: `<span class="mini-card">✦</span>`, title: "황금 주문 선물! 무료 카드 1장", text: "🎴 카드 뽑기에서 금화 없이 뽑을 수 있어요", tone: "gold" }));
+    }
+    gameUI.showAchievements(r.achievements);
+    for (const u of r.levelUps || []) gameUI.enqueue(async () => { holdOrderClock(true); try { await gameUI.giftBox(u); } finally { holdOrderClock(false); } });
+    gameUI.enqueue(() => {
+      if (r.levelUps?.length) applyLevelUps(r.levelUps);
+      refreshDressUp();
+      gameUI.renderHud();
+    });
+  }
   function applyLevelUps(levelUps) {
     const fresh = levelUps.flatMap((u) => u.rewards.map((r) => r.id));
     refreshPalette(fresh);
     ui.setShapes(progress.shapes(), fresh);
+    refreshDressUp();
   }
   function hideCarried(hidden) {
     for (const m of gemLayer.meshes) if (hidden) m.visible = false;
@@ -601,8 +824,8 @@ async function boot() {
   }
   refreshPalette();
   refreshRareDrawer();
+  refreshDressUp();
   $("feed").addEventListener("click", feed);
-  $("order").addEventListener("click", () => toast(progress.order ? `🐰 ${progress.order.text} 비슷할수록 금화를 많이 줘요` : "", 2800));
 
   // ---- start (user gesture: audio unlock) ----
   const startButton = $("start-button");
@@ -617,7 +840,9 @@ async function boot() {
     $("gacha-button").hidden = false; $("book-button").hidden = false;
     gameUI.renderHud();
     ui.setShapes(progress.shapes());
-    gameUI.showOrder(progress.order || newOrder());
+    // a saved order (v2) is shown again (its time bonus starts now); an old / missing one → a new order
+    if (progress.order) presentOrder(progress.order);
+    else newOrder();
     if (progress.state.feeds === 0 && progress.state.pulls === 0) setTimeout(() => toast("🐰 토끼 주문서대로 젤리를 만들고 🥕를 눌러 보세요! 첫 카드 뽑기 금화도 드려요", 4200), 900);
     $("hint").hidden = false;
     hintTimer = setTimeout(dismissHint, 8000);
@@ -694,6 +919,7 @@ async function boot() {
   function stopLoop() { running = false; cancelAnimationFrame(frameId); }
 
   document.addEventListener("visibilitychange", () => {
+    syncOrderClock();   // the time bonus counts visible time only
     if (document.hidden) {
       stopLoop();
       input.cancel();
@@ -708,6 +934,7 @@ async function boot() {
     }
   });
 
+  applyTheme(settings.theme);
   applyTier(governor.tier);
   // Prime one physics frame so the jelly exists before the first render.
   sim.postMessage({ type: "tick", dt: 0, events: pendingEvents.splice(0) });
@@ -719,7 +946,11 @@ async function boot() {
   startLoop();
   startButton.disabled = false;
   startButton.textContent = "시작하기";
-  window.__jelly = { stage, view, governor, sim, optics, pendingEvents, gemLayer, rareLayer, audio, eventLog, progress, rabbit, coinShower, feed, gameUI, get eating() { return eating; }, get asleep() { return asleep; } };
+  window.__jelly = {
+    stage, view, governor, sim, optics, pendingEvents, gemLayer, rareLayer, audio, eventLog, progress, rabbit, coinShower, feed, gameUI, ui, settings,
+    presentOrder, newOrder, prepareJellyFor, jellyDescriptor, orderElapsed, refreshDressUp, applyTheme,
+    get eating() { return eating; }, get asleep() { return asleep; }, get eatResets() { return eatResets; },
+  };
 }
 
 boot().catch((error) => {

@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+  <title>Theme preview</title>
+  <link rel="icon" href="data:,">
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "../vendor/three/three.webgpu.min.js",
+        "three/webgpu": "../vendor/three/three.webgpu.min.js",
+        "three/tsl": "../vendor/three/three.tsl.min.js",
+        "three/addons/": "../vendor/three/addons/"
+      }
+    }
+  </script>
+  <style>
+    html, body { margin: 0; height: 100%; background: #dfe6e8; overflow: hidden; font: 12px/1.4 -apple-system, system-ui, sans-serif; color: #22313a; }
+    canvas { display: block; width: 100vw; height: 100vh; }
+    #themes { position: fixed; left: 50%; bottom: 14px; transform: translateX(-50%); display: flex; gap: 6px; padding: 6px; border-radius: 999px; background: rgba(255, 255, 255, 0.86); box-shadow: 0 2px 10px rgba(34, 49, 58, 0.12); }
+    #themes button { display: flex; flex-direction: column; align-items: center; gap: 3px; width: 62px; padding: 4px 0; border: 0; border-radius: 16px; background: none; font: inherit; color: inherit; cursor: pointer; }
+    #themes button.on { background: #fff; box-shadow: 0 1px 4px rgba(34, 49, 58, 0.14); font-weight: 700; }
+    #themes i { width: 30px; height: 30px; border-radius: 50%; box-shadow: 0 0 0 1px rgba(34, 49, 58, 0.12) inset; }
+    #themes span { font-size: 10px; white-space: nowrap; }
+  </style>
+</head>
+<body>
+  <canvas id="stage"></canvas>
+  <div id="themes"></div>
+  <script type="module" src="./theme-preview.js"></script>
+</body>
+</html>

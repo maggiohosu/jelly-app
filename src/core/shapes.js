@@ -13,6 +13,9 @@
 //   shapeStats(id)     → mesher statistics (nodes, tets, quality …)
 //   buildShapeCage(id) → a fresh, uncached cage (determinism tests)
 //   shapeSDF(id)       → the shape's signed distance (model mm, world frame)
+//   shapeMotions(id)   → null or the idle-motion data of the animal shapes
+//                        (interval, moves, model axes, soft body regions in
+//                        rest cage metres; motionWeight() weighs a point)
 //
 // Every shape is tuned on the real SoftBody (tests/shapes.test.mjs): a flat
 // seat under the centre of mass so a bounce cannot tip it over, no feature
@@ -279,6 +282,22 @@ function makeCat() {
   return {
     sdf, frame: F,
     mesh: { h: 6.6, bounds: [-46, 8, -34, 46, 70, 34], origin: [0, 10, 0], ...BUDGET },
+    // idle motions (world.js MOVES): every 5 s a yawn or a 냥냥펀치. Regions
+    // are soft ellipsoids (model mm): the head with both ears (not the paws
+    // under the chin), each front paw, the haunch, the tail's curl.
+    motions: {
+      interval: 5, moves: ["yawn", "punch"],
+      regions: {
+        head: [
+          { c: [head[0], head[1] + 3.5, head[2]], r: [22, 20, 21], inner: 0.55 },
+          ...ears.map((e) => ({ c: [(e.a[0] + e.b[0]) / 2, (e.a[1] + e.b[1]) / 2, (e.a[2] + e.b[2]) / 2], r: [9.5, 14, 8.5], inner: 0.5 })),
+        ],
+        pawL: [{ c: [-27, 14.5, 22], r: [11, 8, 12], inner: 0.3 }],
+        pawR: [{ c: [-7, 14.5, 22], r: [11, 8, 12], inner: 0.3 }],
+        haunch: [{ c: [19, 30, -5], r: [24, 22, 26], inner: 0.4 }],
+        tail: [{ c: [30.5, 52, -14.5], r: [12, 13, 9.5], inner: 0.45 }],
+      },
+    },
     look: (anchor) => ({
       dye: () => [3.6, 14, 6.5],
       fx: null,
@@ -367,7 +386,19 @@ function makeBird() {
       ],
     };
   };
-  return { sdf, frame: F, mesh: { h: 6.6, bounds: [-46, 8, -46, 46, 68, 46], origin: [0, 10, 0], ...BUDGET }, look };
+  // idle motions (world.js MOVES): every 7 s a failed little flight (flap,
+  // two hops, plop) or a happy 짹짹짹. Regions: the head, each wing (the
+  // pitched ellipsoid's bump plus a margin), the fan tail.
+  const motions = {
+    interval: 7, moves: ["flap", "chirp"],
+    regions: {
+      head: [{ c: [0, 49, 16], r: [19, 18, 19.5], inner: 0.5 }],
+      wingL: [{ c: [-WING_C[0], WING_C[1], WING_C[2]], r: [11, 15.5, 21], inner: 0.35 }],
+      wingR: [{ c: [WING_C[0], WING_C[1], WING_C[2]], r: [11, 15.5, 21], inner: 0.35 }],
+      tail: [{ c: [0, 48, -30], r: [16, 13, 12], inner: 0.4 }],
+    },
+  };
+  return { sdf, frame: F, mesh: { h: 6.6, bounds: [-46, 8, -46, 46, 68, 46], origin: [0, 10, 0], ...BUDGET }, look, motions };
 }
 
 const BUILDERS = { pudding: makePudding, cake: makeCake, bear: makeBear, cat: makeCat, bird: makeBird };
@@ -482,6 +513,52 @@ function makeAnchor(id) {
     if (color) out.color = color;
     return out;
   };
+}
+
+// ------------------------------------------------------------------ idle motions
+// shapeMotions(id) → null (no idle motions) or, cached and frozen:
+//   { interval: s between motion starts, moves: [names] (world.js MOVES),
+//     axes: { side, up, face } — the model's +x / +y / +z (+z = the face /
+//            beak direction) as unit vectors of the rest cage frame,
+//     regions: { name: [part…] } — a region is the union (max weight) of soft
+//            ellipsoid parts { c: centre (rest cage m), axes: [x, y, z] unit
+//            vectors, r: [rx, ry, rz] (m), inner: full weight within this
+//            fraction of the ellipsoidal radius, smooth falloff to 0 at 1 } }
+// Same frame conversion as the decor anchors (model mm → cage metres).
+const motionsCache = new Map();
+export function shapeMotions(id) {
+  if (id === "flower" || !BUILDERS[id]) return null;
+  if (!motionsCache.has(id)) {
+    const d = def(id), m = d.motions;
+    if (!m) { motionsCache.set(id, null); return null; }
+    makeShapeCage(id);
+    const bottom = stats.get(id).bottom, F = d.frame || frame(0);
+    const toCage = (q) => { const w = F.toWorld(q); return [w[0] * 0.001, (w[1] - bottom) * 0.001 + 0.010, w[2] * 0.001]; };
+    const axes = [F.dirToWorld([1, 0, 0]), [0, 1, 0], F.dirToWorld([0, 0, 1])];
+    const regions = {};
+    for (const [name, parts] of Object.entries(m.regions)) {
+      regions[name] = Object.freeze(parts.map((p) => Object.freeze({ c: toCage(p.c), axes, r: p.r.map((v) => v * 0.001), inner: p.inner ?? 0.4 })));
+    }
+    motionsCache.set(id, Object.freeze({
+      interval: m.interval, moves: Object.freeze(m.moves.slice()),
+      axes: Object.freeze({ side: axes[0], up: axes[1], face: axes[2] }), regions: Object.freeze(regions),
+    }));
+  }
+  return motionsCache.get(id);
+}
+
+// Weight (0..1) of a rest-cage point (m) in a shapeMotions region.
+export function motionWeight(parts, x, y, z) {
+  let w = 0;
+  for (const p of parts) {
+    const dx = x - p.c[0], dy = y - p.c[1], dz = z - p.c[2];
+    let k = 0;
+    for (let a = 0; a < 3; a++) { const ax = p.axes[a], q = (dx * ax[0] + dy * ax[1] + dz * ax[2]) / p.r[a]; k += q * q; }
+    k = Math.sqrt(k);
+    if (k >= 1) continue;
+    w = Math.max(w, 1 - smoothstep(p.inner, 1, k));
+  }
+  return w;
 }
 
 export function shapeLook(id) {

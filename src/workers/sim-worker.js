@@ -6,7 +6,13 @@
 //   worker → main
 //     ready {indices, positions}
 //     frame {positions?, normals?, dye?, bounds, center, energy, meanDye,
-//            gems, gemCount, grab, impact, wallImpact, events, steps, stepMs, asleep}
+//            meanFx [pearl, glow], additiveCounts {glitter, stars},
+//            gems, gemCount, grab, impact, wallImpact, events, steps, stepMs,
+//            asleep, motionIn (s until the next idle motion, null: none)}
+//   Idle motions (cat / bird) run on sim time, but the app stops ticking a
+//   sleeping jelly: the worker then wakes itself when the next motion is due
+//   (world.idle(wall time asleep) → the motion starts) and posts a frame on
+//   its own, with asleep false, so the app resumes ticking.
 import { JellyWorld } from "../core/world.js";
 
 let world = null;
@@ -19,6 +25,8 @@ let beadsSent = false;
 let decorSent = false;
 let layersDirty = false;   // a reset / shape change: resend (or clear) beads and decorations
 let additivesSent = -1;
+let decorVersionSent = -1;
+let wakeTimer = 0, lastFrameAt = 0;
 const pool = new Map(); // byteLength → [ArrayBuffer]
 
 function take(length) {
@@ -30,7 +38,9 @@ function frame(steps, elapsed, stepped) {
   const body = world.body, transfer = [];
   const out = {
     type: "frame", steps, bounds: Array.from(body.bounds), center: body.center.slice(),
-    energy: world.energy || 0, meanDye: world.meanDye.slice(), asleep: body.sleeping && !world.grabbing && !world.gems.some((g) => g.fall),
+    energy: world.energy || 0, meanDye: world.meanDye.slice(), meanFx: world.meanFx.slice(),
+    additiveCounts: { glitter: world.additives.glitter.length, stars: world.additives.stars.length },
+    asleep: body.sleeping && !world.grabbing && !world.gems.some((g) => g.fall), motionIn: world.motionIn(),
   };
   if (stepped || !sentOnce) {
     const p = take(body.positions.length), n = take(body.normals.length);
@@ -66,14 +76,16 @@ function frame(steps, elapsed, stepped) {
     const states = world.beadStates(b); out.beads = states; transfer.push(b.buffer);
     beadsSent = true;
   } else if (!beadCount && (beadsSent || layersDirty)) { out.beads = new Float32Array(0); beadsSent = false; }
-  // face / cherry / beak decorations follow the jelly
+  // face / cherry / beak decorations follow the jelly (and change expression
+  // during an idle motion: decorVersion — sent even if nothing stepped)
   const decorCount = world.decorCount();
   out.decorCount = decorCount;
-  if (decorCount && (stepped || !decorSent || layersDirty)) {
+  if (decorCount && (stepped || !decorSent || layersDirty || world.decorVersion !== decorVersionSent)) {
     const d = take(decorCount * 12);
     world.decorStates(d); out.decor = d; transfer.push(d.buffer);
     decorSent = true;
   } else if (!decorCount && (decorSent || layersDirty)) { out.decor = new Float32Array(0); decorSent = false; }
+  decorVersionSent = world.decorVersion;
   layersDirty = false;
   out.grab = body.grab ? { point: body.grab.point.slice(), target: body.grab.target.slice() } : null;
   out.impact = body.impact; out.wallImpact = body.wallImpact;
@@ -82,6 +94,22 @@ function frame(steps, elapsed, stepped) {
   out.stepMs = stepTimeAvg;
   out.events = world.events.splice(0);
   self.postMessage(out, transfer);
+  scheduleWake(out.asleep, out.motionIn);
+}
+
+// Asleep with an idle motion pending: nobody ticks us, so wake up when it is due.
+function scheduleWake(asleep, motionIn) {
+  clearTimeout(wakeTimer); wakeTimer = 0;
+  lastFrameAt = performance.now();
+  if (!asleep || paused || motionIn === null || motionIn === undefined) return;
+  wakeTimer = setTimeout(selfWake, Math.max(16, motionIn * 1000 + 5));
+}
+function selfWake() {
+  wakeTimer = 0;
+  if (!world || paused) return;
+  world.idle((performance.now() - lastFrameAt) / 1000);
+  if (world.motion) frame(0, 0, false);
+  else scheduleWake(true, world.motionIn());
 }
 
 self.onmessage = ({ data }) => {
@@ -97,7 +125,7 @@ self.onmessage = ({ data }) => {
         pool.set(buffer.byteLength, list);
       }
       for (const event of data.events || []) {
-        if (event.type === "pause") { paused = Boolean(event.paused); if (paused) world.handle({ type: "grabEnd" }); world.accumulator = 0; continue; }
+        if (event.type === "pause") { paused = Boolean(event.paused); if (paused) { world.handle({ type: "grabEnd" }); clearTimeout(wakeTimer); wakeTimer = 0; } world.accumulator = 0; continue; }
         if (event.type === "reset") { sentOnce = false; layersDirty = true; }
         if (event.type === "shape") {
           world.handle(event);

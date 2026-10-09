@@ -1,6 +1,8 @@
 // JellyWorld: paint drops (exact pigment bookkeeping, subtractive mixing,
-// diffusion, water dilution), gem containment / suspension / clinks, cost.
-import { JellyWorld, PAINTS, BASES } from "../src/core/world.js";
+// diffusion, water dilution), gem containment / suspension / clinks, the
+// animal shapes' idle motions and expressions, the bunny's kick, rare-gem
+// events, plain bases, cost.
+import { JellyWorld, PAINTS, BASES, DECOR_KINDS } from "../src/core/world.js";
 import { SHAPES, signatureSigma } from "../src/core/shapes.js";
 
 let failures = 0;
@@ -279,6 +281,206 @@ for (const sh of SHAPES.filter((x) => x.id !== "flower")) {
     `blue − yellow red absorption ${contrast0.toFixed(1)} → ${contrast1.toFixed(1)} 1/m`);
   check("the dropped paint still spreads and pigment is conserved", pig1.every((v, c) => Math.abs(v - pig0[c]) < 1e-9 * Math.max(1, pig0[c])) && !cw.dyeActive,
     pig0.map((v, c) => `${(v * 1e6).toFixed(3)}→${(pig1[c] * 1e6).toFixed(3)}`).join(" "));
+}
+
+// 7) v8: idle motions of the animal shapes (cat: yawn / 냥냥펀치 every 5 s,
+//    bird: flap / 짹짹짹 every 7 s), expressions, kick, rare-gem events, plain
+{
+  const det6 = (x, a, b, c, d) => { const ax = x[a * 3], ay = x[a * 3 + 1], az = x[a * 3 + 2]; const bx = x[b * 3] - ax, by = x[b * 3 + 1] - ay, bz = x[b * 3 + 2] - az, cx = x[c * 3] - ax, cy = x[c * 3 + 1] - ay, cz = x[c * 3 + 2] - az, dx = x[d * 3] - ax, dy = x[d * 3 + 1] - ay, dz = x[d * 3 + 2] - az; return bx * (cy * dz - cz * dy) - cx * (by * dz - bz * dy) + dx * (by * cz - bz * cy); };
+  const inverted = (b) => { let n = 0; for (let e = 0; e < b.elementCount; e++) if (det6(b.x, b.ids[e * 4], b.ids[e * 4 + 1], b.ids[e * 4 + 2], b.ids[e * 4 + 3]) <= 0) n++; return n; };
+  const starts = (w, seconds) => { const out = []; run(w, seconds, () => { for (const e of drain(w)) if (e.type === "motion") out.push({ t: w.time, ...e }); }); return out; };
+  const kinds = (w) => { const n = w.decorCount(), d = w.decorStates(new Float32Array(n * 12)); return Array.from({ length: n }, (_, i) => ({ kind: DECOR_KINDS[d[i * 12]], scale: d[i * 12 + 8], name: w.decor[i].name, p: [d[i * 12 + 1], d[i * 12 + 2], d[i * 12 + 3]] })); };
+  check("DECOR_KINDS: the 8 kinds, then the 4 expressions (append only)", DECOR_KINDS.join() === "eye,nose,mouth,blush,muzzle,earInner,cherry,beak,eyeClosed,eyeHappy,mouthOpen,beakOpen");
+
+  // the timer: start to start, in sim time, never for the flower or while disabled
+  for (const [shape, interval, moves] of [["cat", 5, ["yawn", "punch"]], ["bird", 7, ["flap", "chirp"]]]) {
+    const w = new JellyWorld({ shape }); const t0 = w.time || 0; drain(w);
+    const s = starts(w, interval * 4 + 1.5);
+    const gaps = s.slice(1).map((e, i) => e.t - s[i].t);
+    check(`${shape}: an idle motion every ${interval} s (${moves.join(" / ")})`, s.length === 4 && Math.abs(s[0].t - t0 - interval) < 0.02 && gaps.every((g) => Math.abs(g - interval) < 0.02) && s.every((e) => moves.includes(e.name) && e.shape === shape && e.duration > 0.5 && e.duration < 2.5),
+      `${s.map((e) => `${e.name}@${(e.t - t0).toFixed(2)}`).join(" ")}`);
+    w.handle({ type: "motions", enabled: false });
+    check(`${shape}: no motion while disabled`, starts(w, interval * 2 + 1).length === 0 && !w.motion);
+    w.handle({ type: "motions", enabled: true });
+    const again = starts(w, interval + 0.1);
+    check(`${shape}: re-enabled — the timer starts over`, again.length === 1 && Math.abs(again[0].t - (w.time - 0.1)) < 0.05);
+  }
+  {
+    const w = new JellyWorld(); drain(w);
+    w.handle({ type: "motionNow", name: "yawn" });
+    check("flower: never moves on its own (no idle motions, motionNow ignored)", starts(w, 16).length === 0 && !w.type.motions && w.motionIn() === null);
+  }
+  // also while a finger holds it
+  {
+    const w = new JellyWorld({ shape: "cat" }); run(w, 1); drain(w);
+    const ix = w.type.stencils.indices, [a, b, c] = [ix[0], ix[1], ix[2]], p = [w.body.positions[a * 3], w.body.positions[a * 3 + 1], w.body.positions[a * 3 + 2]];
+    w.handle({ type: "grabStart", id: 1, a, b, c, bary: [1, 0, 0], point: p });
+    w.handle({ type: "target", id: 1, point: [p[0], p[1] + 0.01, p[2]] });
+    const s = starts(w, 4.5);
+    check("cat: the timer runs while it is held, a motion plays under the finger", s.length === 1 && w.grabbing && w.body.isFinite());
+    w.handle({ type: "grabEnd", id: 1 }); run(w, 2);
+  }
+
+  // cues for sound sync, and expressions swapped on the face, then back
+  for (const [shape, name, want, swaps] of [
+    ["cat", "yawn", { open: 1, stretch: 1 }, { at: 0.7, eye: "eyeClosed", mouth: "mouthOpen" }],
+    ["cat", "punch", { punch: 4 }, { at: 0.5, eye: "eyeHappy", mouth: "mouthOpen" }],
+    ["bird", "flap", { flap: 1, hop: 2, plop: 1 }, { at: 1.8, eye: "eyeHappy" }],
+    ["bird", "chirp", { chirp: 3 }, { at: 0.2, eye: "eyeHappy", beak: "beakOpen" }],
+  ]) {
+    const w = new JellyWorld({ shape }); w.handle({ type: "motions", enabled: false }); run(w, 2); drain(w);
+    const before = kinds(w), v0 = w.decorVersion;
+    w.handle({ type: "motionNow", name });
+    const ev = drain(w);
+    run(w, swaps.at);
+    const mid = kinds(w), cues = {};
+    for (const e of [...ev, ...drain(w)]) if (e.type === "motionCue" && e.name === name) cues[e.cue] = (cues[e.cue] || 0) + 1;
+    run(w, 2.6);
+    for (const e of drain(w)) if (e.type === "motionCue" && e.name === name) cues[e.cue] = (cues[e.cue] || 0) + 1;
+    const after = kinds(w);
+    const swapOk = Object.entries(swaps).filter(([k]) => k !== "at").every(([role, kind]) => mid.filter((d) => d.name === role).length > 0 && mid.filter((d) => d.name === role).every((d) => d.kind === kind));
+    const eyeSize = mid.filter((d) => d.name === "eye").every((d) => Math.abs(d.scale - before.find((b) => b.name === "eye").scale) < 1e-9);
+    check(`${shape} ${name}: "motion" + cues ${JSON.stringify(want)}`, ev.some((e) => e.type === "motion" && e.name === name && e.shape === shape) && Object.entries(want).every(([k, n]) => cues[k] === n), JSON.stringify(cues));
+    check(`${shape} ${name}: expressions swapped in mid-motion (${Object.entries(swaps).filter(([k]) => k !== "at").map(([k, v]) => `${k}→${v}`).join(", ")}), eyes keep their size`, swapOk && eyeSize && w.decorVersion !== v0, mid.map((d) => d.kind).join(" "));
+    check(`${shape} ${name}: and back to the normal face afterwards`, after.every((d, i) => d.kind === before[i].kind && Math.abs(d.scale - before[i].scale) < 1e-12) && !w.motion && w.body.extraGrabs.length === 0);
+  }
+  {
+    // the yawn's mouth opens wide and closes again
+    const w = new JellyWorld({ shape: "cat" }); w.handle({ type: "motions", enabled: false }); run(w, 1);
+    const base = kinds(w).find((d) => d.name === "mouth").scale;
+    w.handle({ type: "motionNow", name: "yawn" });
+    let widest = 0; run(w, 1.8, () => { const m = kinds(w).find((d) => d.name === "mouth"); if (m.kind === "mouthOpen") widest = Math.max(widest, m.scale / base); });
+    check("cat yawn: the mouth opens wide (scaled up) then closes", widest > 1.4, `× ${widest.toFixed(2)}`);
+  }
+
+  // the jelly visibly acts: the head rises in a yawn, the paws jab forward, the bird hops
+  {
+    const regionAt = (w, name) => { const r = w.type.regions[name], x = w.body.x, m = w.body.mass; let s = 0; const p = [0, 0, 0]; for (let k = 0; k < r.ids.length; k++) { const q = r.w[k] * m[r.ids[k]]; s += q; for (let a = 0; a < 3; a++) p[a] += x[r.ids[k] * 3 + a] * q; } return p.map((v) => v / s); };
+    const peak = (shape, name, region, axis, seconds) => {
+      const w = new JellyWorld({ shape }); w.handle({ type: "motions", enabled: false }); run(w, 2);
+      const p0 = regionAt(w, region), c0 = w.body.center.slice();
+      w.handle({ type: "motionNow", name });
+      // relative to the jelly's centre (a hop lifts everything)
+      let best = 0; run(w, seconds, () => { const p = regionAt(w, region); best = Math.max(best, (p[axis] - p0[axis]) - (w.body.center[axis] - c0[axis])); });
+      return best;
+    };
+    const head = peak("cat", "yawn", "head", 1, 1.2), paw = peak("cat", "punch", "pawL", 2, 0.5), hop = peak("bird", "flap", "wingR", 1, 1.4);
+    check("motions read: a yawn lifts the head ≥ 4 mm, a punch jabs a paw ≥ 4 mm forward, the bird's wing flaps ≥ 4 mm up", head > 0.004 && paw > 0.004 && hop > 0.004, `${(head * 1000).toFixed(1)} / ${(paw * 1000).toFixed(1)} / ${(hop * 1000).toFixed(1)} mm`);
+  }
+
+  // 60 s with the motions on (a move every 5 / 7 s): stable, sane volume, no
+  // inside-out mess (a plain bounce turns ~165 tets inside out for a moment),
+  // and the jelly stays where it was
+  for (const [shape, texture] of [["cat", "jelly"], ["bird", "jelly"], ["cat", "slime"], ["bird", "slime"]]) {
+    const w = new JellyWorld({ shape, texture }); w.handle({ type: "motions", enabled: false }); run(w, texture === "slime" ? 5 : 2);
+    const b = w.body, inv0 = inverted(b), c0 = b.center.slice(), slime = texture === "slime";
+    let n = 0, worst = 0, lo = Infinity, hi = 0, finite = true, k = 0;
+    w.handle({ type: "motions", enabled: true });
+    run(w, 60, () => {
+      for (const e of drain(w)) if (e.type === "motion") n++;
+      if (++k % 30 === 0) { worst = Math.max(worst, inverted(b)); const v = b.volumeRatio(); lo = Math.min(lo, v); hi = Math.max(hi, v); finite &&= b.isFinite(); }
+    });
+    w.handle({ type: "motions", enabled: false }); run(w, 3);
+    const drift = Math.hypot(b.center[0] - c0[0], b.center[2] - c0[2]), invEnd = inverted(b);
+    const endLimit = slime ? Math.round(0.01 * b.elementCount) : inv0 + 2;
+    check(`${shape} (${texture}): 60 s of idle motions (${n}) — finite, volume 0.88–1.06, ≤ ${slime ? 120 : 60} tets inside out at worst, ≤ ${endLimit} once settled`, n === (shape === "cat" ? 12 : 8) && finite && b.isFinite() && lo > 0.88 && hi < 1.06 && worst <= (slime ? 120 : 60) && invEnd <= endLimit,
+      `volume ${lo.toFixed(3)}–${hi.toFixed(3)}, inverted ${inv0} → worst ${worst} → ${invEnd}`);
+    check(`${shape} (${texture}): …and it stays where it was (< 4 mm), on the tray`, drift < 0.004 && b.bounds[1] > -0.001 && b.bounds[1] < 0.002, `drift ${(drift * 1000).toFixed(2)} mm`);
+  }
+
+  // cancelled cleanly by a new jelly, a new shape, or switching motions off
+  for (const how of ["reset", "shape", "off"]) {
+    const w = new JellyWorld({ shape: "cat" }); run(w, 1);
+    w.handle({ type: "motionNow", name: "yawn" }); run(w, 0.6);
+    const mid = w.motion && kinds(w).some((d) => d.kind === "eyeClosed");
+    if (how === "reset") w.handle({ type: "reset", base: "berry" });
+    else if (how === "shape") w.handle({ type: "shape", shape: "bird" });
+    else w.handle({ type: "motions", enabled: false });
+    const face = kinds(w).every((d) => !["eyeClosed", "eyeHappy", "mouthOpen", "beakOpen"].includes(d.kind));
+    run(w, 2);
+    check(`a motion is cancelled cleanly by ${how}`, mid && !w.motion && face && w.body.extraGrabs.length === 0 && w.body.isFinite() && (how !== "off" || w.motionIn() === null));
+  }
+
+  // asleep and not ticked: idle() keeps the timer going (the worker's self-wake)
+  {
+    const w = new JellyWorld({ shape: "bird" }); run(w, 3); drain(w);
+    const left = w.motionIn();
+    w.idle(left - 0.5);
+    const early = drain(w).some((e) => e.type === "motion");
+    w.idle(0.6);
+    check("idle(): wall time while nobody ticks starts the motion when due", w.body.sleeping === false && !early && drain(w).some((e) => e.type === "motion") && w.motion, `motionIn was ${left.toFixed(2)} s`);
+  }
+
+  // the bunny's kick: tumbles across the tray, hits the rim and stays there
+  for (const shape of ["flower", "cat", "bird"]) {
+    const w = new JellyWorld({ shape }); w.handle({ type: "motions", enabled: false }); run(w, 2); drain(w);
+    const c0 = w.body.center.slice();
+    w.handle({ type: "kick", dir: [0.8, -0.6], strength: 0.8 });
+    const kicked = drain(w).some((e) => e.type === "kicked");
+    let inside = true, finite = true, maxR = 0;
+    run(w, 6, () => { const x = w.body.x; for (let i = 0; i < w.body.nodeCount; i++) { const r = Math.hypot(x[i * 3], x[i * 3 + 2]); maxR = Math.max(maxR, r); if (r > w.wallRadius + 1e-9) inside = false; } finite &&= w.body.isFinite(); });
+    const moved = Math.hypot(w.body.center[0] - c0[0], w.body.center[2] - c0[2]), along = ((w.body.center[0] - c0[0]) * 0.8 - (w.body.center[2] - c0[2]) * 0.6);
+    check(`${shape}: a kick sends it ≥ 20 mm across the tray (along the kick), into the rim, and it settles`, kicked && moved > 0.02 && along > 0.015 && inside && finite && w.body.sleeping && maxR > w.wallRadius - 0.003,
+      `moved ${(moved * 1000).toFixed(0)} mm, reaches r ${(maxR * 1000).toFixed(1)} of ${(w.wallRadius * 1000).toFixed(0)} mm, asleep ${w.body.sleeping}`);
+  }
+
+  // rare gems: rareIn when really placed, rejections name the gem, reset lists the ones left
+  {
+    const w = new JellyWorld();
+    const first = drain(w).find((e) => e.type === "reset");
+    check("the very first jelly's reset event lists no rare gems", first && Array.isArray(first.rare) && first.rare.length === 0);
+    run(w, 1);
+    w.handle({ type: "gemScatter", count: 1, rare: { index: 3, tier: 1 }, radius: 0.0048 });
+    const ix = w.type.stencils.indices;
+    let t = 0; for (let k = 0; k < ix.length / 3; k++) if (w.body.positions[ix[k * 3] * 3 + 1] > w.body.positions[ix[t * 3] * 3 + 1]) t = k;
+    w.handle({ type: "gemAdd", a: ix[t * 3], b: ix[t * 3 + 1], c: ix[t * 3 + 2], bary: [1 / 3, 1 / 3, 1 / 3], shape: 0, color: 0, radius: 0.0048, rare: { index: 5, tier: 0 } });
+    w.handle({ type: "gemScatter", count: 2 });
+    const ev = drain(w), ins = ev.filter((e) => e.type === "rareIn");
+    check("rareIn for every rare gem placed (scatter and drop), none for normal gems", ins.length === 2 && ins[0].index === 3 && ins[0].tier === 1 && ins[1].index === 5 && ins[1].tier === 0, JSON.stringify(ins));
+    run(w, 2);
+    for (let i = 0; w.rareCount < 8 && i < 30; i++) w.handle({ type: "gemScatter", count: 1, rare: { index: 10 + (i % 8), tier: 2 }, radius: 0.0048 });
+    drain(w);
+    w.handle({ type: "gemScatter", count: 1, rare: { index: 20, tier: 1 }, radius: 0.0048 });
+    w.handle({ type: "gemAdd", a: ix[t * 3], b: ix[t * 3 + 1], c: ix[t * 3 + 2], bary: [1 / 3, 1 / 3, 1 / 3], shape: 0, color: 0, radius: 0.0048, rare: { index: 21, tier: 0 } });
+    const rej = drain(w);
+    check("a rejected rare gem is named in the rejection (rareFull {rare: {index, tier}}), no rareIn", w.rareCount === 8 && !rej.some((e) => e.type === "rareIn") && rej.some((e) => e.type === "rareFull" && e.rare?.index === 20 && e.rare.tier === 1) && rej.some((e) => e.type === "rareFull" && e.rare?.index === 21 && e.rare.tier === 0), JSON.stringify(rej.filter((e) => e.type !== "clink")));
+    run(w, 2);
+    const left = w.gems.filter((g) => g.rare).map((g) => `${g.shape}:${g.tier}`).sort().join();
+    w.handle({ type: "reset", base: "mint" });
+    const r1 = drain(w).find((e) => e.type === "reset");
+    check("reset lists the rare gems still in the old jelly (for the refund)", r1 && r1.rare.length === 8 && r1.rare.map((g) => `${g.index}:${g.tier}`).sort().join() === left, JSON.stringify(r1?.rare));
+    w.handle({ type: "gemScatter", count: 1, rare: { index: 7, tier: 2 }, radius: 0.0048 }); run(w, 1.5); drain(w);
+    w.handle({ type: "shape", shape: "cake" });
+    const r2 = drain(w);
+    check("a shape change is a new jelly too: reset {rare} then shape", r2.findIndex((e) => e.type === "reset" && e.rare.length === 1 && e.rare[0].index === 7 && e.rare[0].tier === 2) < r2.findIndex((e) => e.type === "shape"));
+    w.handle({ type: "reset", base: "berry" });
+    check("…and the next reset lists none", drain(w).find((e) => e.type === "reset").rare.length === 0);
+  }
+
+  // plain: a plain base colour on a shaped jelly — the layers go, the cherry and glitter stay
+  {
+    const w = new JellyWorld({ shape: "cake" });
+    const layered = w.lookDye !== null && Math.abs(w.meanDye[0] - signatureSigma("cake")[0]) < 0.1;
+    w.handle({ type: "reset", base: "mint", plain: true });
+    const spread = (() => { let lo = Infinity, hi = -Infinity; for (let i = 0; i < w.body.nodeCount; i++) { lo = Math.min(lo, w.dye[i * 3]); hi = Math.max(hi, w.dye[i * 3]); } return hi - lo; })();
+    check("plain reset on a cake: uniform base colour, no signature pattern", layered && w.lookDye === null && spread < 1e-9 && Math.abs(w.meanDye[0] - BASES.mint[0]) < 1e-9);
+    check("…the cherry and the glitter stay", w.decor.some((d) => d.name === "cherry") && w.additives.glitter.length > 30);
+    w.handle({ type: "shape", shape: "bird", base: "honey", plain: true });
+    check("plain shape change: the bird's pattern is replaced by the base, its face and sheen stay", w.lookDye === null && Math.abs(w.meanDye[2] - BASES.honey[2]) < 1e-9 && w.decor.length === 3 && w.meanFx[0] > 0.7);
+    w.handle({ type: "reset", base: "berry" });
+    check("a normal reset brings the signature look back", w.lookDye !== null && Math.abs(w.meanDye[1] - signatureSigma("bird")[1]) < 0.1);
+  }
+
+  // meanFx: mass-weighted [pearl, glow]
+  {
+    const w = new JellyWorld({ base: "clear" }); run(w, 0.3);
+    const z = w.meanFx.slice();
+    w.handle({ type: "drop", point: top(w), paint: paint("pearl") });
+    w.handle({ type: "drop", point: top(w), paint: paint("glow") });
+    const m = w.body.mass, M = w.body.totalMass; let p = 0, g = 0;
+    for (let i = 0; i < w.body.nodeCount; i++) { p += w.fx[i * 2] * m[i] / M; g += w.fx[i * 2 + 1] * m[i] / M; }
+    check("meanFx = mass-weighted mean [pearl, glow]", z[0] === 0 && z[1] === 0 && w.meanFx[0] > 0.005 && w.meanFx[1] > 0.005 && Math.abs(w.meanFx[0] - p) < 1e-12 && Math.abs(w.meanFx[1] - g) < 1e-12, w.meanFx.map((v) => v.toFixed(4)).join(", "));
+  }
 }
 
 // 6) cost (awake, 240 Hz, with gems and an active dye field)
