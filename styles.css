@@ -762,3 +762,8 @@ body:has(.drawer:not([hidden])) .tummy, body:has(.hint:not([hidden]):not(.fade))
 /* 꾸미기 카드 (outfit card): a big emoji on the gold special card */
 .card .front .outfit-face { font-size: 58px; line-height: 1; display: grid; place-items: center; margin-bottom: 14px; filter: drop-shadow(0 3px 4px rgba(150, 90, 0, 0.3)); }
 .card.outfit-card .front { background: radial-gradient(circle at 50% 42%, #fff4fb 0 34%, transparent 35%), linear-gradient(160deg, #f6eaff, #d9b8ff 55%, #9b6bd8); }
+
+/* While the bunny visits (eat / spit / kick / toilet) the order card steps
+   out of the way so it never covers the bunny. */
+.order { transition: opacity 0.25s ease, translate 0.25s ease; }
+body.bunny-visit .order { opacity: 0; translate: 0 -14px; pointer-events: none; }

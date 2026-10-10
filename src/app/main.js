@@ -381,11 +381,25 @@ async function boot() {
   }
   function pickAt(x, y) { return view.pick(x, y, canvas.getBoundingClientRect()); }
   function topHit() {
-    // the jelly's top seen from the camera
-    const v = view.state.center.clone(); v.y = view.geometry.boundingBox.max.y * 0.98;
-    tray.localToWorld(v); v.project(camera);
-    const r = canvas.getBoundingClientRect();
-    return pickAt(r.left + (v.x + 1) / 2 * r.width, r.top + (1 - v.y) / 2 * r.height);
+    // The jelly's top seen from the camera. The point straight above the
+    // centre is air on some shapes (between the cat's ears, beside the bird's
+    // off-centre head, over the bear's dip), so walk down from the top and
+    // fan out sideways until the ray hits the jelly.
+    const box = view.geometry.boundingBox, c = view.state.center, r = canvas.getBoundingClientRect();
+    const top = box.max.y, bottom = Math.max(box.min.y, c.y - 0.25 * (top - box.min.y));
+    const sx = 0.5 * (box.max.x - box.min.x), sz = 0.5 * (box.max.z - box.min.z);
+    const offsets = [[0, 0], [0.25, 0], [-0.25, 0], [0, 0.25], [0, -0.25], [0.5, 0], [-0.5, 0], [0, 0.5], [0, -0.5]];
+    const v = new THREE.Vector3();
+    for (let k = 0; k <= 8; k++) {
+      const y = top - (top - bottom) * (k / 8) - 0.02 * (top - box.min.y);
+      for (const [ox, oz] of offsets) {
+        v.set(c.x + ox * sx, y, c.z + oz * sz);
+        tray.localToWorld(v); v.project(camera);
+        const hit = pickAt(r.left + (v.x + 1) / 2 * r.width, r.top + (1 - v.y) / 2 * r.height);
+        if (hit) return hit;
+      }
+    }
+    return null;
   }
 
   // ---- UI ----
@@ -411,7 +425,7 @@ async function boot() {
       releaseDrop(paint, hit);
       return true;
     },
-    onPaintTap: (paint) => { const hit = topHit(); if (hit) releaseDrop(paint, hit); },
+    onPaintTap: (paint) => { const hit = topHit(); if (hit) releaseDrop(paint, hit); else toast("젤리 위로 끌어다 놓아 주세요"); },
     onAdditiveDrop: (kind, x, y) => {
       const hit = pickAt(x, y);
       if (!hit) { toast("젤리 위에서 놓아 주세요"); return; }
@@ -541,6 +555,8 @@ async function boot() {
   let eating = false, lastFrame = null, carrying = false;
   function setEating(on) {
     eating = on;
+    // the order card would cover the bunny: tuck it away for the whole visit
+    document.body.classList.toggle("bunny-visit", on);
     $("feed").disabled = on;
     $("order-new").disabled = on;
     refreshToilet();
