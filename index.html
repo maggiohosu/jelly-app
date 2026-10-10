@@ -48,7 +48,7 @@
     <span class="order-head">
       <small>🐰 토끼 주문</small>
       <i class="order-kind" id="order-kind" hidden></i>
-      <span class="order-chips"><i class="order-time" id="order-time" hidden></i><i class="combo-chip" id="combo-chip" hidden></i></span>
+      <span class="order-chips"><i class="order-time" id="order-time" hidden></i><i class="combo-chip" id="combo-chip" hidden></i><i class="happy-chip" id="happy-chip" hidden></i></span>
     </span>
     <b class="order-text" id="order-text" role="button" tabindex="0">…</b>
     <span class="order-foot">
@@ -64,6 +64,7 @@
   <section class="reward" id="reward" hidden aria-live="polite">
     <div class="reward-card">
       <div class="stars" id="reward-stars">★★★</div>
+      <div class="reward-mod" id="reward-mod" hidden></div>
       <div class="reward-line" id="reward-text">맛있어요!</div>
       <div class="reward-coins"><i class="coin-icon" aria-hidden="true"></i><b id="reward-coins">+0</b><span class="small" id="reward-xp"></span></div>
       <div class="reward-break" id="reward-break" hidden></div>
@@ -123,6 +124,9 @@
   </section>
 
   <nav class="toolbar" id="toolbar" hidden>
+    <div class="tummy" id="tummy" role="meter" aria-label="토끼 배부름" aria-valuemin="0" aria-valuemax="20" aria-valuenow="0">
+      <span class="tummy-icon" aria-hidden="true">🍮</span><span class="tummy-bar" aria-hidden="true"><i id="tummy-fill"></i></span><b id="tummy-count">0/20</b><span class="tummy-full">너무 배불러요!</span>
+    </div>
     <div class="paints" id="paints" role="toolbar" aria-label="스포이드 물감"></div>
     <div class="actions">
       <button class="round toggle" id="gems" aria-label="보석함" aria-pressed="false">💎</button>
@@ -130,6 +134,7 @@
       <button class="round toggle" id="shape-button" aria-label="모양 고르기" aria-pressed="false"></button>
       <button class="round" id="nudge" aria-label="통통 튀기기">통통</button>
       <button class="round carrot" id="feed" aria-label="토끼에게 먹이기">🥕</button>
+      <button class="round potty" id="toilet" aria-label="토끼 화장실 보내기 (배가 꽉 차면 열려요)" disabled>🚽</button>
     </div>
   </nav>
 
@@ -230,8 +235,11 @@
         <li>🐰 주문서 색과 보석을 맞춰 만들고 🥕를 누르면 토끼가 와삭와삭 먹어요. 비슷할수록 ★이 많고 금화도 많이 줘요. '✨ 이 주문으로 새 젤리'를 누르면 주문에 맞는 모양·바탕색 젤리가 바로 나와요</li>
         <li>⚡ 주문을 받고 30초 안에 주면 금화 +50 %, 1분 안이면 +25 %. ★3 이상을 연달아 받으면 🔥콤보로 금화가 더 늘어요</li>
         <li>✨ 황금 주문은 금화 ×3, 🧐 까다로운 날은 ×2, 🙈 기억 주문은 잠깐 뒤에 글이 숨어요(톡 누르면 다시 보기)</li>
-        <li>🎴 카드 뽑기 — 레어 보석이 10개씩 들어와요. 같은 보석이 또 나오면 10개 더 + 글리터 → 금빛 → 무지개빛 업그레이드. 아주 가끔 모양 카드도!</li>
+        <li>🎴 카드 뽑기 — 레어 보석이 10개씩 들어와요. 같은 보석이 또 나오면 10개 더 + 글리터 → 금빛 → 무지개빛 업그레이드. 아주 가끔 모양 카드·꾸미기 카드도!</li>
         <li>💎 레어 보석은 넣을 때마다 하나씩 줄어요. 먹이지 않고 새 젤리로 바꾸면 젤리 속 레어 보석은 보석함으로 돌아와요</li>
+        <li>🍮 토끼는 젤리를 먹을 때마다 배가 불러요. 20개를 먹어 배가 꽉 차면 별이 하나씩 깎여요 — 🚽 화장실에 보내 주세요</li>
+        <li>😊 화장실에 다녀온 토끼는 기분 최고! 다음 5번은 꾸민 젤리에 별 +1 (★4에서 넘치면 금화 +10)</li>
+        <li>🧙 마녀 모자·🪄 마법지팡이는 카드 뽑기에서만 나와요 (30장에 1장 꼴)</li>
         <li>토끼와 친해지면 선물상자와 새 물감·첨가물·모양·옷·테마가 생겨요</li>
         <li>금화·도감 기록은 이 기기에만 저장돼요. Safari 방문 기록·웹사이트 데이터를 지우면 처음부터 다시 시작해요</li>
       </ul>

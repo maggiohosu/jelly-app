@@ -243,72 +243,82 @@ function makeBear() {
   };
 }
 
-// 4) 고양이 — glitter cat loaf: body along x, head at the front-left facing
-// the camera with pointed ears, paws in front, tail curling up at the back.
+// 4) 고양이 — strawberry jelly cat: a round dome (the cat's head, seen from
+// the front) with two pointed ears on top and two small round front paws
+// peeking out at the foot of the face, standing in a thick scalloped skirt
+// (a jelly mould's wavy rim). Clear strawberry pink, deeper toward the ear
+// tips; strawberry halves set inside (decor material points, not gems); a
+// dot-eyed ω face with whiskers. The skirt is a fat ring (≈ 2 lattice cells
+// thick, not a floor flange: a thin one turned inside out under bites in v7).
 function makeCat() {
-  const F = frame(0, [-2.5, 0, 0]);                    // shift so the footprint is centred
-  const head = [-15, 29.5, 8];
-  const ears = [
-    { a: [head[0] - 11.5, head[1] + 11.5, head[2] - 2], b: [head[0] - 15.5, head[1] + 28, head[2] - 0.5] },
-    { a: [head[0] + 11.5, head[1] + 11.5, head[2] - 2], b: [head[0] + 15.5, head[1] + 28, head[2] - 0.5] },
-  ];
-  // the tail climbs the rear of the loaf (supported by it) and only the curl stands free
-  const tail = [[30, 26, -14], [35, 37, -15], [35.5, 47.5, -15], [32.5, 56, -14.5], [26.5, 58, -14], [23, 55, -13.5]];
-  const p = [0, 0, 0];
+  const F = frame(0);
+  // dome: the upper half of an ellipsoid standing on the floor (a little
+  // flatter front-to-back, its centre a little behind the footprint's)
+  const DOME_C = [0, FLOOR, -1.5], DOME_R = [32, 39, 30];
+  // skirt: a ring (tube radius RIM_T, centre RIM_Y) round the dome's foot
+  // whose radius waves RIM_N times around (± RIM_A): the scallops
+  const RIM_R = 31, RIM_T = 7.4, RIM_Y = FLOOR + 3.6, RIM_N = 10, RIM_A = 2.8;
+  const ears = [-1, 1].map((s) => ({ a: [s * 15.5, FLOOR + 30.5, -3.3], b: [s * 23, FLOOR + 50, -3.3] }));
+  const EAR_R = [9.4, 3.6], EAR_FLAT = 1.15;
+  const paws = [-1, 1].map((s) => [s * 10, FLOOR + 12.5, 29.5]);
+  const PAW_R = [7.5, 6.8, 7.5];
+  // flattened round cone (thinner front-to-back)
+  const ear = (e, x, y, z) => roundCone(x, y, (z - e.a[2]) * EAR_FLAT + e.a[2], e.a, e.b, EAR_R[0], EAR_R[1]);
   const sdf = (x, y, z) => {
-    F.toLocal(x, y, z, p);
-    const [lx, ly, lz] = p;
-    // a low loaf that rises into a round haunch at the back, so the round
-    // head (a little taller) stands out at the front
-    const loaf = roundBox(lx, ly, lz, [8, 24, -4.5], [25.5, 14.5, 25], 11);
-    const haunch = ellipsoid(lx, ly, lz, [17.5, 28.5, -5], [22, 20, 23]);
-    const hd = ellipsoid(lx, ly, lz, head, [21, 18.5, 19.5]);
-    let d = smin(loaf, haunch, 6);
-    d = smin(d, hd, 3.5);
-    for (const e of ears) {
-      // flattened round cone (thinner front-to-back)
-      const ez = (lz - e.a[2]) * 1.15 + e.a[2];
-      d = smin(d, roundCone(lx, ly, ez, e.a, e.b, 8.8, 3), 3);
-    }
-    d = smin(d, ellipsoid(lx, ly, lz, [-27, 15.5, 21], [8.2, 5.8, 9.5]), 3);
-    d = smin(d, ellipsoid(lx, ly, lz, [-7, 15.5, 21], [8.2, 5.8, 9.5]), 3);
-    d = smin(d, ellipsoid(lx, ly, lz, [28, 15.5, 11], [10, 6, 8.5]), 3);
-    let tl = Infinity;
-    for (let i = 0; i + 1 < tail.length; i++) tl = smin(tl, roundCone(lx, ly, lz, tail[i], tail[i + 1], 6.2 - 0.25 * i, 5.95 - 0.25 * i), 1.5);
-    d = smin(d, tl, 4);
-    return floorCut(d, ly, 3);
+    let d = ellipsoid(x, y, z, DOME_C, DOME_R);
+    const dx = x - DOME_C[0], dz = z - DOME_C[2], rho = Math.hypot(dx, dz), th = Math.atan2(dz, dx);
+    // (the waving radius makes this only roughly a distance, |∇| ≈ 1 ± A·N/R:
+    // fine for the mesher, which needs the zero set)
+    d = smin(d, Math.hypot(rho - (RIM_R + RIM_A * Math.cos(RIM_N * th)), y - RIM_Y) - RIM_T, 6);
+    for (const e of ears) d = smin(d, ear(e, x, y, z), 3);
+    for (const p of paws) d = smin(d, ellipsoid(x, y, z, p, PAW_R), 2.5);
+    return floorCut(d, y, 3);
   };
-  const W = (q) => F.toWorld(q);
+  // how far up an ear a point is (0 at the dome … 1 at the tip)
+  const earT = (x, y, z) => {
+    let k = 0;
+    for (const e of ears) {
+      const ax = e.b[0] - e.a[0], ay = e.b[1] - e.a[1], t = ((x - e.a[0]) * ax + (y - e.a[1]) * ay) / (ax * ax + ay * ay);
+      if (ear(e, x, y, z) < 3) k = Math.max(k, clamp(t, 0, 1));
+    }
+    return k;
+  };
+  const PINK = [2.3, 23.5, 16.5], DEEP = [3.8, 48, 31];
   return {
     sdf, frame: F,
-    mesh: { h: 6.6, bounds: [-46, 8, -34, 46, 70, 34], origin: [0, 10, 0], ...BUDGET },
+    mesh: { h: 6.75, bounds: [-44, 8, -44, 44, 64, 44], origin: [0, 10, 0], ...BUDGET },
     // idle motions (world.js MOVES): every 5 s a yawn or a 냥냥펀치. Regions
-    // are soft ellipsoids (model mm): the head with both ears (not the paws
-    // under the chin), each front paw, the haunch, the tail's curl.
+    // are soft ellipsoids (model mm): the head = the upper dome with both
+    // ears (the skirt and the paws stay), each front paw.
     motions: {
       interval: 5, moves: ["yawn", "punch"],
       regions: {
         head: [
-          { c: [head[0], head[1] + 3.5, head[2]], r: [22, 20, 21], inner: 0.55 },
-          ...ears.map((e) => ({ c: [(e.a[0] + e.b[0]) / 2, (e.a[1] + e.b[1]) / 2, (e.a[2] + e.b[2]) / 2], r: [9.5, 14, 8.5], inner: 0.5 })),
+          { c: [0, FLOOR + 33, -1.5], r: [32, 19, 30], inner: 0.45 },
+          ...ears.map((e) => ({ c: [(e.a[0] + e.b[0]) / 2, (e.a[1] + e.b[1]) / 2, e.a[2]], r: [10, 15, 9], inner: 0.5 })),
         ],
-        pawL: [{ c: [-27, 14.5, 22], r: [11, 8, 12], inner: 0.3 }],
-        pawR: [{ c: [-7, 14.5, 22], r: [11, 8, 12], inner: 0.3 }],
-        haunch: [{ c: [19, 30, -5], r: [24, 22, 26], inner: 0.4 }],
-        tail: [{ c: [30.5, 52, -14.5], r: [12, 13, 9.5], inner: 0.45 }],
+        pawL: [{ c: paws[0], r: [10, 8.5, 10], inner: 0.35 }],
+        pawR: [{ c: paws[1], r: [10, 8.5, 10], inner: 0.35 }],
       },
     },
     look: (anchor) => ({
-      dye: () => [3.6, 14, 6.5],
-      fx: null,
-      glitter: 180, pearls: 44,
+      dye: (x, y, z) => mix3(PINK, DEEP, smoothstep(0.3, 1, earT(x, y, z))),
+      fx: null, glitter: 0, pearls: 0,
       decor: [
-        anchor({ kind: "eye", from: W([head[0] - 8.5, head[1] + 4.5, head[2]]), dir: [-0.12, 0.08, 1], scale: 0.003 }),
-        anchor({ kind: "eye", from: W([head[0] + 8.5, head[1] + 4.5, head[2]]), dir: [0.12, 0.08, 1], scale: 0.003 }),
-        anchor({ kind: "nose", from: W([head[0], head[1] - 1.2, head[2]]), dir: [0, 0, 1], scale: 0.0018, color: "#ff8fb0" }),
-        anchor({ kind: "muzzle", from: W([head[0], head[1] - 3.4, head[2]]), dir: [0, -0.12, 1], scale: 0.0064, color: "#ffffff" }),
-        anchor({ kind: "mouth", from: W([head[0], head[1] - 3.6, head[2]]), dir: [0, -0.1, 1], scale: 0.0018, color: "#e07090" }),
-        ...ears.map((e) => anchor({ kind: "earInner", from: W([(e.a[0] + e.b[0]) / 2, (e.a[1] + e.b[1]) / 2 - 1, e.a[2]]), dir: [0, 0.15, 1], up: F.dirToWorld([e.b[0] - e.a[0], e.b[1] - e.a[1], 0]), scale: 0.0042, color: "#ff9ec0" })),
+        anchor({ kind: "eye", from: [-10.5, FLOOR + 25, 0], dir: [-0.2, 0.05, 1], scale: 0.0027 }),
+        anchor({ kind: "eye", from: [10.5, FLOOR + 25, 0], dir: [0.2, 0.05, 1], scale: 0.0027 }),
+        anchor({ kind: "mouth", from: [0, FLOOR + 20.5, 0], dir: [0, -0.1, 1], scale: 0.0032, color: "#1d1216" }),
+        // whiskers fan outward (+x of the piece): the left set is the right
+        // one turned half a turn about the normal (up = −y)
+        anchor({ kind: "whisker", from: [-12.5, FLOOR + 21, 0], dir: [-0.3, -0.05, 1], up: [0, -1, 0], scale: 0.0048 }),
+        anchor({ kind: "whisker", from: [12.5, FLOOR + 21, 0], dir: [0.3, -0.05, 1], up: [0, 1, 0], scale: 0.0048 }),
+        // strawberry halves set a few mm under the surface, off-centre (the
+        // cheeks, the top): cut face out, or (flip) the seeded skin
+        anchor.inside({ kind: "strawberry", from: [-17, FLOOR + 14, 0], dir: [-0.5, -0.1, 1], depth: 4.5, up: [0.4, 1, 0], scale: 0.0052 }),
+        anchor.inside({ kind: "strawberry", from: [18, FLOOR + 16, 0], dir: [0.55, -0.05, 1], depth: 4.5, flip: true, up: [-0.5, 1, 0], scale: 0.005 }),
+        anchor.inside({ kind: "strawberry", from: [-12, FLOOR + 33, 0], dir: [-0.35, 0.9, 0.7], depth: 4.5, flip: true, up: [0.6, 1, 0], scale: 0.0048 }),
+        anchor.inside({ kind: "strawberry", from: [10, FLOOR + 35, 0], dir: [0.3, 1, 0.6], depth: 4.5, up: [-0.7, 0.4, -1], scale: 0.0046 }),
+        anchor.inside({ kind: "strawberry", from: [-24, FLOOR + 14, -14], dir: [-1, 0.1, -0.2], depth: 4.5, up: [0.2, 1, 0], scale: 0.005 }),
       ],
     }),
   };
@@ -416,7 +426,7 @@ export function shapeSDF(id) { return def(id).sdf; }
 // starting colour). Precomputed so the main thread never meshes a shape just
 // to write an order; tests/shapes.test.mjs checks it against the cage.
 const SIGNATURE_SIGMA = Object.freeze({
-  pudding: [3.746, 43.151, 20.83], cake: [21.627, 18.758, 31.53], bear: [16, 34, 4], cat: [3.6, 14, 6.5], bird: [13.533, 24.717, 19.624],
+  pudding: [3.746, 43.151, 20.83], cake: [21.627, 18.758, 31.53], bear: [16, 34, 4], cat: [2.315, 23.741, 16.643], bird: [13.533, 24.717, 19.624],
 });
 export function signatureSigma(id) { return SIGNATURE_SIGMA[id] ? SIGNATURE_SIGMA[id].slice() : null; }
 
@@ -484,15 +494,26 @@ function rayExit(o, d, { P, I }, maxT) {
 function makeAnchor(id) {
   const sdf = def(id).sdf, cage = makeShapeCage(id), surf = renderedSurface(cage), bottom = stats.get(id).bottom;
   const norm = (v) => { const l = Math.hypot(v[0], v[1], v[2]) || 1; return [v[0] / l, v[1] / l, v[2] / l]; };
-  return ({ kind, from, dir, up, upHint, scale, color }) => {
-    // the design surface point: march from `from` (mm) along dir to the SDF zero set
-    const d = norm(dir);
+  const orient = (n, hint) => {
+    // 'up': the tangent closest to the hint (default +y), exactly orthonormal to n
+    let k = hint[0] * n[0] + hint[1] * n[1] + hint[2] * n[2];
+    let uvec = [hint[0] - n[0] * k, hint[1] - n[1] * k, hint[2] - n[2] * k];
+    if (Math.hypot(...uvec) < 1e-6) { k = n[2]; uvec = [-n[0] * k, -n[1] * k, 1 - n[2] * k]; }
+    uvec = norm(uvec);
+    k = uvec[0] * n[0] + uvec[1] * n[1] + uvec[2] * n[2];
+    return norm([uvec[0] - n[0] * k, uvec[1] - n[1] * k, uvec[2] - n[2] * k]);
+  };
+  // the design surface point: march from `from` (mm) along d to the SDF zero set
+  const surfacePoint = (from, d) => {
     let t0 = 0, t1 = 0;
     const at = (t) => sdf(from[0] + d[0] * t, from[1] + d[1] * t, from[2] + d[2] * t);
     if (at(0) < 0) { t1 = 0.25; while (at(t1) < 0 && t1 < 80) { t0 = t1; t1 += 0.25; } }
     else { t0 = -0.25; while (at(t0) > 0 && t0 > -80) { t1 = t0; t0 -= 0.25; } }
     for (let i = 0; i < 50; i++) { const m = (t0 + t1) / 2; if (at(m) < 0) t0 = m; else t1 = m; }
-    const s = [from[0] + d[0] * t0, from[1] + d[1] * t0, from[2] + d[2] * t0];
+    return [from[0] + d[0] * t0, from[1] + d[1] * t0, from[2] + d[2] * t0];
+  };
+  const anchor = ({ kind, from, dir, up, upHint, scale, color }) => {
+    const d = norm(dir), s = surfacePoint(from, d);
     // the rendered surface along the same ray (metres)
     const q = [s[0] * 0.001, (s[1] - bottom) * 0.001 + 0.010, s[2] * 0.001];
     const hit = rayExit(q, d, surf, 0.006);
@@ -500,19 +521,34 @@ function makeAnchor(id) {
     const { P, N, I } = surf, ia = I[hit.tri] * 3, ib = I[hit.tri + 1] * 3, ic = I[hit.tri + 2] * 3;
     const u = [0, 1, 2].map((k) => P[ia + k] * hit.u + P[ib + k] * hit.v + P[ic + k] * hit.w);
     const n = norm([0, 1, 2].map((k) => N[ia + k] * hit.u + N[ib + k] * hit.v + N[ic + k] * hit.w));
-    // 'up': the tangent closest to the hint (default +y)
-    const hint = up || upHint || [0, 1, 0];
-    let k = hint[0] * n[0] + hint[1] * n[1] + hint[2] * n[2];
-    let uvec = [hint[0] - n[0] * k, hint[1] - n[1] * k, hint[2] - n[2] * k];
-    if (Math.hypot(...uvec) < 1e-6) { k = n[2]; uvec = [-n[0] * k, -n[1] * k, 1 - n[2] * k]; }
-    uvec = norm(uvec);
-    // exactly orthonormal
-    k = uvec[0] * n[0] + uvec[1] * n[1] + uvec[2] * n[2];
-    uvec = norm([uvec[0] - n[0] * k, uvec[1] - n[1] * k, uvec[2] - n[2] * k]);
-    const out = { kind, u, n, up: uvec, scale };
+    const out = { kind, u, n, up: orient(n, up || upHint || [0, 1, 0]), scale };
     if (color) out.color = color;
     return out;
   };
+  // A piece set INSIDE the jelly (the cat's strawberries): `depth` mm under
+  // the surface point found from `from` along `dir`, lying parallel to the
+  // surface there: its +Z = the outward SDF normal (flip: inward, its back
+  // toward the viewer), +Y = up. The whole piece (a disc of its size round
+  // the centre) must stay ≥ 1 mm inside. u is the piece's centre (not on
+  // the surface); inside: true tells the renderer / tests so.
+  anchor.inside = ({ kind, from, dir, depth, flip, up, scale, color }) => {
+    const s = surfacePoint(from, norm(dir)), e = 0.2;
+    const g = norm([0, 1, 2].map((k) => { const a = s.slice(), b = s.slice(); a[k] += e; b[k] -= e; return sdf(...a) - sdf(...b); }));
+    const c = s.map((v, k) => v - g[k] * depth);
+    const n = flip ? g.map((v) => -v) : g, yv = orient(n, up || [0, 1, 0]);
+    const xv = [yv[1] * n[2] - yv[2] * n[1], yv[2] * n[0] - yv[0] * n[2], yv[0] * n[1] - yv[1] * n[0]], R = scale * 1000;
+    for (let i = 0; i < 12; i++) {
+      const a = (i / 12) * Math.PI * 2, p = c.map((v, k) => v + R * (Math.cos(a) * xv[k] + Math.sin(a) * yv[k]));
+      if (!(sdf(...p) < -1)) throw new Error(`${id}: ${kind} under ${from} pokes out (${sdf(...p).toFixed(1)} mm)`);
+    }
+    // and its domed back (≈ 0.75 × its size along −Z; flipped: toward the surface)
+    const back = c.map((v, k) => v - n[k] * 0.75 * R);
+    if (!(sdf(...back) < -0.5)) throw new Error(`${id}: ${kind} under ${from}: its back pokes out (${sdf(...back).toFixed(1)} mm)`);
+    const out = { kind, u: [c[0] * 0.001, (c[1] - bottom) * 0.001 + 0.010, c[2] * 0.001], n, up: yv, scale, inside: true };
+    if (color) out.color = color;
+    return out;
+  };
+  return anchor;
 }
 
 // ------------------------------------------------------------------ idle motions

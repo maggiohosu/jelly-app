@@ -313,9 +313,10 @@ export function buildUI({ settings, onSetting, onTexture, onShape, onPaintDrop, 
   $("gem-scatter").addEventListener("click", () => onScatter(settings.gemColor));
 
   // ---- 토끼 꾸미기 (outfits, one per slot) + 접시·배경 테마 (settings sheet) ----
-  // state = { outfits: unlocked ids, worn: {head, face, neck, back},
+  // state = { outfits: unlocked ids, worn: {head, face, neck, back, wand},
   //           themes: unlocked ids, theme: current id, looks: THEME_LOOKS }
-  const SLOT_LABELS = { head: "머리", face: "얼굴", neck: "목", back: "등" };
+  // card-only outfits (o.card: witch hat, wand) say where they come from
+  const SLOT_LABELS = { head: "머리", face: "얼굴", neck: "목", back: "등", wand: "지팡이" };
   const outfitBox = $("outfits"), themeBox = $("themes");
   function setDressUp({ outfits = [], worn = {}, themes = ["basic"], theme = "basic", looks = {} }) {
     outfitBox.textContent = "";
@@ -334,11 +335,11 @@ export function buildUI({ settings, onSetting, onTexture, onShape, onPaintDrop, 
       chips.appendChild(none);
       for (const o of OUTFITS.filter((x) => x.slot === slot)) {
         const open = outfits.includes(o.id), b = document.createElement("button");
-        const lock = o.level ? `Lv${o.level}` : "업적";
-        const how = o.level ? `토끼 친밀도 Lv${o.level}` : `업적 '${ACHIEVEMENTS.find((a) => a.id === o.achievement)?.label || "?"}'`;
+        const lock = o.level ? `Lv${o.level}` : o.card ? "카드" : "업적";
+        const how = o.level ? `토끼 친밀도 Lv${o.level}에 열려요` : o.card ? "카드 뽑기에서 나와요" : `업적 '${ACHIEVEMENTS.find((a) => a.id === o.achievement)?.label || "?"}'에 열려요`;
         b.className = "outfit-chip" + (open ? "" : " locked") + (worn[slot] === o.id ? " active" : "");
         b.innerHTML = `<span class="emoji">${o.emoji}</span><span>${o.label}</span>${open ? "" : `<i class="lv">${lock}</i>`}`;
-        b.setAttribute("aria-label", open ? o.label : `${o.label} (${how}에 열려요)`);
+        b.setAttribute("aria-label", open ? o.label : `${o.label} (${how})`);
         b.setAttribute("aria-pressed", String(worn[slot] === o.id));
         b.addEventListener("click", () => onOutfit(slot, open ? o.id : undefined, o, how));
         chips.appendChild(b);

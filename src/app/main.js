@@ -118,6 +118,8 @@ async function boot() {
   audio.setTexture(settings.texture);
   audio.onNote((pulse) => { view.pulse(0.08 + 0.22 * pulse.velocity); needsRender = true; });
   rabbit.setOutfit?.(progress.outfit);
+  rabbit.setFullness?.(progress.fullness / progress.fullnessMax);
+  rabbit.setHappy?.(progress.happyTurns > 0);
 
   // GPU errors only affect the caustic passes: drop those. A lost device leaves
   // a frozen canvas: reload once; twice within a minute → WebGL2 lite mode.
@@ -268,6 +270,16 @@ async function boot() {
     return out;
   }
 
+  // ---- "touched": something went into the current jelly (v9 happy buff) ----
+  // A paint drop (landing), a gem (normal or rare) or a topping since the
+  // jelly was created / reset; only touched jellies get (and use up) the
+  // happy +1. Cleared when a reset / shape event is queued: the world answers
+  // events in order, so a droplet still falling then colours the new jelly
+  // and marks it, as it should.
+  let touched = false;
+  const markTouched = () => { touched = true; };
+  function freshJelly(event) { touched = false; pendingEvents.push(event); }
+
   // ---- rare gems are a stock: one is used when dropped / tapped in ----
   // A rejected one comes back; a jelly replaced without being eaten (new
   // jelly, shape change, "이 주문으로 새 젤리") gives back the rare gems
@@ -357,8 +369,10 @@ async function boot() {
   // ---- pipette: a droplet falls from the tip and colours the jelly on impact ----
   function releaseDrop(paint, hit) {
     const p = PAINTS[paint];
+    markTouched();   // counts from the release (a feed while it falls still gets it)
     view.dropPaint(hit.point, hit.normal, p.hex, () => {
       pendingEvents.push({ type: "drop", point: hit.point, paint });
+      markTouched();
       audio.drip(0.7, p.sigma ? 1 : 1.25);
       needsRender = true;
     });
@@ -401,38 +415,39 @@ async function boot() {
     onAdditiveDrop: (kind, x, y) => {
       const hit = pickAt(x, y);
       if (!hit) { toast("젤리 위에서 놓아 주세요"); return; }
-      pendingEvents.push({ type: "additive", kind, point: hit.point }); dismissHint();
+      pendingEvents.push({ type: "additive", kind, point: hit.point }); markTouched(); dismissHint();
     },
-    onAdditiveTap: (kind) => { const hit = topHit(); if (hit) pendingEvents.push({ type: "additive", kind, point: hit.point }); },
+    onAdditiveTap: (kind) => { const hit = topHit(); if (hit) { pendingEvents.push({ type: "additive", kind, point: hit.point }); markTouched(); } },
     onRareDrop: (index, tier, x, y) => {
       if (!(progress.rareCountOf(index) > 0)) { toast("보석이 없어요"); return; }
       const hit = pickAt(x, y);
       if (!hit) { toast("젤리 위에 놓아 주세요"); return; }
       const rare = useRareGem(index);
-      if (rare) pendingEvents.push({ type: "gemAdd", a: hit.a, b: hit.b, c: hit.c, bary: hit.bary, shape: index, color: 0, radius: rareRadius(index), rare });
+      if (rare) { pendingEvents.push({ type: "gemAdd", a: hit.a, b: hit.b, c: hit.c, bary: hit.bary, shape: index, color: 0, radius: rareRadius(index), rare }); markTouched(); }
     },
     onRareTap: (index) => {
       const rare = useRareGem(index);
-      if (rare) pendingEvents.push({ type: "gemScatter", count: 1, shape: index, color: 0, radius: rareRadius(index), rare });
+      if (rare) { pendingEvents.push({ type: "gemScatter", count: 1, shape: index, color: 0, radius: rareRadius(index), rare }); markTouched(); }
     },
     onGemDrop: (shape, color, x, y) => {
       const hit = pickAt(x, y);
       if (!hit) { toast("젤리 위에 놓아 주세요"); return; }
       pendingEvents.push({ type: "gemAdd", a: hit.a, b: hit.b, c: hit.c, bary: hit.bary, shape, color, radius: gemRadius(shape) });
+      markTouched();
       dismissHint();
     },
-    onGemTap: (shape, color) => pendingEvents.push({ type: "gemScatter", count: 1, shape, color, radius: gemRadius(shape) }),
-    onScatter: (color) => pendingEvents.push({ type: "gemScatter", count: 6, shape: -1, color, radius: gemRadius(-1), shapes: GEM_SHAPES.length }),
+    onGemTap: (shape, color) => { pendingEvents.push({ type: "gemScatter", count: 1, shape, color, radius: gemRadius(shape) }); markTouched(); },
+    onScatter: (color) => { pendingEvents.push({ type: "gemScatter", count: 6, shape: -1, color, radius: gemRadius(-1), shapes: GEM_SHAPES.length }); markTouched(); },
     onBase: (base) => { pendingEvents.push({ type: "base", base }); needsRender = true; },
     onShape: (id, info) => {
       if (!id) { toast(`🐰 토끼와 Lv${info.level}까지 친해지면 '${info.label}' 모양이 열려요 (카드 뽑기 모양 카드로도!)`); return; }
       if (eating) return;
-      pendingEvents.push({ type: "shape", shape: id, base: settings.base });
+      freshJelly({ type: "shape", shape: id, base: settings.base });
       toast(`${info.label} 모양 젤리가 나왔어요`);
       dismissHint();
     },
     onOutfit: (slot, id, item, how) => {
-      if (id === undefined) { toast(`🔒 ${item.emoji} ${item.label} — ${how}에 열려요`); return; }
+      if (id === undefined) { toast(`🔒 ${item.emoji} ${item.label} — ${how}`); return; }
       if (!progress.setOutfit(slot, id)) return;
       rabbit.setOutfit?.(progress.outfit);
       refreshDressUp();
@@ -479,7 +494,7 @@ async function boot() {
   });
   function bounce(strength) { pendingEvents.push({ type: "bounce", strength }); dismissHint(); }
   $("nudge").addEventListener("click", () => bounce(1));
-  $("reset").addEventListener("click", () => { if (eating) return; pendingEvents.push({ type: "reset", base: settings.base, lift: 0.05 }); $("sheet").hidden = true; });
+  $("reset").addEventListener("click", () => { if (eating) return; freshJelly({ type: "reset", base: settings.base, lift: 0.05 }); $("sheet").hidden = true; });
   $("order-new").addEventListener("click", () => {
     if (eating || !started) return;
     const order = progress.order;
@@ -528,6 +543,23 @@ async function boot() {
     eating = on;
     $("feed").disabled = on;
     $("order-new").disabled = on;
+    refreshToilet();
+  }
+  // 🚽 only when full and nothing else is going on (a visit, a card pull, a
+  // gift box); it pulses while the bunny waits for it.
+  const popupOpen = () => !$("gacha").hidden || !$("gift").hidden || gameUI.busy;
+  function refreshToilet() {
+    const button = $("toilet"), full = progress.canToilet;
+    button.disabled = !full || eating;   // eating covers every bunny visit (rabbit.busy is still true inside its "done")
+    button.classList.toggle("ready", full && !eating);
+    button.setAttribute("aria-label", full ? "토끼 화장실 보내기" : "토끼 화장실 보내기 (배가 꽉 차면 열려요)");
+  }
+  // the bunny's belly / smile and the gauge follow every progress change
+  function syncTummy() {
+    rabbit.setFullness?.(progress.fullness / progress.fullnessMax);
+    rabbit.setHappy?.(progress.happyTurns > 0);
+    gameUI.renderTummy();
+    refreshToilet();
   }
   const thumbCache = new Map();
   function rareThumb(index, tier) {
@@ -548,12 +580,15 @@ async function boot() {
       // a free card first when there is one
       const r = progress.pull({ free: progress.freeCards > 0 });
       if (r?.type === "shape") ui.setShapes(progress.shapes(), [r.id]);
+      // an outfit card: owned now — the bunny wears it on its next visit
+      if (r?.type === "outfit") { progress.setOutfit(r.slot, r.id); rabbit.setOutfit?.(progress.outfit); }
       if (r) refreshDressUp();
       return r;
     },
     sounds: {
       cardFlip: () => audio.cardFlip?.(), cardShake: () => audio.cardShake?.(), reveal: (k) => audio.reveal?.(k), levelUp: () => audio.levelUp?.(),
       coinLoss: (n) => audio.coinLoss?.(n), goldenOrder: () => audio.goldenOrder?.(), giftOpen: () => audio.giftOpen?.(), achievement: () => audio.achievement?.(),
+      wandTwinkle: () => audio.wandTwinkle?.(),
     },
   });
   // The gem drawer's rare row: stock order, re-rendered after every change.
@@ -563,6 +598,7 @@ async function boot() {
     })));
   }
   progress.onChange(refreshRareDrawer);
+  progress.onChange(syncTummy);
   function refreshPalette(fresh = []) { ui.setPalette(progress.paints(), progress.additives(), fresh); }
 
   // ---- orders: a visible-time stopwatch (time bonus), memory peeks ----
@@ -599,8 +635,8 @@ async function boot() {
       settings.shape = order.shape;
       saveSettings(settings);
       ui.setShapes(progress.shapes());
-      pendingEvents.push({ type: "shape", shape: order.shape, base: order.base, plain });
-    } else pendingEvents.push({ type: "reset", base: order.base, plain, lift });
+      freshJelly({ type: "shape", shape: order.shape, base: order.base, plain });
+    } else freshJelly({ type: "reset", base: order.base, plain, lift });
     needsRender = true;
   }
   $("order").addEventListener("click", (event) => {
@@ -640,7 +676,23 @@ async function boot() {
   }
   const colorSwatch = (name) => `<i class="color-dot" style="--c:${colorInfo(name)?.hex || "#ddd"}"></i>`;
 
+  // ★ → the bunny's mood (orders.scoreOrder's mapping), for final stars
+  const moodFor = (stars) => (stars >= 4 ? "special" : stars === 3 ? "happy" : stars === 2 ? "ok" : "sad");
+  // The seat beside the tray (behind the jelly, a little to the side, facing
+  // the camera) — the same for a meal and for a toilet trip.
+  function visitPlace() {
+    const toCam = tray.worldToLocal(camera.position.clone()).setY(0).normalize();
+    const side = new THREE.Vector3(-toCam.z, 0, toCam.x);
+    const seat = toCam.clone().multiplyScalar(-0.108).addScaledVector(side, 0.024);   // clear of the rim
+    const b = lastFrame.bounds;
+    return {
+      position: [seat.x, 0, seat.z], faceTo: [toCam.x * 0.3, 0.04, toCam.z * 0.3],
+      jelly: { center: lastFrame.center.slice(), width: b[3] - b[0], height: b[4] - b[1] },
+    };
+  }
+
   async function feed() {
+    if (params.get("outcome") === "toilet") { goToilet({ force: true }); return; }
     if (eating || rabbit.busy || coinShower.busy || view.hidden || !lastFrame) return;
     setEating(true);
     input.cancel();
@@ -650,30 +702,31 @@ async function boot() {
     const order = progress.order || newOrder();
     const elapsed = orderElapsed(), peeks = orderPeeks;
     const jelly = jellyDescriptor(), sigma = jelly.sigma;
-    const result = scoreOrder(order, jelly);
+    // Stars: scoreOrder (base → unmet conditions cap ★2 → rare +1) → the
+    // tummy (full −1 | happy +1 on a touched jelly) → the outcome roll on the
+    // final stars. The reward card and the bunny's reaction show the final
+    // stars; feed() uses up the happy turn / pays the overflow.
+    const base = scoreOrder(order, jelly);
+    const mod = progress.modifyStars(base.stars, { touched });
+    const result = { ...base, stars: mod.stars, mood: moodFor(mod.stars) };
     // ★1 only: 1/3 퉤 (one bite), 1/5 a sniff, a head shake and a kick (no bite)
-    // (?outcome=eat|spit|kick forces an outcome — for testing the animations)
+    // (?outcome=eat|spit|kick forces an outcome — for testing the animations;
+    // ?outcome=toilet makes 🥕 start a toilet trip, full or not)
     const forced = params.get("outcome");
-    const outcome = ["eat", "spit", "kick"].includes(forced) ? forced : rollOutcome(result.stars);
+    const outcome = ["eat", "spit", "kick"].includes(forced) ? forced : rollOutcome(mod.stars);
     // a secret recipe about to be found: the bunny's special reaction
     const colorName = nameColor(sigma);
     const secretAhead = outcome === "eat" && findSecret(jelly, colorName, familyOf(colorName), progress.state.secrets);
     const thumb = outcome === "eat" ? await captureWork() : null;
     const shapeInfo = SHAPES.find((x) => x.id === settings.shape);
     const card = { id: Date.now(), date: Date.now(), stars: result.stars, name: colorName, hex: sigmaToHex(sigma), texture: settings.texture, shape: settings.shape, shapeLabel: settings.shape !== "flower" ? shapeInfo?.label : "", thumb, gems: jelly.gems.length + jelly.rareCount };
-    // the bunny sits behind the jelly, a little to the side, facing the camera
-    const toCam = tray.worldToLocal(camera.position.clone()).setY(0).normalize();
-    const side = new THREE.Vector3(-toCam.z, 0, toCam.x);
-    const seat = toCam.clone().multiplyScalar(-0.108).addScaledVector(side, 0.024);   // clear of the rim
-    const b = lastFrame.bounds, jc = lastFrame.center.slice();
+    const place = visitPlace(), jc = lastFrame.center.slice();
     let reward = null;
     carrying = false;
     // the cat / bird hold still while the bunny visits
     pendingEvents.push({ type: "motions", enabled: false });
     rabbit.play({
-      position: [seat.x, 0, seat.z],
-      faceTo: [toCam.x * 0.3, 0.04, toCam.z * 0.3],
-      jelly: { center: lastFrame.center.slice(), width: b[3] - b[0], height: b[4] - b[1] },
+      ...place,
       bites: outcome === "eat" ? 4 : 1, mood: secretAhead ? "special" : result.mood, outcome,
       picky: order.kind === "picky",
       jellyColor: sigmaToHex(sigma),
@@ -681,6 +734,8 @@ async function boot() {
         needsRender = true;
         switch (type) {
           case "arrive": audio.squeak?.("happy"); break;
+          case "burp": audio.burp?.(); break;          // full tummy: 끄억 on arrival
+          case "wand": audio.wandTwinkle?.(); break;   // the wand's flourish (worn)
           case "grab":
             // held as a whole (no stretching): the bunny's hold point drives the jelly's centre
             carrying = true;
@@ -707,7 +762,7 @@ async function boot() {
             if (data.dir) pendingEvents.push({ type: "kick", dir: data.dir, strength: data.strength ?? 0.8 });
             audio.kick?.();
             const lost = progress.kick();
-            gameUI.enqueue(() => gameUI.showReward({ kind: "kick", coins: lost.lost }));
+            gameUI.enqueue(() => gameUI.showReward({ kind: "kick", coins: lost.lost, starMod: mod.mod }));
             if (lost.lost > 0) gameUI.loseCoins(lost.lost);
             gameUI.showAchievements(lost.achievements);
             gameUI.renderHud({ animateCoins: true });
@@ -719,7 +774,8 @@ async function boot() {
             pendingEvents.push({ type: "carry", target: null });
             view.setHidden(true); hideCarried(true);
             eatResets++;
-            pendingEvents.push({ type: "reset", base: settings.base, lift: 0.4 }, { type: "pause", paused: true });
+            freshJelly({ type: "reset", base: settings.base, lift: 0.4 });
+            pendingEvents.push({ type: "pause", paused: true });
             break;
           case "spit": {
             {
@@ -729,7 +785,7 @@ async function boot() {
               audio.spit(0.8, land);
             }
             const lost = progress.spit();
-            gameUI.enqueue(() => gameUI.showReward({ kind: "spit", coins: lost.lost }));
+            gameUI.enqueue(() => gameUI.showReward({ kind: "spit", coins: lost.lost, starMod: mod.mod }));
             if (lost.lost > 0) gameUI.loseCoins(lost.lost);
             gameUI.showAchievements(lost.achievements);
             gameUI.renderHud({ animateCoins: true });
@@ -739,7 +795,7 @@ async function boot() {
             if (outcome !== "eat") { audio.squeak?.("grumpy"); break; }
             audio.squeak?.(result.mood === "special" || secretAhead ? "happy" : result.mood);
             if (result.stars === 4) audio.special?.();
-            reward = progress.feed({ stars: result.stars, order, result, jelly, card, elapsed, peeks });
+            reward = progress.feed({ stars: mod.stars, starMod: mod, order, result, jelly, card, elapsed, peeks });
             queueFollowUps(reward, result, order);
             const per = Math.max(1, Math.round(reward.coins / 14)), n = Math.ceil(reward.coins / per);
             let collected = 0;
@@ -775,13 +831,78 @@ async function boot() {
       },
     });
   }
+  // 🚽 The toilet trip (v9, only when full; force = the ?outcome=toilet test):
+  // a winged potty pops in beside the tray, the bunny hops on, strains,
+  // flushes (→ progress.toilet(): tummy empty, 5 happy meals, badges), beams
+  // and hops off. The jelly is never touched. Meanwhile feeding / new jellies
+  // are blocked, the time bonus and the memory order's 5 s stand still and
+  // the cat / bird hold their idle motions.
+  let strainTimer = 0;
+  function goToilet({ force = false } = {}) {
+    if (!(progress.canToilet || force) || eating || rabbit.busy || coinShower.busy || view.hidden || !lastFrame || popupOpen()) return false;
+    setEating(true);
+    input.cancel();
+    dismissHint();
+    $("gem-drawer").hidden = true; $("gems").classList.remove("on");
+    $("shape-drawer").hidden = true; $("shape-button").classList.remove("on");
+    holdOrderClock(true);
+    gameUI.holdMemo(true);
+    pendingEvents.push({ type: "motions", enabled: false });
+    let trip = null, flushed = false;
+    const flush = () => { if (!flushed) { flushed = true; trip = progress.toilet(); } };
+    const stopStrain = () => { clearInterval(strainTimer); strainTimer = 0; };
+    rabbit.toilet({
+      ...visitPlace(),
+      onEvent: (type, data = {}) => {
+        needsRender = true;
+        switch (type) {
+          case "toiletIn": audio.pop(0.7); break;          // 뿅: the potty pops in
+          case "hopOn": case "hopOff": audio.toiletHop?.(); break;
+          case "strain": {
+            // 끄응 every ~0.6 s for the strain's duration
+            stopStrain();
+            const until = performance.now() + 1000 * (data.duration || 1.4) - 250;
+            audio.strain?.();
+            strainTimer = setInterval(() => { if (performance.now() > until) stopStrain(); else audio.strain?.(); }, 600);
+            break;
+          }
+          case "flush": stopStrain(); audio.flush?.(); flush(); break;
+          case "smile": audio.happyChime?.(); break;
+          case "wand": audio.wandTwinkle?.(); break;
+          case "toiletOut": audio.pop(0.45); break;
+          case "done": {
+            stopStrain();
+            flush();                                       // never left full by a skipped event
+            pendingEvents.push({ type: "motions", enabled: true });
+            holdOrderClock(false);
+            gameUI.holdMemo(false);
+            setEating(false);
+            if (trip) {
+              gameUI.enqueue(() => {
+                gameUI.confetti.burst({ x: innerWidth / 2, y: innerHeight * 0.24, kind: "hearts", count: 50 });
+                return gameUI.notice({ icon: `<span class="big-emoji">😊</span>`, title: "기분 최고!", text: `다음 ${trip.happyTurns}번은 꾸민 젤리에 별 ★+1`, tone: "happy" });
+              });
+              gameUI.showAchievements(trip.achievements);
+            }
+            gameUI.renderHud();
+            break;
+          }
+        }
+      },
+    });
+    refreshToilet();
+    return true;
+  }
+
   // After a meal, one after another: the reward card (with its breakdown),
   // a new colour, colour-book milestones, a secret recipe, the golden free
   // card, achievements, then a gift box per level-up.
   function queueFollowUps(r, result, order) {
     gameUI.enqueue(() => gameUI.showReward({
-      kind: "eat", ...result, coins: r.coins, xp: r.xp, levelUps: r.levelUps, breakdown: r.breakdown, orderKind: order.kind, streak: r.streak,
+      kind: "eat", ...result, coins: r.coins, xp: r.xp, levelUps: r.levelUps, breakdown: r.breakdown, orderKind: order.kind, streak: r.streak, starMod: r.starMod,
     }));
+    // the tummy just filled up: say what the 🚽 is for (once, right after the card)
+    if (r.becameFull) gameUI.enqueue(async () => { toast("🍮 토끼 배가 꽉 찼어요! 🚽 화장실에 보내 주세요! (그동안 별 −1)", 3600); await new Promise((ok) => setTimeout(ok, 2400)); });
     if (r.newColor) {
       const found = progress.state.colorBook.length;
       gameUI.enqueue(() => { audio.discovery?.(); return gameUI.notice({ icon: colorSwatch(r.newColor), title: `새 색 발견! ${r.newColor}`, text: `색 도감 ${found} / ${COLOR_NAMES.length}`, tone: "color" }); });
@@ -825,7 +946,9 @@ async function boot() {
   refreshPalette();
   refreshRareDrawer();
   refreshDressUp();
+  syncTummy();
   $("feed").addEventListener("click", feed);
+  $("toilet").addEventListener("click", () => goToilet());
 
   // ---- start (user gesture: audio unlock) ----
   const startButton = $("start-button");
@@ -948,8 +1071,8 @@ async function boot() {
   startButton.textContent = "시작하기";
   window.__jelly = {
     stage, view, governor, sim, optics, pendingEvents, gemLayer, rareLayer, audio, eventLog, progress, rabbit, coinShower, feed, gameUI, ui, settings,
-    presentOrder, newOrder, prepareJellyFor, jellyDescriptor, orderElapsed, refreshDressUp, applyTheme,
-    get eating() { return eating; }, get asleep() { return asleep; }, get eatResets() { return eatResets; },
+    presentOrder, newOrder, prepareJellyFor, jellyDescriptor, orderElapsed, refreshDressUp, applyTheme, goToilet, syncTummy,
+    get eating() { return eating; }, get asleep() { return asleep; }, get eatResets() { return eatResets; }, get touched() { return touched; },
   };
 }
 

@@ -16,6 +16,10 @@
 //   • giftOpen(), comboUp(), achievement(), discovery(), goldenOrder()
 //                    gift box, ★3 streak, badges, colour-book / secret-recipe
 //                    discoveries, golden orders (C-major pentatonic jingles)
+//   • toiletHop()/strain()/flush()/happyChime()/burp()/wandTwinkle()
+//                    the bunny's toilet trip: 뿅 onto the potty, 끄응, the
+//                    water swirl, the happy 방긋 chime, a full tummy's 끄억 and
+//                    the magic wand's star dust
 //
 // iOS rules: the AudioContext must be created/resumed synchronously inside a
 // user gesture (unlock()); the 'ambient' audio session mixes with the user's
@@ -109,6 +113,12 @@ const SNIFF_LEVEL = 0.18;
 const KICK_LEVEL = 0.18, KICK_WHOOSH = 0.09;
 const COMBO_STEPS = [84, 86, 88, 91, 93, 96, 98, 100, 103, 105];          // comboUp(1..10): C6 → A7
 const DISCOVERY_GLISS = [84, 86, 88, 91, 93, 96, 98, 100, 103, 105, 108];  // C6 → C8
+const HOP_LEVEL = 0.12;
+const STRAIN_LEVEL = 0.12;            // = SQUEAK_LEVEL: the same little bunny voice
+const FLUSH_LEVEL = 0.16, FLUSH_DUR = 1.5, BUBBLE_LEVEL = 0.05;
+const BURP_LEVEL = 0.13;
+const HAPPY_CHIME = [91, 96, 100, 103];                                     // G6 C7 E7 G7
+const WAND_SPARKLE = [108, 105, 103, 100, 98, 96, 98, 100, 103, 105, 108];  // C8 ↘ C7 ↗ C8
 
 const mtof = (m) => 440 * Math.pow(2, (m - 69) / 12);
 const clamp = (x, lo, hi) => (x < lo ? lo : x > hi ? hi : x);
@@ -1249,6 +1259,200 @@ export class JellyAudio {
     note(0.22, 96, 0.085, "bell", { keep: true, ring: 0.85 });
     note(0.224, 91, 0.05, "warm", { ring: 1.2 });
     this._schedule(t0 + 0.12, tag, (t) => this._shimmer(t, 0.6, 0.028, tag, 10000));
+    this._flushFx(now);
+    return true;
+  }
+
+  // ------------------------------------------------- the bunny's toilet trip
+  //
+  // Same conventions: true when it sounded, rate-limited per sound (_gate),
+  // calls inside the gap are dropped. Played by main.js along the toilet
+  // sequence (hop on → strain → flush → smile → hop off) and on a full
+  // bunny's arrival (burp) / wand flourishes (wandTwinkle).
+
+  /**
+   * A little hop '뿅' (~0.25 s): a round voiced blip sweeping up (~380 →
+   * 950 Hz) as the bunny jumps, then a soft padded landing (a low thud and a
+   * tiny ceramic 'tok' ~1.9 kHz) 0.13 s later. ≥ 0.15 s apart.
+   */
+  toiletHop() {
+    if (!this._ready()) return false;
+    const now = this._now();
+    if (!this._gate("hop", 0.15, now)) return false;
+    const rnd = this._random, t = now + 0.003, L = HOP_LEVEL, p = 0.95 + 0.1 * rnd();
+    const v = this._openVoice(this._fx, FX_VOICES, t, (rnd() - 0.5) * 0.3, "hop");
+    const o = this._source(v, this.ctx.createOscillator(), t, t + 0.12);
+    o.setPeriodicWave(this._waves.voice);
+    this._contour(o.frequency, t, 0.08, [[0, 380 * p], [0.6, 820 * p], [1, 950 * p]], true);
+    const g = this._gain(v, 0);
+    this._contour(g.gain, t, 0.09, [[0, 0], [0.12, L], [0.6, L * 0.7], [1, 0]], false);
+    o.connect(g); g.connect(v.gain);
+    const tl = t + 0.13;
+    this._partial(v, tl, 120, L * 0.7, 0.028, 0.003, 5.75);           // padded paws
+    this._partial(v, tl, 1900 * p, L * 0.16, 0.018, 0.0008, 5.75);    // tok on the glazed rim
+    this._partial(v, tl, 1900 * p * 2.71, L * 0.05, 0.008, 0.0008, 5.75);
+    this._closeVoice(this._fx, v);
+    return true;
+  }
+
+  /**
+   * The bunny straining on the potty '끄응~' (~0.65 s): a held breath puff,
+   * a short pressed '끄' and a long closed-mouth '응' (~500–600 Hz, low-pass
+   * closing to ~800 Hz) that swells with effort and trembles (fast shallow
+   * vibrato), then lets go with a tiny sigh. Cute, never gross. ≥ 0.4 s apart.
+   */
+  strain() {
+    if (!this._ready()) return false;
+    const now = this._now();
+    if (!this._gate("strain", 0.4, now)) return false;
+    const rnd = this._random, t = now + 0.003, L = STRAIN_LEVEL, p = 0.96 + 0.08 * rnd();
+    const v = this._openVoice(this._fx, FX_VOICES, t, (rnd() - 0.5) * 0.2, "strain");
+    this._breath(v, t, 0.04, L * 0.08);
+    this._syllable(v, t + 0.03, 0.09, [600 * p, 640 * p, 560 * p], L * 0.6, 1800, 1200, 0.5, 0);   // 끄
+    // 응: a pressed hum swelling with effort, trembling
+    const t1 = t + 0.13, D = 0.44;
+    const o = this._source(v, this.ctx.createOscillator(), t1, t1 + D + 0.01);
+    o.setPeriodicWave(this._waves.voice);
+    this._contour(o.frequency, t1, D, [[0, 520 * p], [0.45, 600 * p], [0.8, 590 * p], [1, 470 * p]], true);
+    const lp = this._filter(v, "lowpass", 1100, 1.2);
+    this._contour(lp.frequency, t1, D, [[0, 1100], [0.5, 900], [1, 700]], true);
+    const g = this._gain(v, 0);
+    this._contour(g.gain, t1, D, [[0, 0], [0.08, L * 0.55], [0.7, L * 0.9], [0.88, L * 0.6], [1, 0]], false);
+    const lfo = this._source(v, this.ctx.createOscillator(), t1, t1 + D + 0.01);
+    lfo.frequency.value = 11;
+    const depth = this._gain(v, 0);
+    depth.gain.setValueAtTime(0, t1);
+    depth.gain.linearRampToValueAtTime(600 * p * 0.025, t1 + D * 0.7);
+    lfo.connect(depth); depth.connect(o.frequency);
+    o.connect(lp); lp.connect(g); g.connect(v.gain);
+    this._breath(v, t1 + D - 0.02, 0.14, L * 0.07);                   // 하…
+    this._closeVoice(this._fx, v);
+    return true;
+  }
+
+  /**
+   * The winged potty flushing (~1.5 s): a little lever 'click', then a water
+   * rush that swells in and swirls (band-passed noise whose centre circles
+   * ~0.5–1.6 kHz at ~3.5 Hz, with a dull low body), rising bubbles ('뽀글',
+   * short upward sine chirps 300–1000 Hz) all along, and a final gurgle as
+   * the swirl sinks away. ≥ 0.5 s apart; a new flush replaces the old.
+   */
+  flush() {
+    if (!this._ready()) return false;
+    const now = this._now();
+    if (!this._gate("flush", 0.5, now)) return false;
+    this._stopTag("flush", now);
+    const ctx = this.ctx, rnd = this._random, t = now + 0.004, D = FLUSH_DUR, L = FLUSH_LEVEL, end = t + D + 0.1;
+    const v = this._openVoice(this._beds, BED_VOICES, t, 0, "flush");
+    // lever click
+    this._partial(v, t, 2600, L * 0.25, 0.006, 0.0005, 5.75);
+    this._partial(v, t, 900, L * 0.2, 0.012, 0.0008, 5.75);
+    // the rush: one noise through a swirling band-pass and a low body
+    const tw = t + 0.05, src = this._noiseSource(v, tw, end);
+    const bp = this._filter(v, "bandpass", 1000, 1.1);
+    const swirl = this._source(v, ctx.createOscillator(), tw, end);
+    swirl.frequency.setValueAtTime(3.5, tw);
+    swirl.frequency.linearRampToValueAtTime(5, tw + D * 0.8);       // spins faster as it drains
+    const sd = this._gain(v, 450);
+    swirl.connect(sd); sd.connect(bp.frequency);
+    this._contour(bp.frequency, tw, D, [[0, 1100], [0.6, 950], [1, 520]], true);
+    const body = this._filter(v, "lowpass", 420, 0.8);
+    const bg = this._gain(v, 0.9);
+    const env = this._gain(v, 0);
+    this._contour(env.gain, tw, D - 0.05, [[0, 0], [0.12, L], [0.55, L * 0.85], [0.82, L * 0.4], [1, 0]], false);
+    src.connect(bp); bp.connect(env);
+    src.connect(body); body.connect(bg); bg.connect(env);
+    env.connect(v.gain);
+    // bubbles: little upward chirps, denser in the middle, the last ones lower (gurgle)
+    let tb = tw + 0.08;
+    while (tb < tw + D - 0.12) {
+      const u = (tb - tw) / D, f = (u > 0.75 ? 300 : 420) + 600 * rnd() * (u > 0.75 ? 0.5 : 1);
+      const o = this._source(v, ctx.createOscillator(), tb, tb + 0.06);
+      o.frequency.setValueAtTime(f, tb);
+      o.frequency.exponentialRampToValueAtTime(f * 1.7, tb + 0.035);
+      const bgain = this._gain(v, 0);
+      bgain.gain.setValueAtTime(0, tb);
+      bgain.gain.linearRampToValueAtTime(BUBBLE_LEVEL * (0.5 + 0.5 * rnd()) * (0.4 + 0.6 * Math.sin(Math.PI * u)), tb + 0.004);
+      bgain.gain.setTargetAtTime(0, tb + 0.004, 0.012);
+      o.connect(bgain); bgain.connect(v.gain);
+      tb += 0.045 + 0.09 * rnd() * (u < 0.15 || u > 0.7 ? 1.6 : 1);
+    }
+    this._closeVoice(this._beds, v);
+    return true;
+  }
+
+  /**
+   * The bunny's happy smile '방긋' (~0.9 s): a soft rising sparkle G6 C7 E7
+   * G7 into a warm C7 bell over a gentle C6/E6 pad, and a little shimmer.
+   * C-major pentatonic like the other jingles. ≥ 0.3 s apart; a new one
+   * replaces the previous.
+   */
+  happyChime() {
+    if (!this._ready()) return false;
+    const now = this._now();
+    if (!this._gate("happy", 0.3, now)) return false;
+    this._stopTag("happy", now);
+    const rnd = this._random, t0 = now + 0.004, tag = "happy";
+    const note = (dt, midi, amp, type, o = {}) => this._schedule(t0 + dt, tag, (t) => this._toneNote(t, midi, amp, type, { tag, ...o }));
+    HAPPY_CHIME.forEach((m, i) => note(0.06 * i, m, 0.045 + 0.006 * i, "pluck", { ring: 0.8, pan: -0.3 + 0.2 * i }));
+    note(0.22, 96, 0.075, "bell", { keep: true, ring: 0.75 });
+    [[84, 0.03], [88, 0.026]].forEach(([m, a], i) => note(0.22 + 0.004 * i, m, a, "pad", { keep: true, attack: 0.05, hold: 0.3, rel: 0.15, pan: (i - 0.5) * 0.5 }));
+    for (let i = 0; i < 2; i++) note(0.3 + 0.12 * i + 0.03 * rnd(), [105, 108][i], 0.026, "tink", { pan: (rnd() - 0.5) * 1.0 });
+    this._schedule(t0 + 0.2, tag, (t) => this._shimmer(t, 0.45, 0.016, tag, 9000));
+    this._flushFx(now);
+    return true;
+  }
+
+  /**
+   * A full tummy's cute burp '끄억' (~0.35 s): a tiny glottal 'k' and a short
+   * rough '억' — a low bunny voice (~330 → 250 Hz) rattling at ~32 Hz through
+   * a closing low-pass (~1.3 kHz → 600 Hz). Soft and round. ≥ 0.4 s apart.
+   */
+  burp() {
+    if (!this._ready()) return false;
+    const now = this._now();
+    if (!this._gate("burp", 0.4, now)) return false;
+    const ctx = this.ctx, rnd = this._random, t = now + 0.003, L = BURP_LEVEL, p = 0.95 + 0.1 * rnd(), D = 0.28;
+    const v = this._openVoice(this._fx, FX_VOICES, t, (rnd() - 0.5) * 0.2, "burp");
+    this._syllable(v, t, 0.05, [420 * p, 440 * p, 380 * p], L * 0.35, 1400, 1000, 0.8, 0);   // 끄
+    const t1 = t + 0.045;
+    const o = this._source(v, ctx.createOscillator(), t1, t1 + D + 0.01);
+    o.setPeriodicWave(this._waves.meow);                               // a little buzzier: the rattle
+    this._contour(o.frequency, t1, D, [[0, 330 * p], [0.3, 350 * p], [1, 250 * p]], true);
+    const lp = this._filter(v, "lowpass", 1300, 1.4);
+    this._contour(lp.frequency, t1, D, [[0, 1300], [0.4, 1100], [1, 600]], true);
+    const g = this._gain(v, 0);
+    this._contour(g.gain, t1, D, [[0, 0], [0.08, L], [0.5, L * 0.75], [1, 0]], false);
+    const rattle = this._gain(v, 0.65);                                // 0.3..1 at ~32 Hz
+    const lfo = this._source(v, ctx.createOscillator(), t1, t1 + D + 0.01);
+    lfo.frequency.value = 30 + 5 * rnd();
+    const depth = this._gain(v, 0.35);
+    lfo.connect(depth); depth.connect(rattle.gain);
+    o.connect(lp); lp.connect(rattle); rattle.connect(g); g.connect(v.gain);
+    this._closeVoice(this._fx, v);
+    return true;
+  }
+
+  /**
+   * The magic wand's star dust (~0.8 s): a quick twinkle run falling C8 → C7
+   * and bouncing back up to C8 (alternating tinks / plucks, drifting across
+   * the stereo field) over an airy riser and a bright shimmer. ≥ 0.25 s
+   * apart; a new one replaces the previous.
+   */
+  wandTwinkle() {
+    if (!this._ready()) return false;
+    const now = this._now();
+    if (!this._gate("wand", 0.25, now)) return false;
+    this._stopTag("wand", now);
+    const rnd = this._random, t0 = now + 0.004, tag = "wand", n = WAND_SPARKLE.length;
+    const note = (dt, midi, amp, type, o = {}) => this._schedule(t0 + dt, tag, (t) => this._toneNote(t, midi, amp, type, { tag, ...o }));
+    WAND_SPARKLE.forEach((m, i) => {
+      const u = i / (n - 1);
+      note(0.04 * i + 0.008 * rnd(), m, 0.028 + 0.008 * Math.sin(Math.PI * u), i & 1 ? "pluck" : "tink", { ring: i & 1 ? 0.5 : 1.3, pan: 0.6 - 1.2 * u });
+    });
+    note(0.42, 108, 0.03, "tink", { ring: 2, keep: true, pan: -0.6 });
+    this._schedule(t0, tag, (t) => this._riser(t, 0.25, 0.012, tag));
+    this._schedule(t0 + 0.08, tag, (t) => this._shimmer(t, 0.55, 0.022, tag, 10500));
     this._flushFx(now);
     return true;
   }

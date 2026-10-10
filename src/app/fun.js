@@ -1,6 +1,7 @@
 // The fun systems around the bunny's orders (v8): achievements (뱃지) with
 // coins / titles / unlocks, the bunny's outfits, plate & background themes,
-// secret recipes, colour-book milestones and the level-up gift box.
+// secret recipes, colour-book milestones and the level-up gift box. v9 adds
+// the toilet badges and the two card-only outfits (witch hat, magic wand).
 // Data + pure helpers only; app/progress.js keeps the state and applies them.
 // Coins are on the halved v8 scale (a ★3 order pays 30).
 import { COLOR_NAMES, GEM_HEART, GEM_DROPLET } from "./orders.js";
@@ -14,7 +15,7 @@ export const SECRET_COINS = 25;
 // { feeds, star3, star4, bestStreak, spits, kicks, shapesFed, rareKinds,
 //   rainbow, shapeCards, goldenStar3, memoryStar3, pickyStar3, fastStar3,
 //   slimeStar3, maxGems, maxRare, colorBook, colorTotal, secrets,
-//   secretTotal, level }.
+//   secretTotal, level, toilets }.
 // Ids are stored in saves: never rename one. `title` = a title the player can
 // wear (title id = the achievement id); `unlock` = an outfit / theme.
 const A = (id, label, desc, coins, test, extra = {}) => Object.freeze({ id, label, desc, coins, title: null, unlock: null, ...extra, test });
@@ -49,6 +50,10 @@ export const ACHIEVEMENTS = Object.freeze([
   A("secret_first", "비밀 레시피", "처음으로 숨은 레시피를 찾았어요", 20, (f) => f.secrets >= 1, { unlock: Object.freeze({ outfit: "flowerband" }) }),
   A("secret_all", "레시피 탐정", "숨은 레시피 8개를 모두 찾았어요", 50, (f) => f.secrets >= f.secretTotal, { title: "레시피 탐정" }),
   A("level_10", "토끼의 단짝", "토끼와 친구 레벨 10이 되었어요", 40, (f) => f.level >= 10, { title: "토끼의 단짝" }),
+  // v9: the bunny's toilet trips (progress.toilet()); `toilets` is absent in
+  // facts built before v9 → never earned by accident
+  A("first_toilet", "첫 화장실", "배부른 토끼를 처음으로 화장실에 보내 줬어요", 15, (f) => (f.toilets || 0) >= 1),
+  A("toilet_10", "화장실 10회", "토끼를 화장실에 10번 보내 줬어요", 30, (f) => (f.toilets || 0) >= 10),
 ]);
 
 /** Achievements newly earned with these facts (not yet in `done`). */
@@ -59,8 +64,11 @@ export function earnedAchievements(facts, done = {}) {
 export const achievementView = (a) => ({ id: a.id, label: a.label, desc: a.desc, coins: a.coins, ...(a.title ? { title: a.title } : {}), ...(a.unlock ? { unlock: { ...a.unlock } } : {}) });
 
 // ------------------------------------------------------------------ outfits
-// One item per slot; render/rabbit.js setOutfit({head, face, neck, back}).
-export const OUTFIT_SLOTS = Object.freeze(["head", "face", "neck", "back"]);
+// One item per slot; render/rabbit.js setOutfit({head, face, neck, back,
+// wand}). Unlocked by `level`, by `achievement`, or (`card: true`) only by an
+// outfit card from a card pull (progress.pull, OUTFIT_CARD_CHANCE). The v9
+// "wand" slot is carried diagonally on the back, so it goes with wings / cape.
+export const OUTFIT_SLOTS = Object.freeze(["head", "face", "neck", "back", "wand"]);
 export const OUTFITS = Object.freeze([
   { id: "ribbon", slot: "head", label: "리본", emoji: "🎀", level: 3 },
   { id: "glasses", slot: "face", label: "동그란 안경", emoji: "👓", level: 5 },
@@ -69,7 +77,11 @@ export const OUTFITS = Object.freeze([
   { id: "wings", slot: "back", label: "요정 날개", emoji: "🧚", level: 12 },
   { id: "flowerband", slot: "head", label: "꽃 머리띠", emoji: "🌸", achievement: "secret_first" },
   { id: "cape", slot: "back", label: "별 망토", emoji: "⭐", achievement: "rare_8" },
+  { id: "witchhat", slot: "head", label: "마녀 모자", emoji: "🧙", card: true },
+  { id: "wand", slot: "wand", label: "마법지팡이", emoji: "🪄", card: true },
 ].map(Object.freeze));
+/** Outfits that only come from outfit cards. */
+export const CARD_OUTFITS = Object.freeze(OUTFITS.filter((o) => o.card));
 
 // ------------------------------------------------------------------- themes
 // render/stage.js setTheme(id). `cond(c)` with c = { level, colorBook, shapes

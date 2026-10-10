@@ -290,7 +290,7 @@ for (const sh of SHAPES.filter((x) => x.id !== "flower")) {
   const inverted = (b) => { let n = 0; for (let e = 0; e < b.elementCount; e++) if (det6(b.x, b.ids[e * 4], b.ids[e * 4 + 1], b.ids[e * 4 + 2], b.ids[e * 4 + 3]) <= 0) n++; return n; };
   const starts = (w, seconds) => { const out = []; run(w, seconds, () => { for (const e of drain(w)) if (e.type === "motion") out.push({ t: w.time, ...e }); }); return out; };
   const kinds = (w) => { const n = w.decorCount(), d = w.decorStates(new Float32Array(n * 12)); return Array.from({ length: n }, (_, i) => ({ kind: DECOR_KINDS[d[i * 12]], scale: d[i * 12 + 8], name: w.decor[i].name, p: [d[i * 12 + 1], d[i * 12 + 2], d[i * 12 + 3]] })); };
-  check("DECOR_KINDS: the 8 kinds, then the 4 expressions (append only)", DECOR_KINDS.join() === "eye,nose,mouth,blush,muzzle,earInner,cherry,beak,eyeClosed,eyeHappy,mouthOpen,beakOpen");
+  check("DECOR_KINDS: the 8 kinds, the 4 expressions, then whisker / strawberry (append only)", DECOR_KINDS.join() === "eye,nose,mouth,blush,muzzle,earInner,cherry,beak,eyeClosed,eyeHappy,mouthOpen,beakOpen,whisker,strawberry");
 
   // the timer: start to start, in sim time, never for the flower or while disabled
   for (const [shape, interval, moves] of [["cat", 5, ["yawn", "punch"]], ["bird", 7, ["flap", "chirp"]]]) {
@@ -480,6 +480,73 @@ for (const sh of SHAPES.filter((x) => x.id !== "flower")) {
     const m = w.body.mass, M = w.body.totalMass; let p = 0, g = 0;
     for (let i = 0; i < w.body.nodeCount; i++) { p += w.fx[i * 2] * m[i] / M; g += w.fx[i * 2 + 1] * m[i] / M; }
     check("meanFx = mass-weighted mean [pearl, glow]", z[0] === 0 && z[1] === 0 && w.meanFx[0] > 0.005 && w.meanFx[1] > 0.005 && Math.abs(w.meanFx[0] - p) < 1e-12 && Math.abs(w.meanFx[1] - g) < 1e-12, w.meanFx.map((v) => v.toFixed(4)).join(", "));
+  }
+}
+
+// 8) v9: the strawberry jelly cat — its look, paint on it, gems around its
+//    strawberries (decor, never gems), all of it through motions and bites
+{
+  const inside = (w, g) => w.type.locator.locate(g.u[0], g.u[1], g.u[2]) >= 0;
+  const berries = (w) => w.decor.filter((d) => d.name === "strawberry");
+  {
+    const w = new JellyWorld({ shape: "cat" }); run(w, 1.5);
+    const names = w.decor.map((d) => d.name).sort().join();
+    check("cat: dot eyes, ω mouth, whiskers and 5 strawberry halves inside; no glitter / pearls", names === "eye,eye,mouth,strawberry,strawberry,strawberry,strawberry,strawberry,whisker,whisker" && w.additives.glitter.length === 0 && w.beadCount() === 0 && berries(w).every((d) => d.inner), names);
+    const sig = signatureSigma("cat");
+    check("cat: a fresh jelly is strawberry pink (meanDye = signatureSigma)", sig.every((v, c) => Math.abs(v - w.meanDye[c]) < 0.005 * Math.max(1, v)) && sig[1] > sig[2] && sig[2] > sig[0], `${w.meanDye.map((v) => v.toFixed(2))} vs ${sig}`);
+    // the deeper pink of the ear tips stays put while paint dropped on top spreads
+    const rest = w.type.cage.pos, n = w.body.nodeCount, hi = [], lo = [];
+    for (let i = 0; i < n; i++) (w.lookDye[i * 3 + 1] > 35 ? hi : rest[i * 3 + 1] < 0.03 ? lo : null)?.push(i);
+    const green = (ids) => ids.reduce((a, i) => a + w.dye[i * 3 + 1], 0) / ids.length;
+    const c0 = green(hi) - green(lo), pig0 = w.totalPigment();
+    for (let k = 0; k < 3; k++) { w.handle({ type: "drop", point: top(w), paint: paint("blue") }); run(w, 0.3); }
+    const redSpread = () => { let a = Infinity, b = -Infinity; for (let i = 0; i < n; i++) { a = Math.min(a, w.dye[i * 3]); b = Math.max(b, w.dye[i * 3]); } return b - a; };
+    const pig1 = w.totalPigment(), m1 = w.meanDye.slice(), s1 = redSpread();
+    for (let t = 0; t < 15; t += 1) { w.handle({ type: "nudge" }); run(w, 1); }
+    const c1 = green(hi) - green(lo), pig2 = w.totalPigment(), s2 = redSpread();
+    check("cat: paint drops add pigment, spread through it (conserved) and tint the mean colour", pig1[0] > pig0[0] * 1.5 && pig2.every((v, c) => Math.abs(v - pig1[c]) < 1e-9 * Math.max(1, pig1[c])) && s2 < 0.5 * s1 && m1[0] > sig[0] + 3,
+      `σr ${sig[0].toFixed(1)} → ${w.meanDye[0].toFixed(1)}, red spread ${s1.toFixed(0)} → ${s2.toFixed(0)} 1/m`);
+    check("cat: the ear tips keep their deeper pink under the paint (≥ 80 % of the contrast)", hi.length >= 6 && lo.length > 50 && c1 > 0.8 * c0, `${hi.length} ear-tip nodes, contrast ${c0.toFixed(1)} → ${c1.toFixed(1)} 1/m`);
+    w.handle({ type: "reset", base: "mint", plain: true });
+    check("cat: a plain reset is the plain base colour, the face and strawberries stay", w.lookDye === null && BASES.mint.every((v, c) => Math.abs(w.meanDye[c] - v) < 1e-9) && berries(w).length === 5 && w.decor.length === 10);
+    w.handle({ type: "reset", base: "berry" });
+    check("…and a normal reset brings the strawberry pink back", w.lookDye !== null && sig.every((v, c) => Math.abs(v - w.meanDye[c]) < 0.005 * Math.max(1, v)));
+  }
+  {
+    // gems: normal ones by the handful, the 8 rare ones; none inside a strawberry
+    const w = new JellyWorld({ shape: "cat" }); w.handle({ type: "motions", enabled: false }); run(w, 1); drain(w);
+    w.handle({ type: "gemScatter", count: 10 }); run(w, 2.5);
+    const ix = w.type.stencils.indices;
+    for (let i = 0; i < 8; i++) {
+      if (i % 2) w.handle({ type: "gemScatter", count: 1, rare: { index: i, tier: i % 3 }, radius: 0.0048 });
+      else { const t = 40 + i * 37; w.handle({ type: "gemAdd", a: ix[t * 3], b: ix[t * 3 + 1], c: ix[t * 3 + 2], bary: [1 / 3, 1 / 3, 1 / 3], shape: 0, color: 0, radius: 0.0048, rare: { index: i, tier: i % 3 } }); }
+    }
+    run(w, 3);
+    const ev = drain(w), ins = ev.filter((e) => e.type === "rareIn");
+    const clear = (w) => w.gems.every((g) => !w.inInner(g.u, g.radius) && inside(w, g));
+    check("cat: 10 gems + the 8 rare ones fit (8 × rareIn, no rejection), none in a strawberry, strawberries are not gems",
+      w.rareCount === 8 && ins.length === 8 && !ev.some((e) => e.type === "rareFull" || e.type === "gemFull") && w.gems.length === 18 && clear(w) && berries(w).length === 5,
+      `${w.gems.length} gems (${w.rareCount} rare), ${ins.length} rareIn`);
+    // motions on for 30 s (6 moves): every gem stays inside, none drifts into a strawberry
+    w.handle({ type: "motions", enabled: true });
+    let moves = 0, ok = true;
+    run(w, 30, () => { for (const e of drain(w)) if (e.type === "motion") moves++; if (Math.random() < 0.05) ok &&= clear(w); });
+    w.handle({ type: "motions", enabled: false }); run(w, 2);
+    const b = w.body.bounds, worldIn = w.gems.every((g) => g.wpos.every(Number.isFinite) && g.wpos[1] > b[1] - 0.001 && g.wpos[1] < b[4] + 0.001);
+    check("cat: through 30 s of yawns and 냥냥펀치 the gems stay inside (material and world), clear of the strawberries", moves === 6 && ok && clear(w) && worldIn && w.gems.length === 18, `${moves} moves`);
+    // bites: the strawberries in the bite go with it (eaten like decor), gems in it are eaten (not refunded)
+    const n0 = berries(w).length;
+    const cheek = berries(w).find((d) => d.inner.u[0] < 0 && d.inner.u[2] > 0.008), p = [0, 0, 0];
+    w.body.pointInTet(cheek.tet, cheek.bary, p);
+    w.handle({ type: "bite", center: p }); run(w, 0.6);
+    const bitten = drain(w).find((e) => e.type === "bitten");
+    check("cat: a bite on the cheek eats that strawberry (decor), the eaten list has gems only", berries(w).length === n0 - 1 && !berries(w).includes(cheek) && bitten && bitten.eaten.every((g) => Number.isInteger(g.shape)) && w.gems.every((g) => inside(w, g)) && w.body.isFinite());
+    for (let i = 0; i < 3; i++) { w.handle({ type: "bite", center: [w.body.center[0], w.body.center[1] + 0.01, w.body.bounds[5] - 0.002] }); run(w, 0.4); }
+    run(w, 1.5);
+    const rare = w.gems.filter((g) => g.rare).map((g) => `${g.shape}:${g.tier}`).sort().join();
+    w.handle({ type: "reset", base: "berry" });
+    const r = drain(w).find((e) => e.type === "reset");
+    check("cat: after 4 bites the jelly is stable, the gems left are inside, reset {rare} lists exactly the rare ones left", w.body.isFinite() && r && r.rare.map((g) => `${g.index}:${g.tier}`).sort().join() === rare, `${rare.split(",").filter(Boolean).length} rare left`);
   }
 }
 

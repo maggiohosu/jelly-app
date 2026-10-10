@@ -1,14 +1,16 @@
 // v8 fun systems: consumable rare-gem stock, migration of v7 saves, card
 // pulls (bundles, tier ups, 1/100 shape cards), level rewards / gift boxes,
 // combo / time bonus / golden / picky / memory, colour book, secret recipes,
-// achievements, outfits / themes / titles. Pure logic: `node tests/fun.test.mjs`.
-import { mixSigma, nameColor, familyOf, COLOR_NAMES, ORDER_ADDITIVE_MIN, GEM_HEART, GEM_DROPLET } from "../src/app/orders.js";
+// achievements, outfits / themes / titles; v9 tummy (fullness gauge, full
+// penalty, toilet, happy buff + ★4 overflow, toilet badges), outfit cards
+// (witch hat / wand) and the v9 save migration. Pure logic: `node tests/fun.test.mjs`.
+import { mixSigma, nameColor, familyOf, rollOutcome, COLOR_NAMES, ORDER_ADDITIVE_MIN, GEM_HEART, GEM_DROPLET } from "../src/app/orders.js";
 import {
   Progress, PROGRESS_KEY, PULL_COST, BUNDLE, COINS_BY_STARS, OWNED_SHAPE_COINS, MEMORY_PEEK_COST, LEVEL_REWARDS,
-  comboMultiplier, timeBonusFor,
+  FULLNESS_MAX, HAPPY_TURNS, OVERFLOW_COINS, OUTFIT_CARD_CHANCE, SHAPE_CARD_CHANCE, comboMultiplier, timeBonusFor,
 } from "../src/app/progress.js";
 import {
-  ACHIEVEMENTS, OUTFITS, THEMES, SECRET_RECIPES, COLOR_BOOK_REWARDS, GIFT_ODDS, rollGift, findSecret,
+  ACHIEVEMENTS, OUTFITS, OUTFIT_SLOTS, CARD_OUTFITS, THEMES, SECRET_RECIPES, COLOR_BOOK_REWARDS, GIFT_ODDS, rollGift, findSecret,
 } from "../src/app/fun.js";
 import { JellyWorld, PAINTS } from "../src/core/world.js";
 
@@ -89,12 +91,15 @@ const sum = (list, key = "coins") => list.reduce((a, x) => a + (x[key] || 0), 0)
   check("≈ 1 % of pulls are shape cards", Math.abs(shapes / N - 0.01) < 0.0025, `${shapes}/${N}`);
   const q = new Progress(memoryStorage(), () => 0.005);   // every pull rolls a shape card
   q.state.coins = 1e6; q.state.xp = 400;                     // Lv6: cat and bird still locked
+  q.state.outfitCards = ["witchhat", "wand"];                // (both card outfits owned: no outfit cards)
   const got = [q.pull(), q.pull(), q.pull()];
   check("shape cards only give still-locked shapes, then gems", got[0].type === "shape" && got[1].type === "shape" && new Set([got[0].id, got[1].id]).size === 2 && [got[0].id, got[1].id].every((id) => id === "cat" || id === "bird") && got[2].type === "gem", got.map((x) => x.id || x.type).join());
   check("a shape card unlocks the shape right away", q.shapes().join() === "flower,pudding,cake,bear,cat,bird" && got[0].label.endsWith("모양"));
   const all = new Progress(memoryStorage(), () => 0.005);
   all.state.coins = 1e6; all.state.xp = 1080;               // Lv10: everything unlocked
-  check("no shape cards once every shape is unlocked", Array.from({ length: 20 }, () => all.pull()).every((x) => x.type === "gem"));
+  const allPulls = Array.from({ length: 20 }, () => all.pull());
+  check("no shape cards once every shape is unlocked (the roll falls through to the outfit card, then gems)",
+    allPulls.every((x) => x.type !== "shape") && allPulls.slice(0, 2).every((x) => x.type === "outfit") && allPulls.slice(2).every((x) => x.type === "gem"), allPulls.map((x) => x.type).join());
 }
 
 // 5) level rewards: owned shape → 25 coins; gift boxes once per level
@@ -266,7 +271,7 @@ const sum = (list, key = "coins") => list.reduce((a, x) => a + (x[key] || 0), 0)
   cards.state.shapeCards = ["pudding", "cake", "bear", "cat", "bird"];
   check("rainbow theme once all 6 shapes are unlocked (also via shape cards)", noRainbow && cards.shapes().length === 6 && cards.themes().join() === "basic,rainbow");
   check("5 themes: basic, flower (Lv4), starry (Lv7), strawberry (Lv10), rainbow", THEMES.map((t) => `${t.id}${t.level || ""}`).join() === "basic,flower4,starry7,strawberry10,rainbow" && THEMES.every((t) => t.label));
-  check("outfit data matches the bunny's slots", OUTFITS.length === 7 && OUTFITS.every((o) => ["head", "face", "neck", "back"].includes(o.slot) && o.emoji && (o.level || o.achievement)));
+  check("outfit data matches the bunny's slots", OUTFITS.length === 9 && OUTFITS.every((o) => ["head", "face", "neck", "back", "wand"].includes(o.slot) && o.emoji && (o.level || o.achievement || o.card)));
   check("setTitle: only earned titles", !p.setTitle("golden_5") && p.title === null);
   for (let i = 0; i < 3; i++) p.spit();
   check("wearing an earned title", p.setTitle("spit_3") && p.title.label === "퉤 전문가" && p.setTitle(null) && p.title === null);
@@ -283,6 +288,133 @@ const sum = (list, key = "coins") => list.reduce((a, x) => a + (x[key] || 0), 0)
   const keys = ["coins", "xp", "levelUps", "breakdown", "streak", "comboMult", "freeCardsGained", "newColor", "colorRewards", "achievements", "secret", "coinsTotal"];
   check("feed returns the full result", keys.every((k) => k in r) && ["base", "rare", "combo", "kind", "time"].every((k) => k in r.breakdown) && r.coins === Math.round(COINS_BY_STARS[3] * 1.5) && r.newColor === o.name && r.xp === 40);
   check("LEVEL_REWARDS stay frozen data", Object.isFrozen(LEVEL_REWARDS) && Object.isFrozen(LEVEL_REWARDS[3]));
+}
+
+// 12) v9 fullness gauge: +1 per eaten jelly only, full at 20, saved
+{
+  const p = new Progress(memoryStorage(), rng(14));
+  p.state.xp = 100000; p.state.rewardedLevel = p.level.level;
+  check("constants: full at 20, 5 happy turns, overflow 10 coins", FULLNESS_MAX === 20 && HAPPY_TURNS === 5 && OVERFLOW_COINS === 10 && p.fullnessMax === 20);
+  check("a fresh bunny is not full and not happy", p.fullness === 0 && !p.isFull && !p.canToilet && p.happyTurns === 0 && p.toiletCount === 0);
+  const first = p.feed({ stars: 2, jelly: jellyOf() });
+  p.spit(); p.kick();
+  check("each eat fills the gauge by 1; spit / kick do not", first.fullness === 1 && first.fullnessMax === 20 && !first.full && !first.becameFull && p.fullness === 1);
+  const rest = Array.from({ length: 19 }, () => p.feed({ stars: 3 }));
+  check("the 20th eaten jelly makes the bunny full (becameFull once)", rest[18].full && rest[18].becameFull && rest[18].fullness === 20 && rest.slice(0, 18).every((r) => !r.full && !r.becameFull) && p.isFull && p.canToilet,
+    rest.map((r) => r.fullness).join(","));
+  const more = p.feed({ stars: 2 });
+  check("eating while full keeps the gauge at 20 (no second becameFull)", more.fullness === 20 && more.full && !more.becameFull);
+  const r = new Progress(p.storage);
+  check("fullness is saved", r.fullness === 20 && r.isFull);
+}
+
+// 13) v9 full penalty: −1 star every evaluation, ★1 floor, ★1 still rolls spit / kick
+{
+  const p = new Progress(memoryStorage(), rng(15));
+  p.state.fullness = FULLNESS_MAX;
+  const m = [1, 2, 3, 4].map((s) => p.modifyStars(s, { touched: true }));
+  check("full: ★4→3, ★3→2, ★2→1, ★1 stays ★1 (mod 'full')", m.map((x) => x.stars).join() === "1,1,2,3" && m.every((x) => x.mod === "full" && x.overflowCoins === 0) && m.map((x) => x.from).join() === "1,2,3,4");
+  check("the penalty also hits untouched jellies", p.modifyStars(3, { touched: false }).stars === 2);
+  check("modifyStars is pure (nothing changes or is consumed)", (() => { const before = JSON.stringify(p.state); for (let i = 0; i < 5; i++) p.modifyStars(4); return JSON.stringify(p.state) === before; })());
+  p.state.happyTurns = 3;
+  check("full wins over happy (and uses no happy turn)", p.modifyStars(3).mod === "full" && p.modifyStars(3).stars === 2 && p.happyTurns === 3);
+  const pen = p.modifyStars(2);
+  const outs = new Set(Array.from({ length: 3000 }, (_, i) => rollOutcome(pen.stars, rng(i))));
+  check("a penalised ★1 goes through rollOutcome: spit / kick / eat (hard mode)", pen.stars === 1 && outs.has("spit") && outs.has("kick") && outs.has("eat"));
+  const sp = p.spit();
+  check("a spat / kicked jelly does not touch the tummy", p.fullness === FULLNESS_MAX && p.happyTurns === 3 && sp.lost >= 0);
+  const f = p.feed({ stars: pen.stars, starMod: pen });
+  check("eating a penalised jelly: plain ★1 coins, starMod 'full', no happy turn used", f.coins === COINS_BY_STARS[1] && f.starMod === "full" && !f.happyUsed && f.happyTurns === 3 && f.breakdown.overflow === 0);
+  check("modifyStars clamps odd input to 1..4", p.modifyStars(9).from === 4 && p.modifyStars(0).from === 1 && p.modifyStars(NaN).stars === 1);
+}
+
+// 14) v9 toilet: only when full; empties the tummy, 5 happy turns, badges
+{
+  const p = new Progress(memoryStorage(), rng(16));
+  check("no toilet trip unless full", p.toilet() === null && p.toiletCount === 0);
+  p.state.fullness = 19;
+  check("19 is not full yet", !p.canToilet && p.toilet() === null);
+  p.state.fullness = FULLNESS_MAX; p.state.happyTurns = 2;
+  const coins = p.coins, t = p.toilet();
+  check("toilet: gauge → 0, happyTurns = 5 (set, not added), count +1", t && t.happyTurns === HAPPY_TURNS && t.toiletCount === 1 && p.fullness === 0 && p.happyTurns === 5 && !p.isFull && p.toiletCount === 1);
+  check("first trip: '첫 화장실' +15 coins", t.achievements.length === 1 && t.achievements[0].id === "first_toilet" && t.achievements[0].label === "첫 화장실" && t.achievements[0].coins === 15 && p.coins === coins + 15);
+  check("a second trip right away is not possible", p.toilet() === null && p.toiletCount === 1);
+  const trips = [];
+  for (let i = 0; i < 9; i++) { p.state.fullness = FULLNESS_MAX; trips.push(p.toilet()); }
+  check("10th trip: '화장실 10회' +30 coins (once)", trips[8].achievements.some((a) => a.id === "toilet_10" && a.coins === 30 && a.label === "화장실 10회") && trips.slice(0, 8).every((x) => !x.achievements.length) && p.toiletCount === 10);
+  const r = new Progress(p.storage);
+  check("toilet count / happy turns are saved", r.toiletCount === 10 && r.happyTurns === 5 && r.fullness === 0 && r.state.achievements.toilet_10);
+  check("the toilet badges keep the existing ones", ACHIEVEMENTS.length === 32 && ["first_feed", "level_10", "first_toilet", "toilet_10"].every((id) => ACHIEVEMENTS.some((a) => a.id === id)));
+}
+
+// 15) v9 happy buff: +1 on touched jellies, ★4 overflow +10 after multipliers, 5 turns
+{
+  const p = new Progress(memoryStorage(), rng(17));
+  p.state.xp = 100000; p.state.rewardedLevel = p.level.level;
+  p.state.fullness = FULLNESS_MAX; p.toilet();
+  check("happy: touched ★1→2, ★2→3, ★3→4 (mod 'happy', no overflow)", [1, 2, 3].map((s) => p.modifyStars(s, { touched: true })).every((x, i) => x.stars === i + 2 && x.mod === "happy" && x.overflowCoins === 0));
+  const four = p.modifyStars(4, { touched: true });
+  check("happy ★4 stays ★4 with 10 overflow coins", four.stars === 4 && four.mod === "happy" && four.overflowCoins === OVERFLOW_COINS);
+  const un = p.modifyStars(2, { touched: false });
+  check("untouched jelly: no buff, mod null", un.stars === 2 && un.mod === null && un.overflowCoins === 0);
+  const plain = p.feed({ stars: un.stars, starMod: un });
+  check("an untouched meal uses no happy turn", p.happyTurns === 5 && !plain.happyUsed && plain.happyTurns === 5 && plain.starMod === null);
+  const buff = p.modifyStars(2), b = p.feed({ stars: buff.stars, starMod: buff });
+  check("a buffed meal uses one turn and pays the buffed stars", b.happyUsed && b.happyTurns === 4 && p.happyTurns === 4 && b.starMod === "happy" && b.breakdown.base === COINS_BY_STARS[3]);
+  p.state.streak = 4;
+  const o4 = p.modifyStars(4), big = p.feed({ stars: o4.stars, starMod: o4, order: order("golden"), jelly: jellyOf({ rareCount: 2 }), elapsed: 10 });
+  check("overflow is a flat +10 AFTER combo × kind × time (in coins and breakdown.overflow)", big.breakdown.overflow === 10 && big.coins === Math.round((40 + 10) * 2 * 3 * 1.5) + 10 && big.happyTurns === 3, `${big.coins}`);
+  check("feed without starMod leaves the turns alone (back-compat)", p.feed({ stars: 3 }).happyTurns === 3 && p.happyTurns === 3);
+  check("starMod may also be the mod string ('happy' → turn used, no overflow)", (() => { const r = p.feed({ stars: 4, starMod: "happy" }); return r.happyUsed && r.happyTurns === 2 && r.breakdown.overflow === 0; })());
+  for (let i = 0; i < 2; i++) { const m = p.modifyStars(3); p.feed({ stars: m.stars, starMod: m }); }
+  check("after 5 buffed meals the buff is over", p.happyTurns === 0 && p.modifyStars(3).mod === null && p.modifyStars(3).stars === 3);
+  const stale = p.feed({ stars: 3, starMod: { mod: "happy", overflowCoins: 10 } });
+  check("a stale 'happy' starMod with no turns left pays no overflow", !stale.happyUsed && stale.breakdown.overflow === 0 && p.happyTurns === 0);
+  check("fullness counted every meal on the way (8 meals after the trip)", p.fullness === 8);
+}
+
+// 16) v9 outfit cards: 1/30 after the shape card, unowned only, both owned → gem
+{
+  check("witch hat (head) and wand (new 'wand' slot) are card-only outfits", OUTFIT_SLOTS.join() === "head,face,neck,back,wand"
+    && CARD_OUTFITS.map((o) => `${o.id}:${o.slot}:${o.emoji}:${o.label}`).join() === "witchhat:head:🧙:마녀 모자,wand:wand:🪄:마법지팡이"
+    && !Object.values(LEVEL_REWARDS).flat().some((r) => r.id === "witchhat" || r.id === "wand") && OUTFIT_CARD_CHANCE === 1 / 30 && SHAPE_CARD_CHANCE === 0.01);
+  // forced rolls: shape 0.5 (no), outfit 0.01 (yes), pick 0.9 → the 2nd missing one
+  const p = new Progress(memoryStorage(), seq([0.5, 0.01, 0.9, 0.5, 0.02, 0.9, 0.5, 0.0, 0.0]));
+  p.state.coins = 1000;
+  check("fresh: no card outfits, nothing to wear in the wand slot", !p.outfits().includes("wand") && !p.setOutfit("wand", "wand") && !p.setOutfit("head", "witchhat") && p.outfit.wand === null);
+  const a = p.pull(), coinsAfterA = p.coins, b = p.pull(), c = p.pull();
+  check("outfit card: {type:'outfit', id, slot, label, emoji, usedFree, achievements}", a.type === "outfit" && a.id === "wand" && a.slot === "wand" && a.label === "마법지팡이" && a.emoji === "🪄" && a.usedFree === false && Array.isArray(a.achievements) && coinsAfterA === 1000 - PULL_COST,
+    JSON.stringify(a));
+  check("the next outfit card gives the other (unowned) one", b.type === "outfit" && b.id === "witchhat" && b.slot === "head" && b.emoji === "🧙");
+  check("both owned → a normal gem pull even when the outfit roll hits", c.type === "gem" && c.index === 0 && c.kind === "new");
+  check("owned card outfits unlock and go on their slots", p.outfits().includes("witchhat") && p.outfits().includes("wand") && p.setOutfit("wand", "wand") && p.setOutfit("head", "witchhat")
+    && !p.setOutfit("wand", "witchhat") && !p.setOutfit("head", "wand") && p.outfit.wand === "wand" && p.outfit.head === "witchhat");
+  const r = new Progress(p.storage);
+  check("outfit cards and the worn wand are saved", r.state.outfitCards.join() === "wand,witchhat" && r.outfit.wand === "wand" && r.outfit.head === "witchhat");
+  check("a shape card still comes first (1/100 roll before the outfit roll)", (() => { const q = new Progress(memoryStorage(), seq([0.005, 0.0])); q.state.coins = 100; return q.pull().type === "shape"; })());
+  check("a free card can give an outfit card too", (() => { const q = new Progress(memoryStorage(), seq([0.5, 0.0, 0.0])); q.state.coins = 0; q.state.freeCards = 1; const x = q.pull({ free: true }); return x.type === "outfit" && x.id === "witchhat" && x.usedFree; })());
+  // frequency: ≈ 1/30 × 0.99 of pulls while something is missing
+  const f = new Progress(memoryStorage(), rng(31));
+  f.state.coins = 1e9; f.state.xp = 100000;              // every shape unlocked: no shape cards
+  let outfits = 0;
+  const N = 30000;
+  for (let i = 0; i < N; i++) { const x = f.pull(); if (x.type === "outfit") { outfits++; f.state.outfitCards = []; } }
+  check("≈ 1/30 of pulls are outfit cards (no pity)", Math.abs(outfits / N - 1 / 30) < 0.004, `${outfits}/${N}`);
+}
+
+// 17) v9 migration: a v8 save gets an empty tummy; junk values are cleaned
+{
+  const v8 = { version: 1, coins: 120, xp: 300, rare: Array(25).fill(-1), rareStock: Array(25).fill(0), outfit: { head: "ribbon", face: null, neck: null, back: null }, achievements: { first_feed: true } };
+  const storage = memoryStorage();
+  storage.setItem(PROGRESS_KEY, JSON.stringify(v8));
+  const p = new Progress(storage, rng(18));
+  check("a v8 save loads with fullness 0, happyTurns 0, toiletCount 0, no outfit cards, empty wand slot",
+    p.fullness === 0 && p.happyTurns === 0 && p.toiletCount === 0 && p.state.outfitCards.length === 0 && p.outfit.wand === null && p.outfit.head === "ribbon" && p.coins === 120);
+  const junk = { ...v8, fullness: 99, happyTurns: -3, toiletCount: "x", outfitCards: ["wand", "wand", "crown", 7], outfit: { ...v8.outfit, wand: "witchhat" } };
+  storage.setItem(PROGRESS_KEY, JSON.stringify(junk));
+  const q = new Progress(storage, rng(18));
+  check("junk tummy values are clamped, unknown outfit cards dropped, a wrong-slot wand emptied",
+    q.fullness === FULLNESS_MAX && q.happyTurns === 0 && q.toiletCount === 0 && q.state.outfitCards.join() === "wand" && q.state.outfit.wand === null);
 }
 
 console.log(failures ? `\n${failures} FAILED` : "\nALL FUN CHECKS PASSED");

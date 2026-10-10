@@ -10,9 +10,19 @@
 // The save format stays version 1: v8 fields are added on load (old saves:
 // every owned rare gem gets a stock of 10, old-format orders are dropped,
 // the colour book is seeded from the album, no retroactive gift boxes).
+//
+// v9 (the bunny's tummy): `fullness` 0..FULLNESS_MAX counts eaten jellies
+// (eat outcomes only); a full bunny takes one star off every evaluation until
+// it goes to the toilet (toilet()), which empties the tummy and makes it happy
+// for HAPPY_TURNS buffed meals (+1 star on touched jellies). Star pipeline:
+//   orders.scoreOrder (base score → unmet conditions cap ★2 → rare +1)
+//   → progress.modifyStars (full −1 | happy +1, clamp 1..4, ★4 overflow coins)
+//   → orders.rollOutcome (★1: spit / kick / eat) → feed / spit / kick.
+// Card-only outfits (witch hat, wand) are owned via `outfitCards`. Old saves
+// load with fullness 0, happyTurns 0, toiletCount 0, no outfit cards.
 import { makeOrder, nameColor, familyOf, colorInfo, COLOR_NAMES, ORDER_KINDS } from "./orders.js";
 import {
-  OUTFITS, OUTFIT_SLOTS, THEMES, SECRET_RECIPES, COLOR_BOOK_REWARDS, ACHIEVEMENTS, SECRET_COINS,
+  OUTFITS, OUTFIT_SLOTS, CARD_OUTFITS, THEMES, SECRET_RECIPES, COLOR_BOOK_REWARDS, ACHIEVEMENTS, SECRET_COINS,
   earnedAchievements, achievementView, findSecret, colorBookRewardsDue, rollGift, themeUnlocked,
 } from "./fun.js";
 
@@ -27,6 +37,7 @@ export const RARE_BONUS_MAX = 8;              // … counting at most 8
 export const RARE_COUNT = 25;
 export const BUNDLE = 10;                     // rare gems per card / gift bundle
 export const SHAPE_CARD_CHANCE = 0.01;        // a pull is a (still locked) shape card
+export const OUTFIT_CARD_CHANCE = 1 / 30;     // … else an outfit card (an unowned card outfit; no pity)
 export const OWNED_SHAPE_COINS = 25;          // a level's shape reward already owned via a shape card
 export const MEMORY_PEEK_COST = 5;
 export const RECENT_NAMES = 5;                // colour names an order may not repeat
@@ -37,6 +48,11 @@ export const KIND_LEVEL = Object.freeze({ golden: 3, memory: 4, picky: 5 });
 export const KIND_ODDS = Object.freeze({ golden: 1 / 7, memory: 1 / 5, picky: 1 / 10 });
 export const KIND_COINS = Object.freeze({ normal: 1, memory: 1, golden: 3, picky: 2 });
 const ALBUM_MAX = 60;
+// v9 tummy: eaten jellies until full, buffed meals after a toilet trip, and
+// the flat bonus for a happy +1 that would go past ★4.
+export const FULLNESS_MAX = 20;
+export const HAPPY_TURNS = 5;
+export const OVERFLOW_COINS = 10;
 
 /** Coin multiplier of a ★3/★4 feed by the streak after counting it. */
 export const comboMultiplier = (streak) => (streak >= 5 ? 2 : streak >= 3 ? 1.5 : streak >= 2 ? 1.2 : 1);
@@ -87,7 +103,7 @@ const freshStats = () => ({
   star3: 0, star4: 0, spits: 0, kicks: 0, shapesFed: [], goldenStar3: 0, memoryStar3: 0, pickyStar3: 0,
   fastStar3: 0, slimeStar3: 0, maxGems: 0, maxRare: 0, gifts: 0,
 });
-const emptyOutfit = () => ({ head: null, face: null, neck: null, back: null });
+const emptyOutfit = () => ({ head: null, face: null, neck: null, back: null, wand: null });
 
 export function freshProgress() {
   return {
@@ -96,6 +112,7 @@ export function freshProgress() {
     album: [], order: null, feeds: 0, pulls: 0, seenLevel: 1, rewardedLevel: 1,
     streak: 0, bestStreak: 0, freeCards: 0, recentNames: [], orderSerial: 0, lastKind: "normal", peeks: 0,
     stats: freshStats(), achievements: {}, colorBook: [], colorRewards: [], secrets: [], outfit: emptyOutfit(), title: null,
+    fullness: 0, happyTurns: 0, toiletCount: 0, outfitCards: [],
   };
 }
 
@@ -115,7 +132,9 @@ function migrate(saved) {
   s.shapeCards = (Array.isArray(saved.shapeCards) ? saved.shapeCards : []).filter((id, i, a) => SHAPE_IDS.includes(id) && id !== "flower" && a.indexOf(id) === i);
   if (!Array.isArray(s.album)) s.album = [];
   s.order = saved.order && saved.order.version === 2 ? saved.order : null;
-  for (const key of ["feeds", "pulls", "streak", "bestStreak", "freeCards", "orderSerial", "peeks"]) s[key] = count(saved[key]);
+  for (const key of ["feeds", "pulls", "streak", "bestStreak", "freeCards", "orderSerial", "peeks", "happyTurns", "toiletCount"]) s[key] = count(saved[key]);
+  s.fullness = Math.min(FULLNESS_MAX, count(saved.fullness));
+  s.outfitCards = (Array.isArray(saved.outfitCards) ? saved.outfitCards : []).filter((id, i, a) => CARD_OUTFITS.some((o) => o.id === id) && a.indexOf(id) === i);
   s.seenLevel = count(saved.seenLevel, 1) || 1;
   s.recentNames = (Array.isArray(saved.recentNames) ? saved.recentNames : []).filter((n) => typeof n === "string").slice(-RECENT_NAMES);
   s.lastKind = ORDER_KINDS.includes(saved.lastKind) ? saved.lastKind : "normal";
@@ -187,11 +206,13 @@ export class Progress {
     const have = this.shapes();
     return SHAPE_REWARDS.filter((r) => !have.includes(r.id));
   }
-  /** Unlocked outfit ids (by level or by achievement). */
+  /** Unlocked outfit ids (by level, by achievement or by outfit card), in OUTFITS order. */
   outfits() {
-    const level = this.level.level;
-    return OUTFITS.filter((o) => (o.level ? level >= o.level : !!this.state.achievements[o.achievement])).map((o) => o.id);
+    const level = this.level.level, st = this.state;
+    return OUTFITS.filter((o) => (o.level ? level >= o.level : o.card ? st.outfitCards.includes(o.id) : !!st.achievements[o.achievement])).map((o) => o.id);
   }
+  /** Card-only outfits not owned yet (what an outfit card can still give). */
+  missingCardOutfits() { return CARD_OUTFITS.filter((o) => !this.state.outfitCards.includes(o.id)); }
   /** Unlocked plate / background theme ids. */
   themes() {
     const c = { level: this.level.level, colorBook: this.state.colorBook.length, shapes: this.shapes().length };
@@ -283,6 +304,61 @@ export class Progress {
     return true;
   }
 
+  // ------------------------------------------------------------ the tummy (v9)
+  /** Jellies eaten since the last toilet trip, 0..FULLNESS_MAX. */
+  get fullness() { return this.state.fullness; }
+  get fullnessMax() { return FULLNESS_MAX; }
+  /** Full: every evaluation loses a star until the bunny goes to the toilet. */
+  get isFull() { return this.state.fullness >= FULLNESS_MAX; }
+  /** The toilet button may be used (the UI also waits for no bunny visit in progress). */
+  get canToilet() { return this.isFull; }
+  /** Buffed meals left after the last toilet trip (+1 star on touched jellies). */
+  get happyTurns() { return this.state.happyTurns; }
+  get toiletCount() { return this.state.toiletCount; }
+
+  /**
+   * The tummy's star modifier: a pure step between orders.scoreOrder and
+   * orders.rollOutcome (nothing is changed or consumed here).
+   *   full                          → stars − 1, at least ★1 (mod "full"; a
+   *                                   penalised ★1 then rolls spit / kick like
+   *                                   any ★1 — the hard mode)
+   *   else happyTurns > 0 & touched → stars + 1 (mod "happy"); past ★4 it stays
+   *                                   ★4 and pays OVERFLOW_COINS instead
+   *   else (or an untouched jelly)  → unchanged (mod null; no turn is used)
+   * Full wins over happy: both can be active together only when untouched
+   * jellies (which never use a happy turn) fill the tummy again.
+   * → { stars (1..4), mod: "full"|"happy"|null, overflowCoins (0 | 10), from (input stars) }
+   * Pass the whole result on to feed({ stars: r.stars, starMod: r }): feed
+   * uses up the happy turn and pays the overflow only then, so a jelly that is
+   * not eaten after all (spit / kick: impossible for a buffed ★2+, but also a
+   * visit that never happens) costs no turn.
+   */
+  modifyStars(stars, { touched = true } = {}) {
+    const from = Math.max(1, Math.min(4, Math.round(stars) || 1));
+    if (this.isFull) return { stars: Math.max(1, from - 1), mod: "full", overflowCoins: 0, from };
+    if (this.state.happyTurns > 0 && touched) {
+      return from >= 4 ? { stars: 4, mod: "happy", overflowCoins: OVERFLOW_COINS, from } : { stars: from + 1, mod: "happy", overflowCoins: 0, from };
+    }
+    return { stars: from, mod: null, overflowCoins: 0, from };
+  }
+
+  /**
+   * The bunny goes to the toilet (only when full; null otherwise): the tummy
+   * empties, the bunny is happy for HAPPY_TURNS buffed meals (set, not added),
+   * the trip is counted (badges "첫 화장실" / "화장실 10회"). Saves once.
+   * → null | { happyTurns, toiletCount, achievements }
+   */
+  toilet() {
+    if (!this.isFull) return null;
+    const st = this.state;
+    st.fullness = 0;
+    st.happyTurns = HAPPY_TURNS;
+    st.toiletCount++;
+    const achievements = this.awardAchievements();
+    this.commit();
+    return { happyTurns: st.happyTurns, toiletCount: st.toiletCount, achievements };
+  }
+
   // ------------------------------------------------------------ the bunny eats
   randInt([lo, hi]) { return lo + Math.floor(this.random() * (hi - lo + 1)); }
 
@@ -293,15 +369,29 @@ export class Progress {
    * Applies coins (combo × kind × time bonus), XP, album card, golden free
    * card, colour book (+ milestones), secret recipe, level-ups (+ gift boxes)
    * and achievements; saves once.
-   * → { coins, xp, levelUps, breakdown: {base, rare, combo, kind, time},
-   *     streak, comboMult, freeCardsGained, newColor, colorRewards,
-   *     achievements, secret, coinsTotal }
+   * v9: every feed is an eaten jelly → fullness +1 (up to FULLNESS_MAX).
+   * starMod = the modifyStars() result these stars came from (stars must
+   * already be its .stars): mod "happy" uses up one happy turn and pays its
+   * overflowCoins as a flat bonus AFTER the multipliers (breakdown.overflow;
+   * included in coins). "full" / null change nothing here.
+   * → { coins, xp, levelUps, breakdown: {base, rare, combo, kind, time,
+   *     overflow}, streak, comboMult, freeCardsGained, newColor, colorRewards,
+   *     achievements, secret, coinsTotal, starMod: "full"|"happy"|null,
+   *     happyUsed, happyTurns, fullness, fullnessMax, full, becameFull }
    * breakdown: base / rare = coins before multipliers, combo / kind =
-   * multipliers, time = bonus fraction (0.5 / 0.25 / 0).
+   * multipliers, time = bonus fraction (0.5 / 0.25 / 0), overflow = flat
+   * coins of a happy +1 past ★4 (0 / 10).
    */
-  feed({ stars, order = this.order, result = null, jelly = null, card = null, elapsed = Infinity, peeks = 0, rareCount = 0 } = {}) {
+  feed({ stars, order = this.order, result = null, jelly = null, card = null, elapsed = Infinity, peeks = 0, rareCount = 0, starMod = null } = {}) {
     const st = this.state, stats = st.stats, before = this.level.level;
     const s = Math.max(1, Math.min(4, Math.round(stars ?? result?.stars ?? 1)));
+    // the tummy: a buffed meal uses up its happy turn (only if one is left)
+    const mod = typeof starMod === "string" ? starMod : starMod?.mod ?? null;
+    const happyUsed = mod === "happy" && st.happyTurns > 0;
+    if (happyUsed) st.happyTurns--;
+    const overflow = happyUsed ? count(starMod?.overflowCoins) : 0;
+    const wasFull = st.fullness >= FULLNESS_MAX;
+    st.fullness = Math.min(FULLNESS_MAX, st.fullness + 1);
     const kind = order?.kind || "normal";
     const rares = jelly ? (jelly.rareCount ?? jelly.rare?.length ?? 0) : rareCount;
     // combo streak: ★3/★4 count up, ★2 keeps it, ★1 breaks it
@@ -311,8 +401,8 @@ export class Progress {
     const comboMult = s >= 3 ? comboMultiplier(st.streak) : 1;
     const kindMult = KIND_COINS[kind] || 1;
     const time = timeBonusFor(elapsed);
-    const breakdown = { base: COINS_BY_STARS[s], rare: RARE_BONUS * Math.min(RARE_BONUS_MAX, rares), combo: comboMult, kind: kindMult, time };
-    const coins = Math.round((breakdown.base + breakdown.rare) * comboMult * kindMult * (1 + time));
+    const breakdown = { base: COINS_BY_STARS[s], rare: RARE_BONUS * Math.min(RARE_BONUS_MAX, rares), combo: comboMult, kind: kindMult, time, overflow };
+    const coins = Math.round((breakdown.base + breakdown.rare) * comboMult * kindMult * (1 + time)) + overflow;
     const xp = 10 + 10 * s;
     st.coins += coins;
     st.xp += xp;
@@ -368,7 +458,12 @@ export class Progress {
     const achievements = this.awardAchievements();
     coinsTotal += achievements.reduce((a, x) => a + x.coins, 0);
     this.commit();
-    return { coins, xp, levelUps: ups.list, breakdown, streak: st.streak, comboMult, freeCardsGained, newColor, colorRewards, achievements, secret, coinsTotal };
+    const full = st.fullness >= FULLNESS_MAX;
+    return {
+      coins, xp, levelUps: ups.list, breakdown, streak: st.streak, comboMult, freeCardsGained, newColor, colorRewards, achievements, secret, coinsTotal,
+      starMod: mod === "full" || mod === "happy" ? mod : null, happyUsed, happyTurns: st.happyTurns,
+      fullness: st.fullness, fullnessMax: FULLNESS_MAX, full, becameFull: full && !wasFull,
+    };
   }
 
   /** ★1 and the bunny spits it out (퉤): 1–50 coins are taken away (never below 0). */
@@ -433,13 +528,18 @@ export class Progress {
   /**
    * One card pull (the player picks one of three face-down cards; all three
    * are equal, the result is drawn when picked). Pays PULL_COST coins, or a
-   * free card when `free` (or when coins are short). 1/100: a shape card for a
-   * still-locked shape (none locked → a gem). Otherwise uniform over the 25
-   * rare gems: a bundle of 10; a duplicate also upgrades glitter → gold →
-   * rainbow ("more" at rainbow).
+   * free card when `free` (or when coins are short). In this order:
+   * 1/100 a shape card for a still-locked shape (none locked → go on);
+   * then 1/30 an outfit card: a random card-only outfit not owned yet
+   * (witch hat / wand; no pity; both owned → go on); otherwise uniform over
+   * the 25 rare gems: a bundle of 10; a duplicate also upgrades glitter →
+   * gold → rainbow ("more" at rainbow). Randomness: this.random (the
+   * constructor's source), one draw per roll in that order.
    * → null (cannot pay) | { type: "gem", index, tier, kind: "new"|"gold"|
    *   "rainbow"|"more", added, count, usedFree, achievements } | { type:
-   *   "shape", id, label, usedFree, achievements }
+   *   "shape", id, label, usedFree, achievements } | { type: "outfit", id,
+   *   slot, label, emoji, usedFree, achievements } (an outfit card's item is
+   *   owned right away; wear it with setOutfit)
    */
   pull({ free = false } = {}) {
     const st = this.state;
@@ -457,6 +557,14 @@ export class Progress {
         const r = locked[Math.floor(this.random() * locked.length)];
         st.shapeCards.push(r.id);
         result = { type: "shape", id: r.id, label: r.label, usedFree };
+      }
+    }
+    if (!result && this.random() < OUTFIT_CARD_CHANCE) {
+      const missing = this.missingCardOutfits();
+      if (missing.length) {
+        const o = missing[Math.floor(this.random() * missing.length)];
+        st.outfitCards.push(o.id);
+        result = { type: "outfit", id: o.id, slot: o.slot, label: o.label, emoji: o.emoji, usedFree };
       }
     }
     if (!result) {
@@ -477,7 +585,7 @@ export class Progress {
       shapeCards: st.shapeCards.length, goldenStar3: s.goldenStar3, memoryStar3: s.memoryStar3, pickyStar3: s.pickyStar3,
       fastStar3: s.fastStar3, slimeStar3: s.slimeStar3, maxGems: s.maxGems, maxRare: s.maxRare,
       colorBook: st.colorBook.length, colorTotal: COLOR_NAMES.length, secrets: st.secrets.length, secretTotal: SECRET_RECIPES.length,
-      level: this.level.level,
+      level: this.level.level, toilets: st.toiletCount,
     };
   }
   // Marks newly earned achievements done and credits their coins (no save).
@@ -508,7 +616,7 @@ export class Progress {
     this.commit();
     return true;
   }
-  /** {head, face, neck, back}: ids of the worn (and still unlocked) items. */
+  /** {head, face, neck, back, wand}: ids of the worn (and still unlocked) items. */
   get outfit() {
     const have = this.outfits(), out = emptyOutfit();
     for (const slot of OUTFIT_SLOTS) if (have.includes(this.state.outfit[slot])) out[slot] = this.state.outfit[slot];

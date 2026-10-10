@@ -1,13 +1,15 @@
 // Face decorations and toppers for the shaped jellies: bead eyes, noses,
-// mouths, blush, cat muzzles / inner ears, the cake's cherry and the bird's
-// beak. Positions come from the app (tray space) every frame.
+// mouths, blush, cat muzzles / inner ears / whiskers, the cake's cherry, the
+// bird's beak, and the strawberry halves set inside the cat. Positions come
+// from the app (tray space) every frame.
 //
-// One InstancedMesh per kind (12 kinds × ≤ 24 instances; hidden kinds cost
+// One InstancedMesh per kind (14 kinds × ≤ 24 instances; hidden kinds cost
 // no draw call, so a face is still ≤ 8 draw calls). The
 // look of each kind is carried by per-vertex attributes of its geometry and a
-// colour per instance, so all kinds share one node graph (two material
+// colour per instance, so all kinds share one node graph (three material
 // instances: "patches" = blush / muzzle / inner ear, which never write depth,
-// so features drawn after them — nose, mouth, eyes — always sit on top):
+// so features drawn after them — nose, mouth, eyes — always sit on top;
+// "inner" = pieces inside the jelly, always opaque):
 //
 //   decorA (vec4, per vertex)   x gloss 0..1, y self-glow 0..1,
 //                               z soft rim (0 inside … 1 outline; > 0.5 dithers out),
@@ -61,6 +63,19 @@
 //   beakOpen  the beak with its mandibles parted (upper up 24°, lower down
 //             29° about the base), the inside of the mouth dark pink
 //   (eyeClosed / eyeHappy: instance colour, default the eye's)
+//   whisker   one cheek's three whiskers fanning out along +X from the anchor
+//             (three strokes 2.2 s long from x = 0, starting 0.32 s apart, ±11° and level), thin dark strokes standing
+//             out from the cheek; the other cheek's set is this one turned half a
+//             turn about +Z (up = −y), the fan is symmetric under it
+//   strawberry  a strawberry half (2 s tall, 1.7 s wide, tip toward −Y) set
+//             INSIDE the jelly (world anchor = its centre, not a surface
+//             point): +Z = the cut face (pale core, red flesh, a ring of
+//             seeds at the edge), −Z = the domed red skin dotted with yellow
+//             seeds. Always drawn opaque (the "inner" material, either mode)
+//             and seen through the jelly: refracted and tinted like the gems;
+//             in overlay mode also a depth-biased copy after the jelly, so a
+//             piece just under the front surface reads crisply (see
+//             INNER_BIAS); a soft self-glow keeps it juicy, half-clear fruit.
 // Flat pieces are bent to hug a ~32 mm-radius surface at their nominal size.
 import * as THREE from "three/webgpu";
 import {
@@ -90,7 +105,7 @@ import {
 } from "three/tsl";
 
 // Append only (world.js DECOR_KINDS has the same order).
-export const DECOR_KINDS = Object.freeze(["eye", "nose", "mouth", "blush", "muzzle", "earInner", "cherry", "beak", "eyeClosed", "eyeHappy", "mouthOpen", "beakOpen"]);
+export const DECOR_KINDS = Object.freeze(["eye", "nose", "mouth", "blush", "muzzle", "earInner", "cherry", "beak", "eyeClosed", "eyeHappy", "mouthOpen", "beakOpen", "whisker", "strawberry"]);
 export const DECOR_STRIDE = 12;
 export const DECOR_MAX_PER_KIND = 24;
 // Default colours (sRGB) used when a state's r < 0.
@@ -98,14 +113,20 @@ export const DECOR_DEFAULT_COLORS = Object.freeze({
   eye: "#0e0a12", nose: "#33222a", mouth: "#3b2129", blush: "#ff8fb0",
   muzzle: "#fffafd", earInner: "#ffa9c4", cherry: "#d80c28", beak: "#86aaff",
   eyeClosed: "#0e0a12", eyeHappy: "#0e0a12", mouthOpen: "#c25a74", beakOpen: "#86aaff",
+  whisker: "#1a1216", strawberry: "#e8233f",
 });
 // Suggested sizes (m) for the contract's reference faces.
-export const DECOR_SIZES = Object.freeze({ eye: 0.0028, nose: 0.0016, mouth: 0.003, blush: 0.0045, muzzle: 0.005, earInner: 0.004, cherry: 0.0075, beak: 0.005, eyeClosed: 0.0028, eyeHappy: 0.0028, mouthOpen: 0.0036, beakOpen: 0.005 });
+export const DECOR_SIZES = Object.freeze({ eye: 0.0028, nose: 0.0016, mouth: 0.003, blush: 0.0045, muzzle: 0.005, earInner: 0.004, cherry: 0.0075, beak: 0.005, eyeClosed: 0.0028, eyeHappy: 0.0028, mouthOpen: 0.0036, beakOpen: 0.005, whisker: 0.0048, strawberry: 0.0046 });
 
 const PATCH = new Set(["blush", "muzzle", "earInner"]);
 const TOPPER = new Set(["cherry", "beak", "beakOpen"]);
+// Inside the jelly, not on it: opaque in both modes, never offset or flattened.
+const INNER = new Set(["strawberry"]);
 const SURFACE_RADIUS = 0.032;      // jelly curvature the flat pieces are bent to
 const EMBED_GAP = 0.0003;          // embedded mode: jelly left in front of a piece (m)
+// Inner pieces' overlay copy: shows within this distance (m) under the
+// rendered surface (the cat's strawberries sit 4.5 mm deep, ≈ 4 mm relief).
+const INNER_BIAS = 0.0065;
 
 // Sun direction (light travel) in tray space; same as stage.js LIGHT_DIRECTION.
 const SUN_TRAVEL = new THREE.Vector3(-0.6123724357, -0.5, 0.6123724357).normalize();
@@ -457,14 +478,73 @@ function buildBeakOpen() {
   return B.build();
 }
 
+// One cheek's whiskers: three thin strokes fanning out along +X, tapering,
+// nearly straight: like real whiskers they leave the curved cheek and stand
+// out from it (bent only a quarter as much as the surface, so a set seen
+// from the front still spreads sideways instead of wrapping round the face).
+function buildWhisker() {
+  const B = new Builder();
+  const k = sagOf("whisker") * 0.25, look = () => ({ a: A_(0.35), b: B_() });
+  for (const side of [1, 0, -1]) {
+    const a = (side * 11 * Math.PI) / 180, pts = [];
+    for (let i = 0; i <= 16; i += 1) {
+      // three strokes starting a little apart, fanning out (the outer two
+      // curving away from the middle one: symmetric under y → −y)
+      const r = 2.2 * (i / 16);
+      const x = r * Math.cos(a), y = side * 0.32 + r * Math.sin(a) + side * 0.05 * r * r;
+      pts.push([x, y, 0.03 - k * (x * x + y * y)]);
+    }
+    tube(B, { pts, radius: (t) => 0.075 - 0.035 * t, squash: 0.7, seg: 8, look });
+  }
+  return B.build();
+}
+
+// A strawberry half (see the header): cut face +Z, skin −Z, tip toward −Y.
+function buildStrawberry() {
+  const B = new Builder();
+  const skin = lin("#c3122c"), flesh = lin("#f2445c"), core = lin("#ffd3da"), rim = lin("#d81d3a"), seed = lin("#ffe07a");
+  const outline = outlineFromSDF((x, y) => smin(sdCircle(x, y, 0, 0.28, 0.78), sdTriangleUp(x / 0.92, -(y + 0.12), 0.66) - 0.22, 0.45), 48, 0.85, 1);
+  const BACK = 0.72, FRONT = 0.07;
+  const domeOf = (rho) => Math.pow(Math.max(0, 1 - Math.pow(rho, 2.4)), 0.42);
+  puff(B, {
+    outline, front: FRONT, back: BACK, rings: 12,
+    look: (x, y, rho, front) => {
+      if (!front) return { a: A_(0.75, 0.5, 0, 1), b: B_(skin, 1) };
+      // the cut face: a pale core drawn out along the long axis, red flesh, a red rim
+      const c = Math.hypot(x / 0.42, (y - 0.05) / 0.75);
+      let col = flesh.map((v, i) => v + (core[i] - v) * (1 - smooth(0.35, 1, c)));
+      col = col.map((v, i) => v + (rim[i] - v) * smooth(0.8, 0.97, rho));
+      // (the cut face's rim dithers out softly: no sticker edge)
+      return { a: A_(0.85, 0.55, rimEdge(rho, 0.86) * 0.8, 1), b: B_(col, 1) };
+    },
+  });
+  // seeds: little sunken yellow beads all over the skin, and a ring of them
+  // along the cut face's edge
+  const dot = (p, r) => ellipsoid(B, { r: [r, r, r * 0.7], c: p, seg: 6, rings: 4, look: () => ({ a: A_(0.6, 0.45, 0, 1), b: B_(seed, 1) }) });
+  const seg = outline.pts.length;
+  const onOutline = (th, rho) => { const s2 = Math.round((th / (Math.PI * 2)) * seg) % seg; const [px, py] = outline.pts[(s2 + seg) % seg]; return outline.map(px * rho, py * rho); };
+  for (const [rho, n, phase] of [[0.3, 4, 0.4], [0.55, 7, 0.1], [0.78, 10, 0.3]]) for (let i = 0; i < n; i += 1) {
+    const th = ((i + phase) / n) * Math.PI * 2, [x, y] = onOutline(th, rho);
+    dot([x, y, -BACK * domeOf(rho) + 0.015], 0.055);
+  }
+  for (let i = 0; i < 14; i += 1) {
+    const th = ((i + 0.5) / 14) * Math.PI * 2, [x, y] = onOutline(th, 0.9);
+    dot([x, y, FRONT * domeOf(0.9) + 0.004], 0.045);
+  }
+  return B.build();
+}
+
 const BUILDERS = {
   eye: buildEye, nose: buildNose, mouth: buildMouth, blush: buildBlush, muzzle: buildMuzzle, earInner: buildEarInner, cherry: buildCherry, beak: buildBeak,
   eyeClosed: buildEyeClosed, eyeHappy: buildEyeHappy, mouthOpen: buildMouthOpen, beakOpen: buildBeakOpen,
+  whisker: buildWhisker, strawberry: buildStrawberry,
 };
 
 // ---- material -----------------------------------------------------------------
 
-function decorShading() {
+// veil: a piece seen through a few mm of clear jelly (the inner pieces'
+// overlay copy): its colour pulled a fifth of the way toward a pale jelly pink.
+function decorShading({ veil = false } = {}) {
   const A = attribute("decorA", "vec4");
   const Bt = attribute("decorB", "vec4");
   const C = attribute("decorColor", "vec3");
@@ -507,7 +587,10 @@ function decorShading() {
   color = color.add(vec3(keyHi.add(subHi).add(keySoft))).add(sunColor.mul(sunSpec)).add(sky.mul(rim));
 
   // Ordered-noise dither instead of blending.
-  const mask = float(1).sub(soft).greaterThan(interleavedGradientNoise(screenCoordinate.xy).mul(0.98).add(0.01));
+  const noise = interleavedGradientNoise(screenCoordinate.xy).mul(0.98).add(0.01);
+  // (a dithered veil read as grain at phone sizes: the colour alone does it)
+  if (veil) color = mix(color, vec3(1.0, 0.84, 0.9), 0.2);
+  const mask = float(1).sub(soft).greaterThan(noise);
   return { color, mask };
 }
 
@@ -574,7 +657,23 @@ export class DecorLayer {
     this.depthBias = uniform(depthBias);
     this._clip = biasedClip(this.depthBias);
     const shading = decorShading();
-    this.materials = { feature: makeMaterial(shading, { patch: false }), patch: makeMaterial(shading, { patch: true }) };
+    this.materials = { feature: makeMaterial(shading, { patch: false }), patch: makeMaterial(shading, { patch: true }), inner: makeMaterial(shading, { patch: false }) };
+    this.materials.inner.name = "DecorInner";
+    // The same inner pieces once more, drawn after the jelly like the face
+    // (overlay mode only): the transmission's thin-slab refraction samples
+    // the backdrop a whole jelly thickness away, so a piece just under a
+    // curved surface often does not show through it at all. This copy is
+    // depth-tested with a bias of INNER_BIAS (how deep the pieces sit, plus
+    // their own relief), so it shows wherever the piece is just under the
+    // front surface — crisp, like fruit in clear jelly — and stays hidden
+    // where it is deeper (seen from behind: then only the refracted copy).
+    // No depth write: the face drawn after it always stays on top.
+    this.materials.innerShallow = makeMaterial(decorShading({ veil: true }), { patch: false });
+    this.materials.innerShallow.name = "DecorInnerShallow";
+    this.materials.innerShallow.transparent = true;
+    this.materials.innerShallow.depthWrite = false;
+    this.materials.innerShallow.vertexNode = biasedClip(uniform(INNER_BIAS));
+    this.shallow = new Map();         // kind id → overlay copy of an inner kind
     this.meshes = [];
     this.defaults = DECOR_KINDS.map((k) => lin(DECOR_DEFAULT_COLORS[k]));
     this.top = new Float32Array(DECOR_KINDS.length);       // highest unit-space z per kind
@@ -589,7 +688,7 @@ export class DecorLayer {
         a.setUsage(THREE.DynamicDrawUsage);
         geometry.setAttribute(name, a);
       }
-      const mesh = new THREE.InstancedMesh(geometry, PATCH.has(kind) ? this.materials.patch : this.materials.feature, DECOR_MAX_PER_KIND);
+      const mesh = new THREE.InstancedMesh(geometry, INNER.has(kind) ? this.materials.inner : PATCH.has(kind) ? this.materials.patch : this.materials.feature, DECOR_MAX_PER_KIND);
       mesh.name = `Decor:${kind}`;
       mesh.count = 0;
       mesh.visible = false;
@@ -597,6 +696,14 @@ export class DecorLayer {
       mesh.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
       parent.add(mesh);
       this.meshes.push(mesh);
+      if (INNER.has(kind)) {
+        const copy = new THREE.InstancedMesh(geometry, this.materials.innerShallow, DECOR_MAX_PER_KIND);
+        copy.instanceMatrix = mesh.instanceMatrix;
+        copy.name = `Decor:${kind}:shallow`;
+        copy.count = 0; copy.visible = false; copy.frustumCulled = false; copy.renderOrder = 1;
+        parent.add(copy);
+        this.shallow.set(i, copy);
+      }
     });
     this.counts = new Int32Array(DECOR_KINDS.length);
     this._m = new THREE.Matrix4(); this._p = new THREE.Vector3(); this._q = new THREE.Quaternion(); this._s = new THREE.Vector3();
@@ -612,8 +719,10 @@ export class DecorLayer {
     on = Boolean(on);
     if (on === this._overlay) return;
     this._overlay = on;
-    for (const m of Object.values(this.materials)) { m.transparent = on; m.vertexNode = on ? this._clip : null; m.needsUpdate = true; }
-    DECOR_KINDS.forEach((kind, i) => { this.meshes[i].renderOrder = (on ? 2 : 0) + (PATCH.has(kind) ? 0 : 1); });
+    // (the inner pieces stay opaque either way: the jelly's transmission sees them)
+    for (const m of [this.materials.feature, this.materials.patch]) { m.transparent = on; m.vertexNode = on ? this._clip : null; m.needsUpdate = true; }
+    DECOR_KINDS.forEach((kind, i) => { this.meshes[i].renderOrder = INNER.has(kind) ? 0 : (on ? 2 : 0) + (PATCH.has(kind) ? 0 : 1); });
+    if (this.shallow) for (const [kind, copy] of this.shallow) copy.visible = this.counts?.[kind] > 0 && !this.hidden && on;
   }
 
   // states: Float32Array, stride 12: kindId, px, py, pz, qx, qy, qz, qw, scale, r, g, b
@@ -644,13 +753,14 @@ export class DecorLayer {
       this._q.normalize();
       // Offset along the local normal: a hair outward (overlay), or the piece's
       // own height + a gap inward (embedded; toppers stay put).
-      const off = this._overlay ? this.lift : (TOPPER.has(DECOR_KINDS[kindId]) ? 0 : -(this.top[kindId] * s + EMBED_GAP));
+      const name = DECOR_KINDS[kindId];
+      const off = INNER.has(name) ? 0 : this._overlay ? this.lift : (TOPPER.has(name) ? 0 : -(this.top[kindId] * s + EMBED_GAP));
       this._z.set(0, 0, 1).applyQuaternion(this._q);
       this._p.set(states[o + 1] + this._z.x * off, states[o + 2] + this._z.y * off, states[o + 3] + this._z.z * off);
       this._s.set(s, s, s);
       mesh.setMatrixAt(k, this._m.compose(this._p, this._q, this._s));
       const ga = mesh.geometry.attributes, an = ga.decorAnchor.array, nr = ga.decorNormal.array;
-      an[k * 4] = this._p.x; an[k * 4 + 1] = this._p.y; an[k * 4 + 2] = this._p.z; an[k * 4 + 3] = TOPPER.has(DECOR_KINDS[kindId]) ? 0 : 1;
+      an[k * 4] = this._p.x; an[k * 4 + 1] = this._p.y; an[k * 4 + 2] = this._p.z; an[k * 4 + 3] = TOPPER.has(name) || INNER.has(name) ? 0 : 1;
       nr[k * 3] = this._z.x; nr[k * 3 + 1] = this._z.y; nr[k * 3 + 2] = this._z.z;
       const attr = ga.decorColor, arr = attr.array, c = k * 3;
       let r, g, b;
@@ -660,6 +770,7 @@ export class DecorLayer {
       counts[kindId] = k + 1;
     }
     if (dropped && !this._warned) { this._warned = true; console.warn(`DecorLayer: ${dropped} decoration(s) over ${DECOR_MAX_PER_KIND} per kind dropped`); }
+    for (const [kind, copy] of this.shallow) { copy.count = counts[kind]; copy.visible = counts[kind] > 0 && !this.hidden && this._overlay; }
     for (let kind = 0; kind < this.meshes.length; kind += 1) {
       const mesh = this.meshes[kind], n = counts[kind];
       mesh.count = n;
@@ -676,6 +787,7 @@ export class DecorLayer {
     this.hidden = Boolean(hidden);
     if (this.disposed) return;
     for (let kind = 0; kind < this.meshes.length; kind += 1) this.meshes[kind].visible = this.counts[kind] > 0 && !this.hidden;
+    for (const [kind, copy] of this.shallow) copy.visible = this.counts[kind] > 0 && !this.hidden && this._overlay;
   }
 
   // Triangles per instance of each kind (budgets / tests).
@@ -686,6 +798,8 @@ export class DecorLayer {
   dispose() {
     if (this.disposed) return;
     this.disposed = true;
+    for (const copy of this.shallow.values()) this.parent.remove(copy);
+    this.shallow.clear();
     for (const mesh of this.meshes) { this.parent.remove(mesh); mesh.geometry.dispose(); mesh.dispose?.(); }
     for (const m of Object.values(this.materials)) m.dispose();
     this.meshes = [];

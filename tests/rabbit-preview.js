@@ -6,11 +6,13 @@
 // from acceleration; no stretching); otherwise it falls back onto the plate.
 // It shrinks 13 % per bite and vanishes on "finish". On "kick" it gets the
 // impulse the app's world gets ({dir, strength}): it slides and tumbles across
-// the tray, bumps into the rim and stays there.
+// the tray, bumps into the rim and stays there. "toilet" never touches it.
 //
-// Query: ?lite=1 (WebGL2)  ?quality=high|medium|low  ?outcome=eat|spit|kick|refuse
+// Query: ?lite=1 (WebGL2)  ?quality=high|medium|low  ?outcome=eat|spit|kick|refuse|toilet
+//        ?fullness=0..1 (belly; 1 = full: tummy hold + burp)  ?happy=1 (smiling buff face)
+//        ?wand=wand (wand on the back, flourish on arrival / at the toilet smile)
 //        ?mood=happy|ok|sad|special  ?bites=4  ?shape=flower|bear|cat|bird|cake|pudding
-//        ?picky=1 (monocle)  ?head=ribbon|crown|flowerband  ?face=glasses  ?neck=scarf
+//        ?picky=1 (monocle)  ?head=ribbon|crown|flowerband|witchhat  ?face=glasses  ?neck=scarf
 //        ?back=wings|cape  ?outfit=all (ribbon + glasses + scarf + wings)
 //        ?color=%23rrggbb  ?autoplay=0  ?t=<s> freeze at that time (deterministic seek)
 //        ?seat=<deg> seat angle (default: seated like the app, from the camera)  ?az=<rad> camera azimuth
@@ -30,9 +32,11 @@ let shape = q.get("shape") ?? "flower";
 let jellyColor = q.get("color") ?? "#ff6f9a";
 let bites = num("bites", 4);
 let picky = q.get("picky") === "1";
+let fullness = num("fullness", 0);
+let happy = q.get("happy") === "1";
 const outfit = q.get("outfit") === "all"
-  ? { head: "ribbon", face: "glasses", neck: "scarf", back: "wings" }
-  : { head: q.get("head"), face: q.get("face"), neck: q.get("neck"), back: q.get("back") };
+  ? { head: "ribbon", face: "glasses", neck: "scarf", back: "wings", wand: q.get("wand") }
+  : { head: q.get("head"), face: q.get("face"), neck: q.get("neck"), back: q.get("back"), wand: q.get("wand") };
 if (q.get("clean") === "1") document.body.classList.add("clean");
 
 const R = (window.__rabbit = { errors: [], events: [], frames: 0, ready: false });
@@ -221,6 +225,8 @@ function jellyInfo() {
 // ---------------------------------------------------------------- rabbit ----
 const rabbit = new Rabbit(tray, { quality });
 rabbit.setOutfit(outfit);
+rabbit.setFullness(fullness);
+rabbit.setHappy(happy);
 Object.assign(R, { rabbit, renderer, scene, camera, tray, jelly: J });
 // Seat like the app (main.js feed()): behind the jelly as seen from the camera,
 // 2.4 cm to the side, facing the camera. ?seat=<deg> instead seats it on the
@@ -253,7 +259,7 @@ function play(m = mood) {
   mood = m;
   resetJelly();
   R.events.length = 0;
-  log(`— play ${outcome} · ${mood} · ${shape} ×${bites} (${quality})${picky ? " · picky" : ""}`);
+  log(`— play ${outcome} · ${mood} · ${shape} ×${bites} (${quality})${picky ? " · picky" : ""}${happy ? " · happy" : ""}${fullness ? ` · full ${fullness}` : ""}`);
   playStart = clock;
   const sp = spec();
   placeSeat();
@@ -270,7 +276,8 @@ function play(m = mood) {
             : type === "putDown" ? ` → ${fmt(data.to)}`
               : type === "spit" ? ` v ${fmt(data.velocity)}`
                 : type === "kick" ? ` dir ${fmt(data.dir)} ×${data.strength} @${fmt(data.point)}`
-                  : type === "react" || type === "refuse" ? ` ${data.mood}` : type === "hop" ? ` ${data.phase}#${data.index}` : "";
+                  : type === "react" || type === "refuse" ? ` ${data.mood}` : type === "hop" ? ` ${data.phase}#${data.index}`
+                    : type === "hopOn" || type === "hopOff" ? ` → ${fmt(data.to)}` : type === "strain" || type === "wand" || type === "burp" ? ` ${data.duration}s` : "";
       log(`${t.toFixed(2).padStart(5)}s ${type}${extra}`);
       if (type === "bite") J.sizeGoal *= 0.87;
       if (type === "finish") J.gone = true;
@@ -349,8 +356,10 @@ function button(label, on, fn) {
 const sep = () => hud.appendChild(Object.assign(document.createElement("span"), { className: "sep" }));
 function updateHud() {
   hud.innerHTML = "";
-  for (const [k, label] of [["eat", "🥄 eat"], ["spit", "💦 spit"], ["kick", "🦶 kick"], ["refuse", "🙅 refuse"]]) button(label, outcome === k, () => { outcome = k; play(mood); });
+  for (const [k, label] of [["eat", "🥄 eat"], ["spit", "💦 spit"], ["kick", "🦶 kick"], ["refuse", "🙅 refuse"], ["toilet", "🚽 toilet"]]) button(label, outcome === k, () => { outcome = k; play(mood); });
   button("🧐 picky", picky, () => { picky = !picky; play(mood); });
+  button("😊 happy", happy, () => { happy = !happy; rabbit.setHappy(happy); play(mood); });
+  for (const f of [0, 0.5, 1]) button(`배 ${f}`, fullness === f, () => { fullness = f; rabbit.setFullness(f); updateHud(); if (paused) render(); });
   sep();
   for (const [k, label] of [["happy", "😊"], ["ok", "🙂"], ["sad", "😢"], ["special", "🌟"]]) button(label, mood === k, () => play(k));
   button("⏭ skip", false, () => rabbit.skip());
@@ -389,6 +398,8 @@ R.seek = (t, opts = {}) => {
   if (opts.shape) setShape(opts.shape);
   if (opts.picky !== undefined) picky = Boolean(opts.picky);
   if (opts.outfit) rabbit.setOutfit(opts.outfit);
+  if (opts.fullness !== undefined) { fullness = opts.fullness; rabbit.setFullness(fullness); }
+  if (opts.happy !== undefined) { happy = Boolean(opts.happy); rabbit.setHappy(happy); }
   clock = 0;
   play(opts.mood ?? mood);
   const n = Math.round(t * 60);
@@ -409,7 +420,7 @@ R.placeCamera = (o) => { Object.assign(cam, o); placeCamera(); };
 // Draw calls of the bunny alone (plain render, no bloom).
 R.countDraws = () => {
   const vis = tray.children.map((c) => c.visible);
-  for (const c of tray.children) if (c !== rabbit.root && c !== rabbit.chunk) c.visible = false;
+  for (const c of tray.children) if (c !== rabbit.root && c !== rabbit.chunk && c !== rabbit.dust && c !== rabbit.potty?.group) c.visible = false;
   const bg = scene.background; scene.background = null;
   renderer.info.autoReset = false;
   renderer.info.reset();

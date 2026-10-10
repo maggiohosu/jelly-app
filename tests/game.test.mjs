@@ -4,7 +4,7 @@ import {
   makeOrder, scoreOrder, rollOutcome, mixSigma, deltaE, nameColor, COLOR_NAMES, COLOR_FAMILIES, sigmaToHex,
   toleranceFor, colorScoreFor, GEM_SHAPE_LABELS, ORDER_ADDITIVE_MIN,
 } from "../src/app/orders.js";
-import { Progress, PULL_COST, WELCOME_COINS, LEVEL_REWARDS, RARE_COUNT, BUNDLE, COINS_BY_STARS, levelForXp } from "../src/app/progress.js";
+import { Progress, PULL_COST, WELCOME_COINS, LEVEL_REWARDS, RARE_COUNT, BUNDLE, COINS_BY_STARS, FULLNESS_MAX, levelForXp } from "../src/app/progress.js";
 import { JellyWorld, PAINTS, BASES } from "../src/core/world.js";
 import { signatureSigma } from "../src/core/shapes.js";
 
@@ -222,6 +222,25 @@ const extrasOf = (o) => [o.gems, o.additive, o.texture, o.shape].filter(Boolean)
   check("the old refusal is gone", typeof p.refuse === "undefined" && !["refuse"].includes(rollOutcome(1, () => 0.4)));
   p.state.streak = 0;
   check("★4 pays 40 coins", p.feed({ stars: 4 }).coins === 40);
+}
+
+// 11) v9 star pipeline: scoreOrder → modifyStars (full −1 / happy +1) → rollOutcome → feed
+{
+  const o = orderAt(3, rng(12), 1), good = perfect(o), rare = { ...good, rareCount: 1 };
+  const bad = { sigma: [120, 4, 120], gems: [], texture: "jelly" };
+  const p = new Progress(memoryStorage(), rng(13));
+  const pipe = (jelly, touched = true) => p.modifyStars(scoreOrder(o, jelly).stars, { touched });
+  check("pipeline: neither full nor happy → the order's stars", pipe(good).stars === 3 && pipe(good).mod === null && pipe(rare).stars === 4);
+  p.state.fullness = FULLNESS_MAX;
+  check("pipeline full: ★3 → ★2, ★4 special → ★3, ★1 floor (then ★1 can be spat / kicked)", pipe(good).stars === 2 && pipe(rare).stars === 3 && pipe(bad).stars === 1
+    && rollOutcome(pipe(bad).stars, () => 0.1) === "spit" && rollOutcome(pipe(bad).stars, () => 0.4) === "kick");
+  check("pipeline full: a rare-lifted ★2 drops back to ★1 (hard mode)", scoreOrder(o, { ...bad, rareCount: 3 }).stars === 2 && pipe({ ...bad, rareCount: 3 }).stars === 1);
+  p.state.fullness = FULLNESS_MAX;
+  const trip = p.toilet();
+  check("pipeline happy: ★3 → ★4, ★4 stays ★4 (+10), ★1 → ★2 (always eaten), untouched unchanged", trip.happyTurns === 5 && pipe(good).stars === 4 && pipe(rare).stars === 4 && pipe(rare).overflowCoins === 10
+    && pipe(bad).stars === 2 && rollOutcome(pipe(bad).stars, () => 0.1) === "eat" && pipe(good, false).stars === 3 && pipe(good, false).mod === null);
+  const m = pipe(rare), r = p.feed({ stars: m.stars, starMod: m, order: o, jelly: rare, elapsed: Infinity });
+  check("pipeline happy feed: ★4 coins + 10 overflow, one turn used, gauge +1", r.coins === COINS_BY_STARS[4] + 5 + 10 && r.happyTurns === 4 && r.fullness === 1, `${r.coins}`);
 }
 
 console.log(failures ? `\n${failures} FAILED` : "\nALL GAME CHECKS PASSED");

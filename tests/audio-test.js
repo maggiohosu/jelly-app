@@ -532,9 +532,12 @@ async function testRealtime() {
 // ======================================================== bunny / coins / cards
 const FX_METHODS = ["munch", "chew", "squeak", "coin", "coinShower", "cardFlip", "reveal", "levelUp", "cardShake", "spit", "splat", "special", "coinLoss"];
 // Jelly motions, bunny sniff/kick and the fun-system jingles.
-const MOTION_METHODS = ["catYawn", "catPunch", "birdChirp", "birdFlap", "birdPlop", "sniff", "kick", "giftOpen", "comboUp", "achievement", "discovery", "goldenOrder"];
+// v9: the bunny's toilet trip (hop, strain, flush, happy chime, burp, wand).
+const MOTION_METHODS = ["catYawn", "catPunch", "birdChirp", "birdFlap", "birdPlop", "sniff", "kick", "giftOpen", "comboUp", "achievement", "discovery", "goldenOrder",
+  "toiletHop", "strain", "flush", "happyChime", "burp", "wandTwinkle"];
 const fireMotions = (a, f = 0) => [a.catYawn(), a.catPunch(f % 3 === 2 ? undefined : f % 3), a.birdChirp(1 + (f % 8)), a.birdFlap(0.3 + (f % 4)), a.birdPlop(), a.sniff(), a.kick(),
-  a.giftOpen(), a.comboUp(1 + (f % 12)), a.achievement(), a.discovery(), a.goldenOrder()];
+  a.giftOpen(), a.comboUp(1 + (f % 12)), a.achievement(), a.discovery(), a.goldenOrder(),
+  a.toiletHop(), a.strain(), a.flush(), a.happyChime(), a.burp(), a.wandTwinkle()];
 const fireAll = (a, f = 0) => [a.munch(1), a.chew(0.6), a.squeak(["happy", "ok", "sad", "no", "grumpy"][f % 5]), a.coin(1, f), a.coinShower(40, 1),
   a.cardFlip(), a.cardShake(), a.reveal(["new", "gold", "rainbow", "dupe"][f % 4]), a.levelUp(), a.spit(1), a.splat(1), a.special(), a.coinLoss(20), ...fireMotions(a, f)];
 
@@ -901,6 +904,12 @@ const MOTION_SOUNDS = [
   ["achievement", (a) => a.achievement(), 2.4, [0.8, 1.6]],
   ["discovery", (a) => a.discovery(), 2.8, [1.1, 2.0]],
   ["goldenOrder", (a) => a.goldenOrder(), 2.2, [0.6, 1.4]],
+  ["toiletHop", (a) => a.toiletHop(), 1.0, [0.15, 0.35]],
+  ["strain", (a) => a.strain(), 1.8, [0.45, 0.8]],
+  ["flush", (a) => a.flush(), 2.6, [1.3, 1.75]],
+  ["happyChime", (a) => a.happyChime(), 2.0, [0.6, 1.2]],
+  ["burp", (a) => a.burp(), 1.3, [0.22, 0.45]],
+  ["wandTwinkle", (a) => a.wandTwinkle(), 1.8, [0.5, 1.1]],
 ];
 const motionWavs = {}, motionBuffers = {};
 const allFinite = (buffer) => { for (let ch = 0; ch < buffer.numberOfChannels; ch++) for (const v of buffer.getChannelData(ch)) if (!Number.isFinite(v)) return false; return true; };
@@ -1073,6 +1082,39 @@ async function testMotionSounds() {
     const tn = tuned(g.x, 0.27, 1.0, [91, 96], [90, 92, 94, 95, 97]);
     check("goldenOrder: a bright twinkle (centroid > 2.5 kHz) with an in-tune bell", c > 2500 && tn >= 12, `centroid ${fmt(c, 0)} Hz, ${fmt(tn, 1)} dB in tune`);
   }
+  // v9 toilet trip
+  if (o("toiletHop")) {
+    const h = o("toiletHop"), tr = pitchTrack(h.x, SR, 0.05, 0.14, 300, 1200), pk = onsetPeaks(h.x, SR, 0.03, 0.4, 0.08, -20);
+    const f0 = median(tr.filter((q) => q.t < 0.085).map((q) => q.f)), f1 = median(tr.filter((q) => q.t >= 0.085).map((q) => q.f));
+    check("toiletHop: a rising '뿅' then a soft landing ~0.13 s later", tr.length >= 3 && f1 > f0 * 1.3 && pk.length === 2 && Math.abs(pk[1].t - pk[0].t - 0.13) < 0.03,
+      `${fmt(f0, 0)} → ${fmt(f1, 0)} Hz, onsets ${pk.map((q) => fmt(q.t, 3)).join(", ")} s`);
+  }
+  if (o("strain") && o("burp")) {
+    const st = o("strain"), bu = o("burp");
+    const tS = pitchTrack(st.x, SR, 0.2, 0.6, 300, 1000), tB = pitchTrack(bu.x, SR, 0.1, 0.3, 180, 700);
+    const fS = median(tS.map((q) => q.f)), fB = median(tB.map((q) => q.f));
+    const cS = centroid(spectrum(st.x, SR, 0.2, 0.6), 100, 8000), cQ = centroid(spectrum((await fxRender(0.6, [[0.05, (a) => a.squeak("happy")]], { seed: 21 })).x, SR, 0.05, 0.3), 100, 8000);
+    check("strain: a voiced, closed-mouth '끄응' (450–700 Hz), darker than a happy squeak", tS.length >= 20 && fS > 450 && fS < 700 && cS < cQ, `${fmt(fS, 0)} Hz (${tS.length} voiced frames), centroid ${fmt(cS, 0)} vs squeak ${fmt(cQ, 0)} Hz`);
+    const rr = envRate(bu.x, SR, 0.1, 0.3, 15, 60);
+    check("burp: a low round '끄억' (220–400 Hz, below the strain) with a ~30 Hz rattle", fB > 220 && fB < 400 && fB < fS && rr.rate > 25 && rr.rate < 40,
+      `${fmt(fB, 0)} Hz (${tB.length} frames), rattle ${fmt(rr.rate, 1)} Hz (strength ${fmt(rr.strength, 2)})`);
+  }
+  if (o("flush")) {
+    const f = o("flush"), S = spectrum(f.x, SR, 0.2, 1.2), water = bandE(S, 150, 3000) / bandE(S, 40, 20000);
+    const mid = rmsOf(f.buffer, 0.5, 0.9), late = rmsOf(f.buffer, 1.3, 1.5), pk = onsetPeaks(f.x, SR, 0.2, 1.4, 0.03, -18);
+    const c1 = centroid(spectrum(f.x, SR, 0.2, 0.6), 100, 8000), c2 = centroid(spectrum(f.x, SR, 1.1, 1.45), 100, 8000);
+    check("flush: a ~1.5 s water rush (mostly 150 Hz–3 kHz) that swells, bubbles and drains lower", water > 0.75 && mid > late * 2 && pk.length >= 4 && c2 < c1,
+      `${fmt(water * 100, 0)} % in 150–3000 Hz, mid ${fmt(dB(mid), 1)} vs end ${fmt(dB(late), 1)} dBFS, ${pk.length} bubble onsets, centroid ${fmt(c1, 0)} → ${fmt(c2, 0)} Hz`);
+  }
+  if (o("happyChime")) {
+    const g = o("happyChime"), tn = tuned(g.x, 0.25, 0.9, [84, 88, 96], [85, 87, 89, 90, 92, 94, 95]);
+    const c1 = centroid(spectrum(g.x, SR, 0.05, 0.11), 300, 12000), c2 = centroid(spectrum(g.x, SR, 0.17, 0.25), 300, 12000);
+    check("happyChime: a rising, in-tune C-major '방긋' sparkle", tn >= 15 && c2 > c1 * 1.1, `${fmt(tn, 1)} dB in tune, centroid ${fmt(c1, 0)} → ${fmt(c2, 0)} Hz`);
+  }
+  if (o("wandTwinkle")) {
+    const w = o("wandTwinkle"), c = centroid(spectrum(w.x, SR, 0.05, 0.6), 300, 16000), pk = onsetPeaks(w.x, SR, 0.03, 0.6, 0.03, -15);
+    check("wandTwinkle: bright star dust (centroid > 3 kHz, a run of twinkles)", c > 3000 && pk.length >= 5, `centroid ${fmt(c, 0)} Hz, ${pk.length} onsets`);
+  }
   // reference: existing sounds measured the same way (for level balance)
   for (const [name, fn, len] of [["squeak-happy", (a) => a.squeak("happy"), 1], ["spit", (a) => a.spit(0.8, 0), 1], ["levelUp", (a) => a.levelUp(), 2.4], ["reveal-new", (a) => a.reveal("new"), 2.4], ["coin", (a) => a.coin(0.8, 1), 1]]) {
     const r = await fxRender(len, [[0.05, fn]], { seed: 21 }), span = soundSpan(r.x, SR);
@@ -1084,7 +1126,9 @@ async function testMotionSounds() {
 async function testMotionLimits() {
   const pairs = [["catYawn", (a) => a.catYawn(), 0.5], ["catPunch", (a) => a.catPunch(0), 0.1], ["birdChirp", (a) => a.birdChirp(1), 0.12], ["birdFlap", (a) => a.birdFlap(0.5), 0.3],
     ["birdPlop", (a) => a.birdPlop(), 0.12], ["sniff", (a) => a.sniff(), 0.35], ["kick", (a) => a.kick(), 0.3], ["giftOpen", (a) => a.giftOpen(), 0.3], ["comboUp", (a) => a.comboUp(3), 0.12],
-    ["achievement", (a) => a.achievement(), 0.3], ["discovery", (a) => a.discovery(), 0.3], ["goldenOrder", (a) => a.goldenOrder(), 0.3]];
+    ["achievement", (a) => a.achievement(), 0.3], ["discovery", (a) => a.discovery(), 0.3], ["goldenOrder", (a) => a.goldenOrder(), 0.3],
+    ["toiletHop", (a) => a.toiletHop(), 0.15], ["strain", (a) => a.strain(), 0.4], ["flush", (a) => a.flush(), 0.5], ["happyChime", (a) => a.happyChime(), 0.3],
+    ["burp", (a) => a.burp(), 0.4], ["wandTwinkle", (a) => a.wandTwinkle(), 0.25]];
   const bad = [];
   for (const [name, fn, gap] of pairs) {
     const r = await fxRender(0.2 + gap + 0.1, [[0.05, fn], [0.05 + 1 / 60, fn], [0.05 + gap + 2 / 60, fn]], { seed: 3 });
@@ -1125,6 +1169,9 @@ async function testMotionLimits() {
     if (at(1.7)) { a.birdPlop(); a.kick(); a.goldenOrder(); }
     if (at(2.0)) { a.giftOpen(); a.achievement(); }
     if (at(2.4)) a.discovery();
+    if (at(2.6)) { a.toiletHop(); a.burp(); }
+    if (at(2.9)) { a.strain(); a.wandTwinkle(); }
+    if (at(3.2)) { a.flush(); a.happyChime(); }
   };
   const run = async (seed) => (await JellyAudio.renderOffline(4, plan, { sampleRate: 24000, random: mulberry32(seed) })).buffer;
   const [a, b, c] = [await run(5), await run(5), await run(6)];

@@ -1,6 +1,6 @@
 // Small pastel icons (48×48 SVG) for the jelly / 슬랑이 shapes the player can
 // pick: flower jelly, fluted pudding, rainbow cake slice with a cherry, gummy
-// bear, glitter cat and iridescent bird. `locked` draws the same silhouette in
+// bear, strawberry jelly cat and iridescent bird. `locked` draws the same silhouette in
 // grey with a tiny padlock. Strings are cached; gradient ids are unique per
 // shape + state, so many icons can live in one document.
 
@@ -128,28 +128,30 @@ const ICONS = {
   })(),
 
   cat: (() => {
-    const head = "M24 15C35 15 42 21 42 29C42 36.5 34.5 41.5 24 41.5C13.5 41.5 6 36.5 6 29C6 21 13 15 24 15Z";
-    const earL = "M7.8 24L9.6 7.6Q10.2 5.2 12.3 6.4L22.5 16.2Z", earR = "M40.2 24L38.4 7.6Q37.8 5.2 35.7 6.4L25.5 16.2Z";
-    const glitter = [[13, 21, "#ffd76a"], [19, 18.5, "#9fdcff"], [29, 18, "#ffb3d6"], [35, 22, "#b9f0c8"], [10, 30, "#c7b5ff"], [38, 31, "#ffd76a"], [15, 38, "#9fdcff"], [33, 38, "#ffb3d6"], [24, 17, "#c7b5ff"], [27.5, 22.5, "#ffd76a"], [21, 23, "#b9f0c8"], [39, 26.5, "#9fdcff"], [8.5, 26, "#ffb3d6"], [12, 9.5, "#ffd76a"], [36, 10, "#9fdcff"]];
-    const pearls = [[16.5, 20.5], [31.5, 20.8], [11, 34.5], [37, 34.8], [24, 21]];
+    // strawberry jelly cat: a dome with pointed ears, two little front paws,
+    // a scalloped skirt, strawberry halves inside, dot eyes, ω and whiskers
+    const dome = "M6.5 36.5C6.5 23 14 14 24 14C34 14 41.5 23 41.5 36.5Z";
+    const earL = "M8.6 27L10.4 8.4Q11 6 13.1 7.2L22 15.4Z", earR = "M39.4 27L37.6 8.4Q37 6 34.9 7.2L26 15.4Z";
+    const skirt = polarPath(24, 37.2, (t) => 19.5 + 1.3 * Math.cos(10 * t), 0.3);
+    // a strawberry half (cut face) at (x, y), size k, turned by deg
+    const berry = (x, y, k, deg) => `<g transform="translate(${x} ${y}) rotate(${deg}) scale(${k})"><path d="M0 3.4C-2.6 1.6-3.2-0.6-2.6-2C-2-3.4 0-3.4 0-2.6C0-3.4 2-3.4 2.6-2C3.2-0.6 2.6 1.6 0 3.4Z" fill="#ee3150" opacity=".82"/><path d="M0 2C-1.2 0.8-1.4-0.6-1-1.4C-0.6-2 0-1.8 0-1.4C0-1.8 0.6-2 1-1.4C1.4-0.6 1.2 0.8 0 2Z" fill="#ffd2da" opacity=".85"/><circle cx="-1.9" cy="-0.6" r=".28" fill="#ffe07a"/><circle cx="1.9" cy="-0.6" r=".28" fill="#ffe07a"/><circle cx="-1" cy="1.6" r=".28" fill="#ffe07a"/><circle cx="1" cy="1.6" r=".28" fill="#ffe07a"/></g>`;
     return {
-      sil: `<path d="${earL}"/><path d="${earR}"/><path d="${head}"/>`,
+      sil: `<path d="${earL}"/><path d="${earR}"/><path d="${skirt}"/><path d="${dome}"/>`,
       art: (p) => `<defs>
-        <radialGradient id="${p}h" cx=".4" cy=".3" r=".85"><stop offset="0" stop-color="#fffaff"/><stop offset=".6" stop-color="#ecdffd"/><stop offset="1" stop-color="#c9b5f0"/></radialGradient>
-        <radialGradient id="${p}p" cx=".35" cy=".3" r=".7"><stop offset="0" stop-color="#fff"/><stop offset="1" stop-color="#d9d3e6"/></radialGradient></defs>
-        <path d="${earL}" fill="url(#${p}h)" stroke="#c9b5f0" stroke-width=".6" stroke-linejoin="round"/><path d="${earR}" fill="url(#${p}h)" stroke="#c9b5f0" stroke-width=".6" stroke-linejoin="round"/>
-        <path d="M11 19.5L12 10.4Q12.3 9 13.4 9.7L19.3 15.6Z" fill="#ffb0c9"/><path d="M37 19.5L36 10.4Q35.7 9 34.6 9.7L28.7 15.6Z" fill="#ffb0c9"/>
-        <path d="${head}" fill="url(#${p}h)"/>
-        ${glitter.map(([x, y, c], i) => (i % 3 === 2 ? `<rect x="${f1(x - 0.6)}" y="${f1(y - 0.6)}" width="1.2" height="1.2" transform="rotate(30 ${x} ${y})" fill="${c}"/>` : `<circle cx="${x}" cy="${y}" r="${i % 2 ? 0.55 : 0.75}" fill="${c}"/>`)).join("")}
-        ${pearls.map(([x, y]) => `<circle cx="${x}" cy="${y}" r="1.25" fill="url(#${p}p)"/>`).join("")}
-        <path d="M24 30.5C21 29 15.5 29.5 15.5 34C15.5 38 20 39.2 24 37.6C28 39.2 32.5 38 32.5 34C32.5 29.5 27 29 24 30.5Z" fill="#fff" opacity=".95"/>
-        <circle cx="16.5" cy="27" r="2.8" fill="#1f1628"/><circle cx="31.5" cy="27" r="2.8" fill="#1f1628"/>
-        <circle cx="15.5" cy="26" r="1.05" fill="#fff"/><circle cx="30.5" cy="26" r="1.05" fill="#fff"/>
-        <circle cx="17.4" cy="28.2" r=".45" fill="#fff"/><circle cx="32.4" cy="28.2" r=".45" fill="#fff"/>
-        <path d="M22.7 31.3Q24 30.8 25.3 31.3Q25 32.6 24 32.8Q23 32.6 22.7 31.3Z" fill="#ff86aa"/>
-        <path d="M24 32.8V33.6M22.3 33.6Q23.1 34.8 24 33.6Q24.9 34.8 25.7 33.6" fill="none" stroke="#e57a9a" stroke-width=".75" stroke-linecap="round"/>
-        <path d="M11 24Q13 18.5 19 17.4" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round"/>
-        ${SPARK(40.5, 16, 0.75)}`,
+        <radialGradient id="${p}h" cx=".4" cy=".3" r=".85"><stop offset="0" stop-color="#fff3f6"/><stop offset=".55" stop-color="#ffc4d2"/><stop offset="1" stop-color="#f597ae"/></radialGradient>
+        <linearGradient id="${p}s" x1="0" x2="0" y1="0" y2="1"><stop offset="0" stop-color="#ffb2c4"/><stop offset="1" stop-color="#f48aa4"/></linearGradient>
+        <linearGradient id="${p}e" x1="0" x2="0" y1="1" y2="0"><stop offset="0" stop-color="#ffc4d2"/><stop offset="1" stop-color="#f27896"/></linearGradient></defs>
+        <path d="${skirt}" fill="url(#${p}s)"/>
+        <path d="${earL}" fill="url(#${p}e)" stroke="#fff" stroke-opacity=".5" stroke-width=".6" stroke-linejoin="round"/><path d="${earR}" fill="url(#${p}e)" stroke="#fff" stroke-opacity=".5" stroke-width=".6" stroke-linejoin="round"/>
+        <path d="${dome}" fill="url(#${p}h)"/>
+        ${berry(11.6, 23.5, 0.85, -25)}${berry(36.6, 22.5, 0.8, 22)}${berry(23.5, 19, 0.75, -8)}
+        <circle cx="19.4" cy="37.4" r="3.4" fill="#ffd0dc" stroke="#f597ae" stroke-width=".6"/><circle cx="28.6" cy="37.4" r="3.4" fill="#ffd0dc" stroke="#f597ae" stroke-width=".6"/>
+        <circle cx="17.5" cy="26.5" r="1.9" fill="#1d1216"/><circle cx="30.5" cy="26.5" r="1.9" fill="#1d1216"/>
+        <circle cx="16.9" cy="25.8" r=".65" fill="#fff"/><circle cx="29.9" cy="25.8" r=".65" fill="#fff"/>
+        <path d="M24 30V30.8M22.2 30.8Q23.1 32.2 24 30.8Q24.9 32.2 25.8 30.8" fill="none" stroke="#1d1216" stroke-width=".75" stroke-linecap="round"/>
+        <path d="M14.5 29.6L8.5 28.4M14.5 30.8L8.4 30.9M14.5 32L8.8 33.4M33.5 29.6L39.5 28.4M33.5 30.8L39.6 30.9M33.5 32L39.2 33.4" stroke="#1d1216" stroke-width=".55" stroke-linecap="round"/>
+        <path d="M11.5 25Q13.5 18.5 19.5 16.8" fill="none" stroke="#fff" stroke-width="1.8" stroke-linecap="round"/>
+        ${SPARK(41, 15, 0.75)}`,
     };
   })(),
 

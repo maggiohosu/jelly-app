@@ -1,9 +1,10 @@
-// DOM side of the bunny game: coin / friendship HUD (title, combo chip), the
-// order card (kinds, compact conditions, time bonus, memory hide / peek, the
+// DOM side of the bunny game: coin / friendship HUD (title, combo chip, the
+// v9 tummy gauge and happy-buff chip), the order card (kinds, compact conditions, time bonus, memory hide / peek, the
 // one-tap "new jelly for this order" button), the reward card after a meal
 // (with its coin breakdown), follow-ups queued one after another (notices,
 // level-up gift boxes), the card-pull overlay (three face-down cards → pick →
-// shake → flip → celebration; gem bundles and the rare shape card), the book
+// shake → flip → celebration; gem bundles, the rare shape card and the v9
+// outfit card), the book
 // (rare gems + album + colour book + achievements / titles + secret recipes)
 // and a small confetti engine. Every coin number comes from progress.js.
 import { PULL_COST, TIER_LABELS, RARE_COUNT, MEMORY_PEEK_COST, comboMultiplier, timeBonusFor } from "./progress.js";
@@ -57,6 +58,22 @@ export function createGameUI({ progress, rareInfo, rareIcon, rareThumb, onPull, 
     $("pull-button").disabled = !progress.canPull;
     $("pull-button").textContent = free > 0 ? `무료 카드로 뽑기 (${free}장)` : progress.canPull ? `금화 ${PULL_COST}개로 뽑기` : `금화가 ${PULL_COST - progress.coins}개 더 필요해요`;
     renderCombo();
+    renderTummy();
+  }
+  // 🍮 tummy gauge (above the toolbar; red + pulsing when full) and the 😊
+  // happy chip on the order card while buffed meals are left (progress.js v9)
+  function renderTummy() {
+    const n = progress.fullness, max = progress.fullnessMax, full = progress.isFull, el = $("tummy");
+    el.classList.toggle("full", full);
+    el.classList.toggle("high", !full && n >= max * 0.75);
+    el.setAttribute("aria-valuenow", String(n));
+    el.setAttribute("aria-valuemax", String(max));
+    el.setAttribute("aria-label", full ? `토끼 배부름 ${n}/${max}, 너무 배불러요! 화장실에 보내 주세요` : `토끼 배부름 ${n}/${max}`);
+    $("tummy-fill").style.width = `${Math.round(100 * Math.min(1, n / max))}%`;
+    $("tummy-count").textContent = `${n}/${max}`;
+    const h = progress.happyTurns, chip = $("happy-chip");
+    chip.hidden = !(h > 0);
+    if (h > 0) { chip.textContent = `😊 기분 최고 ★+1 · 남은 ${h}회`; chip.setAttribute("aria-label", `토끼 기분 최고: 꾸민 젤리 별 +1, 남은 ${h}회`); }
   }
   // 🔥 combo chip (on the order card): visible while the ★3 streak is ≥ 2
   function renderCombo() {
@@ -79,7 +96,9 @@ export function createGameUI({ progress, rareInfo, rareIcon, rareThumb, onPull, 
   // ---------------------------------------------------------------- order
   // kind badge, swatch, text, compact conditions (shape · gems ×n · topping
   // · slime), the ⚡ time-bonus chip + bar, and the memory order's hiding.
-  let currentOrder = null, memoTimer = 0, orderHidden = false;
+  // memoTimer / memoLeft: the memory order's pending hide; memoHolds > 0
+  // (the toilet visit) freezes what is left of its 5 s.
+  let currentOrder = null, memoTimer = 0, orderHidden = false, memoAt = 0, memoLeft = 0, memoHolds = 0;
   function condsHTML(o) {
     const parts = [];
     if (o.shape) parts.push(`<i class="cond shape" title="${esc(shapeLabel(o.shape))} 모양">${uniqueSvg(shapeIconSVG(o.shape))}</i>`);
@@ -90,7 +109,7 @@ export function createGameUI({ progress, rareInfo, rareIcon, rareThumb, onPull, 
   }
   function showOrder(order, { announce = true } = {}) {
     const el = $("order");
-    clearTimeout(memoTimer);
+    clearTimeout(memoTimer); memoTimer = 0; memoLeft = 0;
     orderHidden = false;
     currentOrder = order;
     if (!order) { el.hidden = true; return; }
@@ -119,7 +138,17 @@ export function createGameUI({ progress, rareInfo, rareIcon, rareThumb, onPull, 
     bar.classList.toggle("late", bonus > 0 && bonus < 0.5);
   }
   // memory orders: the text (and the colour / conditions) hide 5 s after shown
-  function hideOrderLater(ms = 5000) { clearTimeout(memoTimer); memoTimer = setTimeout(() => setOrderHidden(true), ms); }
+  function hideOrderLater(ms = 5000) {
+    clearTimeout(memoTimer); memoTimer = 0;
+    if (memoHolds > 0) { memoLeft = ms; return; }
+    memoAt = performance.now() + ms;
+    memoTimer = setTimeout(() => { memoTimer = 0; setOrderHidden(true); }, ms);
+  }
+  function holdMemo(on) {
+    memoHolds = Math.max(0, memoHolds + (on ? 1 : -1));
+    if (on && memoHolds === 1 && memoTimer) { memoLeft = Math.max(0, memoAt - performance.now()); clearTimeout(memoTimer); memoTimer = 0; }
+    else if (!on && memoHolds === 0 && memoLeft > 0) { const ms = memoLeft; memoLeft = 0; hideOrderLater(ms); }
+  }
   function setOrderHidden(hidden) {
     orderHidden = hidden;
     $("order").classList.toggle("memo-hidden", hidden);
@@ -129,8 +158,10 @@ export function createGameUI({ progress, rareInfo, rareIcon, rareThumb, onPull, 
 
   // ---------------------------------------------------------------- reward
   // kind: "eat" (stars 1..4, ★4 = special) | "spit" | "kick" (coins lost).
-  // breakdown (eat): {base, rare, combo, kind, time} from progress.feed().
-  async function showReward({ kind = "eat", stars = 1, coins = 0, xp = 0, mood, levelUps = [], bonus = 0, breakdown = null, orderKind = "normal", streak = 0 }) {
+  // breakdown (eat): {base, rare, combo, kind, time, overflow} from progress.feed().
+  // starMod (v9 tummy, progress.modifyStars().mod): "full" → "배불러요 ★−1"
+  // badge, "happy" → "기분 최고 ★+1"; stars are already the final ones.
+  async function showReward({ kind = "eat", stars = 1, coins = 0, xp = 0, mood, levelUps = [], bonus = 0, breakdown = null, orderKind = "normal", streak = 0, starMod = null }) {
     const card = $("reward"), inner = card.querySelector(".reward-card");
     inner.classList.toggle("spit", kind === "spit");
     inner.classList.toggle("kick", kind === "kick");
@@ -142,10 +173,14 @@ export function createGameUI({ progress, rareInfo, rareIcon, rareThumb, onPull, 
       : kind === "kick" ? "🦶" : "💦";
     $("reward-text").textContent = kind === "kick" ? "뻥! 냄새만 맡고 차 버렸어요"
       : kind === "spit" ? "퉤! 토끼 입맛에 너무 안 맞았어요"
-      : mood === "special" ? "최고예요!! 레어 보석까지 들어간 특별한 젤리!"
-      : mood === "happy" ? (bonus ? "레어 보석 덕분에 별 하나 더! 맛있어요" : "완전 맛있어요! 주문 그대로예요")
-      : mood === "ok" ? (bonus ? "레어 보석이 반짝여서 별 하나 더!" : "맛있어요! 조금 달랐지만 좋아요")
+      : mood === "special" ? (bonus ? "최고예요!! 레어 보석까지 들어간 특별한 젤리!" : "최고예요!! 기분 좋은 날의 특별한 젤리!")
+      : mood === "happy" ? (bonus ? "레어 보석 덕분에 별 하나 더! 맛있어요" : starMod === "happy" ? "기분이 좋아서 별 하나 더! 맛있어요" : "완전 맛있어요! 주문 그대로예요")
+      : mood === "ok" ? (bonus ? "레어 보석이 반짝여서 별 하나 더!" : starMod === "happy" ? "기분이 좋아서 별 하나 더!" : "맛있어요! 조금 달랐지만 좋아요")
       : "음… 주문이랑 많이 달라요";
+    const modEl = $("reward-mod");
+    modEl.hidden = !(starMod === "full" || starMod === "happy");
+    modEl.className = `reward-mod ${starMod || ""}`;
+    modEl.textContent = starMod === "full" ? "🍮 배불러요 ★−1" : starMod === "happy" ? "😊 기분 최고 ★+1" : "";
     const loss = kind === "spit" || kind === "kick";
     const coinsEl = $("reward-coins");
     coinsEl.classList.toggle("loss", loss);
@@ -154,12 +189,13 @@ export function createGameUI({ progress, rareInfo, rareIcon, rareThumb, onPull, 
     // 기본 + 레어 보석, then the multipliers (only when there is more than the base)
     const brk = $("reward-break"), b = kind === "eat" ? breakdown : null;
     const chips = [];
-    if (b && (b.rare > 0 || b.combo > 1 || b.kind > 1 || b.time > 0)) {
+    if (b && (b.rare > 0 || b.combo > 1 || b.kind > 1 || b.time > 0 || b.overflow > 0)) {
       chips.push(`<span>기본 ${b.base}</span>`);
       if (b.rare > 0) chips.push(`<span class="rare">💎 레어 보석 +${b.rare}</span>`);
       if (b.combo > 1) chips.push(`<span class="combo">🔥 ${streak > 1 ? `${streak}연속 ` : ""}콤보 ×${b.combo}</span>`);
       if (b.kind > 1) chips.push(`<span class="kind">${orderKind === "picky" ? "🧐 까다로운 날" : "✨ 황금"} ×${b.kind}</span>`);
       if (b.time > 0) chips.push(`<span class="time">⚡ 시간 +${Math.round(b.time * 100)}%</span>`);
+      if (b.overflow > 0) chips.push(`<span class="overflow">⭐ +${b.overflow} 넘친 별</span>`);
     }
     brk.hidden = chips.length === 0;
     brk.innerHTML = chips.join("");
@@ -329,25 +365,28 @@ export function createGameUI({ progress, rareInfo, rareIcon, rareThumb, onPull, 
     for (const c of $("cards").children) if (c !== card) c.classList.add("gone");
     card.classList.add("picked");
     $("gacha-hint").textContent = "두근두근…";
-    const isShape = result.type === "shape";
-    const thumb = isShape ? Promise.resolve(null) : rareThumb(result.index, result.tier).catch(() => null);
+    // shape and outfit cards are "special": no gem index / tier, gold glow
+    const isShape = result.type === "shape", isOutfit = result.type === "outfit", special = isShape || isOutfit;
+    const thumb = special ? Promise.resolve(null) : rareThumb(result.index, result.tier).catch(() => null);
     await wait(350);
     card.classList.add("shake");
     sounds.cardShake?.();
-    const suspense = isShape ? 1500 : result.kind === "rainbow" ? 1300 : result.kind === "gold" ? 1000 : 750;
+    const suspense = special ? 1500 : result.kind === "rainbow" ? 1300 : result.kind === "gold" ? 1000 : 750;
     const [img] = await Promise.all([thumb, wait(suspense)]);
     const front = card.querySelector(".front");
     if (isShape) front.innerHTML = `<span class="shape-face">${uniqueSvg(shapeIconSVG(result.id))}</span><span class="tier-label">모양 카드</span>`;
+    else if (isOutfit) front.innerHTML = `<span class="outfit-face">${esc(result.emoji)}</span><span class="tier-label">꾸미기 카드</span>`;
     else front.innerHTML = (img ? `<img alt="" src="${img}">` : rareIcon(result.index, result.tier)) + `<span class="tier-label">${TIER_LABELS[result.tier]}</span><span class="bundle">×${result.added}</span>`;
     card.classList.remove("shake");
-    card.classList.add("flip", isShape ? "shape-card" : `t${result.tier}`);
+    card.classList.add("flip", ...(isShape ? ["shape-card"] : isOutfit ? ["shape-card", "outfit-card"] : [`t${result.tier}`]));
     sounds.cardFlip?.();
     await wait(380);
-    const glow = isShape || result.kind === "gold" ? "gold" : result.kind === "rainbow" ? "rainbow" : result.kind === "more" ? "more" : "new";
+    const glow = special || result.kind === "gold" ? "gold" : result.kind === "rainbow" ? "rainbow" : result.kind === "more" ? "more" : "new";
     card.classList.add(`glow-${glow}`);
-    sounds.reveal?.(isShape ? "rainbow" : result.kind === "more" ? "dupe" : result.kind);
+    sounds.reveal?.(special ? "rainbow" : result.kind === "more" ? "dupe" : result.kind);
+    if (isOutfit) setTimeout(() => sounds.wandTwinkle?.(), 260);
     const r = card.getBoundingClientRect(), cx = r.left + r.width / 2, cy = r.top + r.height / 2;
-    if (isShape) { confetti.burst({ x: cx, y: cy, kind: "gold", count: 150 }); confetti.burst({ x: cx, y: cy, kind: "rainbow", count: 60 }); confetti.rays({ x: cx, y: cy }); }
+    if (special) { confetti.burst({ x: cx, y: cy, kind: "gold", count: 150 }); confetti.burst({ x: cx, y: cy, kind: "rainbow", count: 60 }); confetti.rays({ x: cx, y: cy }); }
     else if (result.kind === "rainbow") { confetti.burst({ x: cx, y: cy, kind: "rainbow", count: 160 }); confetti.rays({ x: cx, y: cy }); }
     else if (result.kind === "gold") confetti.burst({ x: cx, y: cy, kind: "gold", count: 110 });
     else if (result.kind === "new") confetti.burst({ x: cx, y: cy, kind: "sparkle", count: 70 });
@@ -356,6 +395,9 @@ export function createGameUI({ progress, rareInfo, rareIcon, rareThumb, onPull, 
     if (isShape) {
       $("gacha-title").textContent = `${result.label} 획득!`;
       $("gacha-sub").textContent = "100장에 1장 나오는 모양 카드! 친밀도를 기다리지 않고 지금 바로 쓸 수 있어요";
+    } else if (isOutfit) {
+      $("gacha-title").textContent = `꾸미기 카드! ${result.emoji} ${result.label}`;
+      $("gacha-sub").textContent = "카드에서만 나오는 옷이에요! 토끼가 바로 입고 와요 · ⚙ 설정 → 토끼 꾸미기";
     } else {
       const info = rareInfo(result.index), more = `+${result.added}개 (이제 ${result.count}개)`;
       $("gacha-title").textContent = result.kind === "new" ? `새 보석! ${info.label}` : result.kind === "more" ? `${info.label} +${result.added}개` : `${info.label} 업그레이드!`;
@@ -480,7 +522,7 @@ export function createGameUI({ progress, rareInfo, rareIcon, rareThumb, onPull, 
   $("book-tabs").addEventListener("click", (e) => { const t = e.target.closest("[data-tab]"); if (t) { tab = t.dataset.tab; renderBook(); } });
 
   return {
-    renderHud, addCoin, loseCoins, coinCounterNDC, showOrder, setOrderTime, peekOrder, showReward, notice, giftBox,
+    renderHud, renderTummy, addCoin, loseCoins, coinCounterNDC, showOrder, setOrderTime, peekOrder, holdMemo, showReward, notice, giftBox,
     showAchievements, enqueue, renderBook, confetti,
     get orderHidden() { return orderHidden; },
     get busy() { return Boolean(pulling); },

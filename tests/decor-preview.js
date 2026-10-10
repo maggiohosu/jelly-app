@@ -97,24 +97,24 @@ function bear(center) {
   onSphere(center, "cherry", 0, Math.PI / 2, 0.0075, null, 0);
 }
 function cat(center, group) {
+  // the strawberry jelly cat: dot eyes, a dark ω, whiskers, pointed ears and
+  // strawberry halves set 4.5 mm inside (the inner kind)
   for (const sx of [-1, 1]) {
-    onSphere(center, "eye", sx * 0.26, 0.15, 0.0026);
-    // ear: a jelly cone on the sphere, inner ear on its front face
+    onSphere(center, "eye", sx * 0.3, 0.12, 0.0027);
+    const wn = dirOf(sx * 0.42, -0.04);
+    items.push({ kind: "whisker", p: center.clone().addScaledVector(wn, R - INSET), q: frameOf(wn, sx > 0 ? UP : UP.clone().negate()), s: 0.0048, color: null });
     const n = dirOf(sx * 0.5, 0.88), h = 0.017, r0 = 0.0105;
     const base = center.clone().addScaledVector(n, R - 0.003);
     const ear = new THREE.ConeGeometry(r0, h, 40, 1).toNonIndexed();
     ear.applyQuaternion(new THREE.Quaternion().setFromUnitVectors(UP, n));
     ear.translate(...base.clone().addScaledVector(n, h / 2).sub(center).toArray());
     group.userData.extra.push(ear);
-    const fwd = new THREE.Vector3(0, 0, 1).addScaledVector(n, -n.z).normalize();
-    const slope = Math.atan2(r0, h);
-    const normal = fwd.clone().multiplyScalar(Math.cos(slope)).addScaledVector(n, Math.sin(slope)).normalize();
-    const at = base.clone().addScaledVector(n, h * 0.36).addScaledVector(fwd, r0 * 0.64 - INSET);
-    items.push({ kind: "earInner", p: at, q: frameOf(normal, n), s: 0.0036, color: null });
   }
-  onSphere(center, "muzzle", 0, -0.03, 0.005);
-  onSphere(center, "nose", 0, 0.035, 0.0011, [1, 0.56, 0.69]);
-  onSphere(center, "mouth", 0, -0.012, 0.0024, [0.85, 0.45, 0.56]);
+  onSphere(center, "mouth", 0, -0.05, 0.0032, [0.11, 0.07, 0.09]);
+  for (const [yaw, pitch, flip, s] of [[-0.75, -0.2, false, 0.0052], [0.8, -0.1, true, 0.005], [-0.45, 0.6, true, 0.0048], [0.35, 0.65, false, 0.0046]]) {
+    const n = dirOf(yaw, pitch);
+    items.push({ kind: "strawberry", p: center.clone().addScaledVector(n, R - 0.0045), q: frameOf(flip ? n.clone().negate() : n), s, color: null });
+  }
 }
 function bird(center) {
   for (const sx of [-1, 1]) onSphere(center, "eye", sx * 0.6, 0.3, 0.0022);
@@ -140,10 +140,10 @@ function addJelly(x, flavour, dress) {
 }
 if (face === "all") {
   addJelly(-0.082, "purple", bear);
-  addJelly(0, "clear", cat);
+  addJelly(0, "pink", cat);
   addJelly(0.082, "pink", bird);
 } else {
-  addJelly(0, face === "bear" ? "purple" : face === "cat" ? "clear" : "pink", { bear, cat, bird }[face] ?? bear);
+  addJelly(0, face === "bear" ? "purple" : "pink", { bear, cat, bird }[face] ?? bear);
 }
 
 const decor = new DecorLayer(stage.tray, { overlay: !embedded });

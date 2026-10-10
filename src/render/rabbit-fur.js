@@ -13,6 +13,8 @@
 //   fur   = (fur length m, strand density cells/m, gloss 0..1, baked AO)
 //   comb  = (fibre lean vector in bind space, scaled; w = ear thinness)
 //   color = linear albedo
+//   belly = bind-space displacement of the belly at full roundness (scaled by
+//           the `fullness` uniform; 0 = untouched geometry, exactly)
 //
 // Fur strands: a jittered 3D cell grid evaluated at the BIND position of the
 // skin point (not the offset shell point), so every shell samples the same
@@ -122,12 +124,14 @@ export function createFurMaterial(boneCount) {
     blush: uniform(0.45),
     blushColor: uniform(new THREE.Color("#f39aa6")),
     gain: uniform(1),
+    fullness: uniform(0),      // belly roundness 0..1 (see the `belly` attribute)
   };
 
   const skin = attribute("skin", "vec4");
   const fur = attribute("fur", "vec4");
   const comb = attribute("comb", "vec4");
   const albedoIn = attribute("color", "vec3");
+  const belly = attribute("belly", "vec3");
 
   // ---- vertex: shell offset in bind space, then two-bone rigid blend -------
   const shell = float(instanceIndex);
@@ -135,7 +139,8 @@ export function createFurMaterial(boneCount) {
   const h = select(isBase, u.inflate, shell.div(max(u.shellCount, 1)));
   const furLength = fur.x;
   const lift = furLength.mul(h);
-  const bindPos = positionGeometry.add(normalGeometry.mul(lift)).add(comb.xyz.mul(lift.mul(h)));
+  // (belly · 0 adds an exact zero: a slim bunny is bit-identical to no belly term)
+  const bindPos = positionGeometry.add(belly.mul(u.fullness)).add(normalGeometry.mul(lift)).add(comb.xyz.mul(lift.mul(h)));
 
   const { xformP, xformN } = boneSkin(boneData);
   const skinned = mix(xformP(skin.x, bindPos), xformP(skin.y, bindPos), skin.z);
@@ -401,4 +406,64 @@ export function createOutfitMaterials(fur, colors) {
   glass.colorNode = select(isWing, wingColor, lensColor).mul(fur.u.gain);
   glass.opacityNode = select(isWing, wingAlpha, lensAlpha);
   return { solid, glass };
+}
+
+// ---------------------------------------------------------------------------
+// Winged potty (the toilet visit): glossy vinyl-toy ceramic + soft feathers in
+// one static mesh (one draw). Same light model as the bunny (wrapped sun,
+// hemisphere, front fill, the "studio window" highlight), plus a clear-coat
+// Fresnel and a warm, soft terminator so it reads as a rounded figurine.
+//   color = linear albedo   surf = (gloss 0..1, sheen 0..1, translucency 0..1, unused)
+// ---------------------------------------------------------------------------
+export function createCeramicMaterial(fur) {
+  const L = fur.u.sunDir;
+  const sky = vec3(fur.u.sky), ground = vec3(fur.u.ground), sunColor = vec3(fur.u.sunColor);
+  const albedo = attribute("color", "vec3");
+  const m = attribute("surf", "vec4");
+  const gloss = m.x, sheen = m.y, trans = m.z;
+  const N = normalize(normalWorld);
+  const V = normalize(cameraPosition.sub(positionWorld));
+  const NdV = clamp(dot(N, V), 0, 1);
+  const NdL = dot(N, L);
+  const diffuse = clamp(NdL.add(0.55).div(1.55), 0, 1);
+  const hemi = mix(ground, sky, N.y.mul(0.5).add(0.5));
+  // vinyl / porcelain: light bleeds a little into the shadow side (warm)
+  const bleed = clamp(NdL.negate().add(0.3), 0, 1).mul(trans).mul(vec3(0.34, 0.27, 0.24));
+  const irradiance = sunColor.mul(diffuse).add(hemi.mul(0.95)).add(NdV.mul(fur.u.fill)).add(bleed);
+  let color = albedo.mul(irradiance);
+  const R = reflect(V.negate(), N);
+  const studioDir = normalize(cameraWorldMatrix.mul(vec4(-0.42, 0.55, 0.72, 0)).xyz);
+  const studio = smoothstep(mix(0.6, 0.83, gloss), mix(0.74, 0.9, gloss), dot(R, studioDir)).mul(gloss).mul(1.25);
+  const studio2 = smoothstep(0.9, 0.96, dot(R, normalize(cameraWorldMatrix.mul(vec4(0.35, -0.3, 0.88, 0)).xyz))).mul(gloss).mul(0.3);
+  const sunSpec = pow(clamp(dot(N, normalize(L.add(V))), 0, 1), mix(20, 160, gloss)).mul(gloss).mul(0.9);
+  const fresnel = pow(NdV.oneMinus(), 4).mul(gloss).mul(0.3);
+  color = color.add(vec3(studio.add(studio2))).add(sunColor.mul(sunSpec)).add(sky.mul(fresnel));
+  color = color.add(albedo.mul(sky).mul(pow(NdV.oneMinus(), 2.5)).mul(sheen).mul(0.4));
+  const back = pow(clamp(dot(V, L.negate()), 0, 1), 2).mul(pow(NdV.oneMinus(), 2));
+  color = color.add(sunColor.mul(albedo).mul(back).mul(sheen.add(trans.mul(0.5))).mul(0.4));
+  const material = new THREE.MeshBasicNodeMaterial({ side: THREE.FrontSide });
+  material.name = "RabbitPotty";
+  material.colorNode = color.mul(fur.u.gain);
+  return material;
+}
+
+// Soap-bubble-like water droplets for the flush (instanced, blended): nearly
+// clear aqua body, bright Fresnel rim with a pastel rainbow, a window glint.
+export function createBubbleMaterial(fur) {
+  const opacity = uniform(1);
+  const N = normalize(normalWorld);
+  const V = normalize(cameraPosition.sub(positionWorld));
+  const NdV = clamp(dot(N, V), 0, 1);
+  const fres = pow(NdV.oneMinus(), 2.2);
+  const R = reflect(V.negate(), N);
+  const glint = smoothstep(0.82, 0.9, dot(R, normalize(cameraWorldMatrix.mul(vec4(-0.42, 0.55, 0.72, 0)).xyz)));
+  const iri = cos(vec3(0, 2.1, 4.2).add(NdV.mul(6.0))).mul(0.5).add(0.5);
+  const tint = vec3(0.62, 0.9, 1.0);
+  const hemi = mix(vec3(fur.u.ground), vec3(fur.u.sky), N.y.mul(0.5).add(0.5));
+  const color = tint.mul(hemi).mul(0.75).add(mix(vec3(1), iri, 0.5).mul(fres).mul(0.9)).add(vec3(glint.mul(1.8)));
+  const material = new THREE.MeshBasicNodeMaterial({ transparent: true, depthWrite: false });
+  material.name = "RabbitBubble";
+  material.colorNode = color.mul(fur.u.gain);
+  material.opacityNode = min(0.95, float(0.22).add(fres.mul(0.6)).add(glint.mul(0.7))).mul(opacity);
+  return { material, opacity };
 }

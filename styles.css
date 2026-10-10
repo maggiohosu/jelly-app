@@ -697,7 +697,7 @@ button {
 
 /* settings: 토끼 꾸미기 + 테마 */
 .outfits { display: grid; gap: 8px; }
-.outfit-row { display: grid; grid-template-columns: 34px 1fr; align-items: center; gap: 8px; }
+.outfit-row { display: grid; grid-template-columns: 42px 1fr; align-items: center; gap: 8px; }
 .slot-label { font-size: 13px; color: var(--ink-soft); font-weight: 700; }
 .outfit-chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .outfit-chip { display: inline-flex; align-items: center; gap: 4px; height: 34px; padding: 0 12px 0 9px; border-radius: 999px; background: #eef2f3; font-size: 13px; font-weight: 700; color: var(--ink-soft); }
@@ -714,3 +714,51 @@ button {
 .theme-chip.locked .swatch { filter: grayscale(0.85) opacity(0.55); }
 .theme-chip .cond { font-size: 9.5px; color: #8e9ba1; text-align: center; }
 #reward-coins.loss { color: #e0475c; }
+
+/* ---- v9: the bunny's tummy gauge, toilet button, happy chip, star badges, outfit card ---- */
+/* 🍮 gauge: a small pill riding on the toolbar's top-right corner (out of
+   the way of the order card and the jelly); hidden under an open drawer */
+.toolbar { --tummy-red: #e8475f; }
+.tummy {
+  position: absolute; right: 2px; bottom: calc(100% + 8px);
+  display: flex; align-items: center; gap: 5px; height: 26px; padding: 0 9px 0 6px;
+  border-radius: 999px; background: var(--glass-strong);
+  -webkit-backdrop-filter: blur(12px); backdrop-filter: blur(12px);
+  box-shadow: 0 2px 10px rgba(34, 49, 58, 0.10);
+  font-size: 11.5px; font-weight: 800; white-space: nowrap; pointer-events: none;
+  transition: background 0.3s, color 0.3s;
+}
+.tummy-icon { font-size: 14px; }
+.tummy-bar { width: 54px; height: 7px; border-radius: 4px; background: #f1e6d6; overflow: hidden; }
+.tummy-bar i { display: block; height: 100%; width: 0; border-radius: 4px; background: linear-gradient(90deg, #ffd27a, #ffa34d); transition: width 0.6s, background 0.3s; }
+.tummy b { font-variant-numeric: tabular-nums; color: var(--ink-soft); }
+.tummy-full { display: none; }
+.tummy.high .tummy-bar i { background: linear-gradient(90deg, #ffa34d, #ff7a59); }
+.tummy.full { background: #ffe6ea; color: var(--tummy-red); animation: tummyPulse 1.1s ease-in-out infinite; box-shadow: 0 0 0 2px var(--tummy-red) inset, 0 3px 12px rgba(232, 71, 95, 0.35); }
+.tummy.full .tummy-bar { background: #ffc9d2; }
+.tummy.full .tummy-bar i { background: linear-gradient(90deg, #ff7a8c, var(--tummy-red)); }
+.tummy.full b { display: none; }
+.tummy.full .tummy-full { display: inline; }
+@keyframes tummyPulse { 50% { transform: scale(1.06); } }
+body:has(.drawer:not([hidden])) .tummy, body:has(.hint:not([hidden]):not(.fade)) .tummy { opacity: 0; }
+
+/* 🚽 next to the carrot: dim until the bunny is full, then it glows and bobs */
+.round.potty { font-size: 20px; background: linear-gradient(160deg, #ffffff, #e3f1fb); box-shadow: 0 0 0 2px #fff inset, 0 3px 10px rgba(80, 150, 200, 0.25); position: relative; }
+.round.potty:disabled { opacity: 0.4; filter: grayscale(0.6); box-shadow: none; }
+.round.potty.ready:not(:disabled) { animation: pottyCall 1.1s ease-in-out infinite; box-shadow: 0 0 0 2px #fff inset, 0 0 0 4px var(--tummy-red), 0 4px 16px rgba(232, 71, 95, 0.45); }
+.round.potty.ready:not(:disabled)::after { content: ""; position: absolute; top: -1px; right: -1px; width: 11px; height: 11px; border-radius: 50%; background: var(--tummy-red); box-shadow: 0 0 0 2px #fff; }
+@keyframes pottyCall { 0%, 100% { transform: translateY(0) scale(1); } 40% { transform: translateY(-4px) scale(1.08); } 60% { transform: translateY(0) scale(0.97); } }
+
+/* 😊 happy buff chip on the order card (next to the combo chip) */
+.happy-chip { font-style: normal; font-size: 10.5px; font-weight: 800; line-height: 17px; padding: 0 7px; border-radius: 9px; white-space: nowrap; background: linear-gradient(135deg, #ffe07a, #ffb3c8); color: #8a3a12; animation: comboPulse 1.8s ease-in-out infinite; }
+
+/* reward card: the tummy's star badge and the overflow chip */
+.reward-mod { display: inline-block; margin-top: 2px; font-size: 12px; font-weight: 900; padding: 2px 10px; border-radius: 10px; }
+.reward-mod.full { background: #ffe1e6; color: #c2334b; }
+.reward-mod.happy { background: linear-gradient(135deg, #fff1b0, #ffd3e0); color: #a14a12; }
+.reward-break .overflow { background: linear-gradient(135deg, #fff1b0, #ffe0ea); color: #b05a00; }
+.notice-card.happy { background: linear-gradient(160deg, #fffbe6, #ffe3ec); }
+
+/* 꾸미기 카드 (outfit card): a big emoji on the gold special card */
+.card .front .outfit-face { font-size: 58px; line-height: 1; display: grid; place-items: center; margin-bottom: 14px; filter: drop-shadow(0 3px 4px rgba(150, 90, 0, 0.3)); }
+.card.outfit-card .front { background: radial-gradient(circle at 50% 42%, #fff4fb 0 34%, transparent 35%), linear-gradient(160deg, #f6eaff, #d9b8ff 55%, #9b6bd8); }

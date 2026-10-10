@@ -3,8 +3,12 @@
 // and 퉤 ("spit"), or no bite at all — it sniffs the jelly on the tray, shakes
 // its head 절레절레, turns round and kicks it with a hind foot ("kick").
 // Dress-up: setOutfit() puts procedural items on the rig (ribbon / crown /
-// flower band, round glasses, knitted scarf, fairy wings / star cape); a
-// picky visit wears a monocle on a gold chain.
+// flower band / witch hat, round glasses, knitted scarf, fairy wings / star
+// cape, a magic wand across the back); a picky visit wears a monocle on a gold
+// chain. With the wand it waves it (star dust) while hopping in.
+// Toilet visit: a winged potty pops up beside the tray (toilet.js), the bunny
+// sits on it, strains, flushes and beams. setFullness() rounds its belly (and a
+// full bunny burps on arrival); setHappy() keeps it smiling.
 //
 // Look: a cream needle-felt bunny (big upright ears with pink insides, bead
 // eyes, pink nose and blush, chubby cheeks, round paws and feet). It is built
@@ -15,7 +19,9 @@
 // streamed to the shader as a uniform array each frame.
 //
 // Draw calls while visible: bunny 1 + contact shadow 1 (+ hearts 1 during the
-// happy reaction) + outfit ≤ 2 (solid pieces 1, glass pieces 1: lenses, wings).
+// happy reaction) + outfit ≤ 2 (solid pieces 1, glass pieces 1: lenses, wings)
+// (+ star dust 1 while the wand sheds it; toilet visit: potty 1 + its shadow 1,
+// flush bubbles 1 while they rise).
 // Shells per quality: high 14, medium 7, low 0 (velvet only); outfit pieces
 // have no shells and cost the same at every quality.
 //
@@ -27,6 +33,7 @@
 import * as THREE from "three/webgpu";
 import { float, length, smoothstep, uniform, uv, vec3 } from "three/tsl";
 import { BONE_STRIDE, createBlobMaterial, createCandyMaterial, createFurMaterial, createOutfitMaterials } from "./rabbit-fur.js";
+import { POTTY, Potty } from "./toilet.js";
 
 // ---------------------------------------------------------------------------
 // Tunables
@@ -39,6 +46,8 @@ const BITE_SHRINK = 0.87;      // the app shrinks the jelly ~13 % (linear) per b
 
 const T_ARRIVE = 1.2, T_REACH = 0.55, T_LIFT = 0.6, T_BITE = 0.72, T_FINISH = 0.45, T_REACT = 1.25, T_LEAVE = 1.05;
 const BITE_CONTACT = 0.26, BITE_CHEW = 0.4;
+const T_BURP = 0.95, BURP_AT = 0.44;   // full belly: tummy hold, 끄억 at BURP_AT into it
+const T_ARRIVE_T = 1.0, T_STRAIN = 1.4; // toilet visit: arrival beside the potty, 끙
 // "kick": approach (two hops) · sniff · head shake · hop-turn · kick · 흥 (grumpy).
 const T_APPROACH = 1.0, T_SNIFF = 1.2, T_SHAKE = 0.9, T_TURN = 0.4, T_KICK = 0.6, T_HMPH = 1.0;
 const KICK_CONTACT = 0.3;      // s into the kick segment when the foot hits the jelly
@@ -87,6 +96,8 @@ const COLORS = {
   heart: display("#ff7aa2"),
   pad: display("#f59aae"),
   sparkle: display("#fff1b8"),
+  sweat: display("#a9dcf7"),
+  dust: display("#fff3c2"),
 };
 
 // ---------------------------------------------------------------------------
@@ -192,11 +203,11 @@ function tubeGeometry(points, radius, segments = 24) {
 // Accumulates parts into one geometry with the custom attributes.
 class PartBuilder {
   constructor() {
-    this.position = []; this.normal = []; this.skin = []; this.fur = []; this.comb = []; this.color = []; this.index = [];
+    this.position = []; this.normal = []; this.skin = []; this.fur = []; this.comb = []; this.color = []; this.belly = []; this.index = [];
     this.partOf = [];
     this.parts = 0;
   }
-  // attr(p, n, i) → { b0, b1?, w?, blush?, len, density?, gloss?, comb?: Vector3, thin?, color: Color }
+  // attr(p, n, i) → { b0, b1?, w?, blush?, len, density?, gloss?, comb?: Vector3, thin?, color: Color, belly?: Vector3 }
   add(geometry, attr) {
     const part = this.parts++;
     const base = this.position.length / 3;
@@ -213,6 +224,7 @@ class PartBuilder {
       if (a.comb) comb.copy(a.comb).addScaledVector(N, -N.dot(a.comb)); // tangent only
       this.comb.push(comb.x, comb.y, comb.z, a.thin ?? 0);
       this.color.push(a.color.r, a.color.g, a.color.b);
+      this.belly.push(a.belly ? a.belly.x : 0, a.belly ? a.belly.y : 0, a.belly ? a.belly.z : 0);
       this.partOf.push(a.occluderPart ?? part);
     }
     const index = geometry.index;
@@ -249,6 +261,7 @@ class PartBuilder {
     g.setAttribute("fur", new THREE.Float32BufferAttribute(this.fur, 4));
     g.setAttribute("comb", new THREE.Float32BufferAttribute(this.comb, 4));
     g.setAttribute("color", new THREE.Float32BufferAttribute(this.color, 3));
+    g.setAttribute("belly", new THREE.Float32BufferAttribute(this.belly, 3));
     const count = this.position.length / 3;
     g.setIndex(count > 65535 ? new THREE.Uint32BufferAttribute(this.index, 1) : new THREE.Uint16BufferAttribute(this.index, 1));
     g.instanceCount = 1;
@@ -268,6 +281,20 @@ const ARM_LEN = 0.03;
 const EAR_LEN = 0.04, EAR_HALF_W = 0.0091, EAR_HALF_T = 0.0027, EAR_SPLIT = 0.46;
 const MOUTH_POINT = v3(0, 0.0412, 0.0246); // bite point (bind, rig space)
 const NOSE_TIP = v3(0, 0.0447, 0.0246);
+const SWEAT_C = v3(-0.0168, 0.0585, 0.0118);  // sweat drop centre (bunny's right temple)
+const SMILE_C = v3(0, 0.0414, 0.0237);        // top-centre of the open smile
+const WAND_PIVOT = v3(0, 0.04, -0.02);        // wand bone bind position (identity bind rotation)
+
+// Belly displacement at full roundness (bind space) for a body vertex: a round
+// tummy in front (low, centred) and a little fuller all round, fading out at
+// the flat bottom so the bunny stays on the floor.
+function bellyBulge(p, n) {
+  const front = sstep(-0.35, 0.8, n.z);
+  const tummy = Math.exp(-Math.pow((p.y - 0.0175) / 0.0115, 2)) * front;
+  const round = Math.exp(-Math.pow((p.y - 0.018) / 0.017, 2));
+  const k = (0.0085 * tummy + 0.003 * round) * sstep(0.0012, 0.0065, p.y);
+  return v3(n.x * 0.95, n.y * 0.2, n.z).multiplyScalar(k);
+}
 
 function headSurface(dir) {
   const d = dir.clone().normalize();
@@ -324,6 +351,11 @@ function rigLayout() {
   add("scarfTail", "collar", SCARF_KNOT.clone());
   add("capeHem", "collar", v3(0, 0.0435, -0.017));
   for (const [s, side] of [[1, "L"], [-1, "R"]]) add(`wing${side}`, "collar", WING_ROOT(s));
+  // Sweat drop (strain) and the open 방긋 smile: furless face pieces shown by scale.
+  add("sweat", "head", SWEAT_C.clone());
+  add("smile", "head", SMILE_C.clone());
+  // The magic wand: rests on the back (collar), taken in the right paw for a flourish.
+  add("wand", "collar", WAND_PIVOT.clone());
   return { nodes, eye };
 }
 
@@ -374,6 +406,7 @@ function buildGeometry(rig) {
   }), (p, n) => ({
     b0: B("body"), len: 0.0024, density: 2600,
     comb: v3(0, -0.75, -0.35),
+    belly: bellyBulge(p, n),
     color: mixColor(mixColor(C.fur, C.furWarm, sstep(0.02, -0.02, p.z) * 0.6), C.furLight, sstep(0.3, 0.9, n.z) * sstep(0.004, 0.02, p.y) * 0.7),
   }));
   occ.push({ parts: [body], c: [0, 0.016, -0.002], r: 0.022 }, { parts: [body], c: [0, 0.032, -0.003], r: 0.019 });
@@ -566,6 +599,23 @@ function buildGeometry(rig) {
       };
     }));
   }
+  // Sweat drop: a glossy pale-blue teardrop on the bunny's right temple.
+  pb.add(sphereGeometry(16, 12, (x, y, z) => {
+    const tip = Math.max(0, y);
+    const w = 1 - 0.78 * Math.pow(tip, 1.4);
+    return v3(SWEAT_C.x + x * 0.0019 * w, SWEAT_C.y + y * 0.0027 + 0.0009 * tip * tip, SWEAT_C.z + z * 0.0012 * w);
+  }), () => ({ b0: B("sweat"), len: 0, gloss: 1, color: C.sweat }));
+  // 방긋 smile: a "D" (flat top, round bottom) open mouth with a pink tongue
+  // and two front teeth, under the nose over the closed mouth.
+  pb.add(sphereGeometry(22, 14, (x, y, z) => v3(SMILE_C.x + x * 0.0034 * (y > 0 ? 1 : 1 - 0.12 * y * y), SMILE_C.y + (y > 0 ? y * 0.00035 : y * 0.0029), SMILE_C.z + z * 0.0011)),
+    (p) => ({ b0: B("smile"), len: 0, gloss: 0.2, color: mixColor(C.cavity, C.tongue, sstep(SMILE_C.y - 0.0012, SMILE_C.y - 0.0026, p.y) * 0.85) }));
+  for (const s of [1, -1]) {
+    pb.add(sphereGeometry(10, 8, (x, y, z) => {
+      const box = (a) => Math.sign(a) * Math.pow(Math.abs(a), 0.45);
+      return v3(s * 0.00066 + box(x) * 0.0006, SMILE_C.y - 0.0004 + box(y) * 0.0006, SMILE_C.z + 0.0009 + box(z) * 0.0003);
+    }), () => ({ b0: B("smile"), len: 0, gloss: 0.25, color: C.tooth }));
+  }
+
   // Arms move a lot: the body does not occlude them in the bake.
   for (const o of occ) if (o.parts.includes(body)) o.skip = arms.slice();
   pb.bakeOcclusion(occ);
@@ -617,10 +667,11 @@ function sparkleGeometry() {
 // ---------------------------------------------------------------------------
 
 export const OUTFIT_SLOTS = Object.freeze({
-  head: Object.freeze(["ribbon", "crown", "flowerband"]),
+  head: Object.freeze(["ribbon", "crown", "flowerband", "witchhat"]),
   face: Object.freeze(["glasses"]),
   neck: Object.freeze(["scarf"]),
   back: Object.freeze(["wings", "cape"]),
+  wand: Object.freeze(["wand"]),
 });
 
 // Solid colours are calibrated like the fur palette (display()); near-whites
@@ -643,12 +694,15 @@ const OC = {
   wingA: new THREE.Color(0.95, 0.66, 1.0), wingB: new THREE.Color(0.55, 0.86, 1.0),
   cape: paint("#5a63c4"), capeLining: paint("#f6a3bd"), star: paint("#f0d26a"),
   dot: paint("#f0e8e4"),
+  hat: paint("#553a9e"), hatBand: paint("#231b2e"),
+  wandStick: paint("#fbeef3"), wandStripe: paint("#f58fb6"),
 };
 // mat = [gloss, metal, sheen, pattern] (the "surf" attribute)
 const MAT = {
   satin: [0.38, 0, 0.75, 0], gold: [0.85, 1, 0, 0], gem: [1, 0, 0, 0], petal: [0.12, 0, 0.6, 0],
   leaf: [0.25, 0, 0.3, 0], frame: [0.75, 0, 0, 0], knit: [0, 0, 0.9, 3], cape: [0.06, 0, 0.7, 1],
   lining: [0.1, 0, 0.6, 0], band: [0.2, 0, 0.4, 0],
+  felt: [0.1, 0, 0.75, 1], hatBand: [0.45, 0, 0.5, 0], candy: [0.55, 0, 0.2, 0],
 };
 const UP = v3(0, 1, 0);
 
@@ -1132,6 +1186,114 @@ const ITEMS = {
     solid.add(chain, (p, nrm, i) => ({ b0: head, b1: collar, w: sstep(0.3, 0.8, tv[i]), color: OC.gold, mat: MAT.gold }));
   },
 
+  witchhat({ B, solid }) {
+    // Little witch hat worn forward on the head, in front of the ears and
+    // jauntily tilted: soft oval brim (wide in front, short at the back so the
+    // ears stand free behind it), a felt cone with tiny gold stars whose tip
+    // flops over to the side, a dark band with a gold crescent moon, and a
+    // star charm at the tip. The brim settles onto the fur where it meets it.
+    const head = B("head");
+    const base = onHead(v3(-0.08, 0.93, 0.36), 0.0006);
+    const up = base.n.clone().lerp(UP, 0.55).normalize().applyAxisAngle(v3(0, 0, 1), 0.13);
+    const f = frame(up, v3(0, 0, 1));
+    const settle = (g, m) => {
+      // push pieces out of the head (along the hat's up) and out of the ears (toward the front)
+      const p = g.attributes.position, q = v3();
+      for (let i = 0; i < p.count; i += 1) {
+        q.fromBufferAttribute(p, i);
+        for (let k = 0; k < 30 && insideBunny(q, m, false, true); k += 1) q.addScaledVector(f.y, 0.00025);
+        for (let k = 0; k < 30 && insideEar(q, m + 0.0012); k += 1) q.z += 0.00025;
+        p.setXYZ(i, q.x, q.y, q.z);
+      }
+      g.computeVertexNormals();
+      weldNormals(g);
+      return g;
+    };
+    // brim: a flat, rounded-edged ring (superellipse section) drooping softly outward
+    const R_IN = 0.0049;
+    const rOut = (th) => (0.0099 + 0.0033 * Math.cos(th)) * (1 + 0.035 * Math.sin(th * 6));
+    const brim = sweep(96, 14, (t) => {
+      const th = t * Math.PI * 2, ro = rOut(th);
+      const radial = v3(Math.sin(th), 0, Math.cos(th));
+      const droop = 0.12 + 0.08 * Math.cos(th);
+      const n = radial.clone().multiplyScalar(Math.cos(droop)).addScaledVector(UP, -Math.sin(droop));
+      const b = radial.clone().multiplyScalar(Math.sin(droop)).addScaledVector(UP, Math.cos(droop));
+      const p = radial.clone().multiplyScalar(R_IN).addScaledVector(n, (ro - R_IN) / 2).add(v3(0, 0.0002, 0));
+      return { p, n, b, r1: (ro - R_IN) / 2 + 0.0002, r2: 0.00042, e: 0.3 };
+    }, { closed: true });
+    place(brim, base.p, f);
+    solid.add(settle(brim, 0.0004), () => ({ b0: head, color: OC.hat, mat: MAT.band }));
+    // cone: bends over to the bunny's left at the top
+    const spine = new THREE.CatmullRomCurve3([v3(0, -0.0006, 0), v3(0, 0.0075, -0.0006), v3(0.0004, 0.0148, -0.0012), v3(0.0026, 0.0205, 0.0006), v3(0.0056, 0.0222, 0.0052)]);
+    const H = spine.getLength();
+    const radius = (t) => 0.0052 * Math.pow(1 - t, 0.9) + 0.00042 + 0.00018 * Math.sin(t * Math.PI * 4) * sstep(0.35, 0.6, t);
+    const cone = sweep(44, 28, (t) => {
+      const p = spine.getPointAt(t), tan = spine.getTangentAt(t);
+      const n = v3(0, 0, 1).addScaledVector(tan, -tan.z).normalize();
+      return { p, n, b: tan.clone().cross(n).normalize(), r1: radius(t), r2: radius(t) };
+    });
+    const ctv = cone.userData.tv, cav = cone.userData.av;
+    place(cone, base.p, f);
+    solid.add(cone, (p, n, i) => ({ b0: head, color: OC.hat, mat: MAT.felt, uv: [cav[i] * 5 + 0.25, ctv[i] * (H / 0.0042)] }));
+    // band at the cone's base with a gold crescent moon in front
+    const band = sweep(48, 10, (t) => {
+      const th = t * Math.PI * 2, r = radius(0.06) + 0.00035;
+      const radial = v3(Math.sin(th), 0, Math.cos(th));
+      return { p: radial.clone().multiplyScalar(r).add(v3(0, 0.0012, 0)), n: radial, b: UP, r1: 0.00055, r2: 0.0011, e: 0.55 };
+    }, { closed: true });
+    solid.add(place(band, base.p, f), () => ({ b0: head, color: OC.hatBand, mat: MAT.hatBand }));
+    const moonShape = new THREE.Shape();
+    moonShape.absarc(0, 0, 1, Math.PI * 0.25, Math.PI * 1.75, false);
+    moonShape.absarc(0.42, 0, 0.78, Math.PI * 1.62, Math.PI * 0.38, true);
+    const moon = new THREE.ExtrudeGeometry(moonShape, { depth: 0.25, bevelEnabled: true, bevelThickness: 0.2, bevelSize: 0.12, bevelSegments: 2, curveSegments: 14 });
+    moon.deleteAttribute("uv");
+    moon.center();
+    moon.rotateZ(-0.5);
+    moon.scale(0.0019, 0.0019, 0.0019);
+    const ma = -0.35, mr = radius(0.06) + 0.0012;
+    moon.rotateY(ma);
+    moon.translate(Math.sin(ma) * mr, 0.0013, Math.cos(ma) * mr);
+    moon.computeVertexNormals();
+    solid.add(place(moon, base.p, f), () => ({ b0: head, color: OC.gold, mat: MAT.gold }));
+    // star charm hanging at the floppy tip
+    const tip = spine.getPointAt(1);
+    const star = starGeometry(0.0021, 0.00095, 0.0008);
+    star.rotateZ(0.3);
+    star.translate(tip.x + 0.0011, tip.y - 0.0012, tip.z + 0.0004);
+    solid.add(place(star, base.p, f), () => ({ b0: head, color: OC.goldPale, mat: MAT.gold }));
+  },
+
+  wand({ B, solid, wearing }) {
+    // Magic wand: a candy-striped stick with a gold pommel and collar and a
+    // puffy gold star (pink heart gem in its centre). Built in wand space
+    // (y along the stick, star facing +z, grip at the origin) and laid
+    // diagonally across the back (wandBack()); the "wand" bone carries it.
+    const bone = B("wand");
+    const back = wandBack(wearing);
+    const add = (g, attr) => solid.add(g.applyMatrix4(back), attr);
+    const stick = sweep(48, 10, (t) => ({ p: v3(0, lerp(WAND.y0, WAND.y1, t), 0), n: v3(0, 0, 1), b: v3(1, 0, 0), r1: WAND.r, r2: WAND.r }));
+    const stv = stick.userData.tv, sav = stick.userData.av;
+    add(stick, (p, n, i) => ({ b0: bone, color: (stv[i] * 9 + sav[i]) % 1 < 0.42 ? OC.wandStripe : OC.wandStick, mat: MAT.candy }));
+    const pommel = ellipsoid(0.0013, 0.0013, 0.0013, 12, 8);
+    pommel.translate(0, WAND.y0 - 0.0006, 0);
+    add(pommel, () => ({ b0: bone, color: OC.gold, mat: MAT.gold }));
+    const collar = new THREE.TorusGeometry(WAND.r + 0.0002, 0.00045, 6, 18);
+    collar.deleteAttribute("uv");
+    collar.rotateX(Math.PI / 2);
+    collar.translate(0, WAND.y1 - 0.0003, 0);
+    add(collar, () => ({ b0: bone, color: OC.gold, mat: MAT.gold }));
+    const star = starGeometry(WAND.star, WAND.star * 0.45, 0.0018);
+    star.translate(0, WAND.tip, 0);
+    add(star, () => ({ b0: bone, color: OC.goldPale, mat: MAT.gold }));
+    for (const z of [1, -1]) {
+      const heart = heartGeometry(4, 1);
+      heart.scale(0.0019, 0.0019, 0.0012);
+      if (z < 0) heart.rotateY(Math.PI);
+      heart.translate(0, WAND.tip - 0.0001, z * 0.0011);
+      add(heart, () => ({ b0: bone, color: OC.gemPink, mat: MAT.gem }));
+    }
+  },
+
   scarf({ B, solid }) {
     // Knitted scarf: a rolled striped band around the neck, a knot on the left
     // side and two fringed tails that swing on their own bone.
@@ -1343,6 +1505,62 @@ const ITEMS = {
 const WING_ROOT = (s) => v3(s * 0.0042, 0.0362, -0.0232);
 const SCARF_KNOT = v3(0.0263, 0.034, -0.006);
 
+// Ears in bind pose (same placement as the rig): inside test with margin m
+// (fur included), so head pieces can keep clear of them.
+const EAR_FRAMES = [1, -1].map((s) => {
+  const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(-0.12, s * 0.32, -s * 0.2, "YXZ"));
+  return { base: v3(s * 0.0088, 0.064, -0.0015), inv: q.clone().invert() };
+});
+const _qe = v3();
+function insideEar(p, m) {
+  for (const e of EAR_FRAMES) {
+    _qe.copy(p).sub(e.base).applyQuaternion(e.inv);
+    const t = (_qe.y + 0.004) / (EAR_LEN + 0.004);
+    if (t < -0.05 || t > 1.02) continue;
+    const tt = clamp01(t);
+    const prof = Math.pow(Math.sin(Math.PI * Math.min(1, 0.12 + 0.9 * tt)), 0.5) * (1 - 0.16 * tt);
+    const a = EAR_HALF_W * prof + m + 0.0013, b = EAR_HALF_T * (0.55 + 0.45 * prof) + m + 0.0013;
+    if ((_qe.x / a) ** 2 + (_qe.z / b) ** 2 <= 1) return true;
+  }
+  return false;
+}
+
+// Magic wand (wand space: y along the stick, the star faces +z, the paw grips
+// the origin). On the back it lies diagonally from low on the bunny's left to
+// its right shoulder, the star peeking out beside the head; it passes between
+// the fairy wings' roots, over a scarf or a cape (variants) and hugs the fur.
+const WAND = { y0: -0.0105, y1: 0.0305, tip: 0.0342, r: 0.00078, star: 0.0048 };
+const WAND_STAR = v3(-0.0205, 0.0575, 0), WAND_CROSS = v3(-0.0009, 0.0362, 0); // (x, y) on the back
+function wandBack(wearing = {}) {
+  const d2 = WAND_STAR.clone().sub(WAND_CROSS).normalize();
+  const top = WAND_STAR.clone(), bottom = WAND_STAR.clone().addScaledVector(d2, -(WAND.tip - WAND.y0));
+  // depth needed at each point along the stick: behind the fur (and a scarf /
+  // a cape's flare), as close as allowed
+  const need = (p) => {
+    const back = -0.002 - surfaceAlong(v3(p.x, p.y, -0.002), v3(0, 0, -1), 0.0004, false, 0.05);
+    let z = back - WAND.r - 0.0006;
+    if (wearing.neck === "scarf" && p.y > 0.0288 && p.y < 0.0392) z = Math.min(z, -0.0302);
+    if (wearing.back === "cape" && p.y < 0.0446) {
+      const v = clamp01((0.0444 - p.y) / (0.0444 - 0.0214));
+      z = Math.min(z, back - 0.0012 - (0.0025 + 0.0075) * Math.pow(v, 1.25) - WAND.r - 0.0009);
+    }
+    return z;
+  };
+  const N = 24, zs = [];
+  for (let i = 0; i <= N; i += 1) zs.push(need(bottom.clone().lerp(top, i / N)));
+  // straight stick: the line through both ends' needs, moved back by the worst violation
+  let za = zs[0], zb = zs[N];
+  let worst = 0;
+  for (let i = 0; i <= N; i += 1) worst = Math.max(worst, lerp(za, zb, i / N) - zs[i]);
+  za -= worst; zb -= worst;
+  const A = v3(bottom.x, bottom.y, za), Bp = v3(top.x, top.y, zb);
+  const Y = Bp.clone().sub(A).normalize();
+  const Z = v3(0, 0, -1).addScaledVector(Y, Y.z).normalize(); // star faces backward
+  const X = Y.clone().cross(Z);
+  const origin = Bp.clone().addScaledVector(Y, -WAND.tip);
+  return new THREE.Matrix4().makeBasis(X, Y, Z).setPosition(origin);
+}
+
 // Five-point puffy star (clasp).
 function starGeometry(r, rIn, depth) {
   const shape = new THREE.Shape();
@@ -1407,16 +1625,21 @@ class EarSpring {
 // Rabbit
 // ---------------------------------------------------------------------------
 
+const DUST = 18;                 // star-dust particles (wand flourish)
+const FLOURISH = 1.0;            // s: take the wand, wave it, put it back
+const SEAT_H = POTTY.seat;       // base height of the bunny sitting on the potty
 const SPIT_AT = 0.25;            // s into the "spit" segment when the chunk leaves the mouth
 const SPIT_TURN = 0.62;          // rad the head turns to the bunny's right before spitting
 const CHUNK_R = 0.0055;          // spat-out chunk radius (m)
 
 // Segment timeline per outcome. Every segment: { name, t0, t1, dur, ...extra }.
-function buildTimeline(outcome, bites, mood) {
+function buildTimeline(outcome, bites, mood, burp = false) {
   const segs = [];
   let t = 0;
   const add = (name, dur, extra = {}) => { const seg = { name, t0: t, t1: t + dur, dur, ...extra }; segs.push(seg); t += dur; return seg; };
+  if (outcome === "toilet") return toiletTimeline(add, segs);
   add("arrive", T_ARRIVE);
+  if (burp) add("burp", T_BURP); // full: holds its tummy, 끄억
   if (outcome === "kick") {
     // No grab / lift / carry: the jelly stays on the tray until it is kicked.
     const T = { approach: add("approach", T_APPROACH).t0 };
@@ -1457,14 +1680,39 @@ function buildTimeline(outcome, bites, mood) {
   return { segs, T };
 }
 
+// Toilet visit: the potty pops in, the bunny hops in beside it, hops on, sits,
+// strains (끙), flushes, beams (방긋), hops off and leaves; the potty pops away.
+function toiletTimeline(add, segs) {
+  const T = {};
+  T.toiletIn = add("toiletIn", 0.35).t0;
+  T.arrive = add("tArrive", T_ARRIVE_T).t0;
+  T.hopOn = add("hopOn", 0.55).t0;
+  T.sit = add("sit", 0.3).t0;
+  T.strain = add("strain", T_STRAIN).t0;
+  T.flush = add("flush", 0.9).t0;
+  T.smile = add("smile", 1.2).t0;
+  T.hopOff = add("hopOff", 0.55).t0;
+  const leave = add("leave", T_LEAVE);
+  T.leave = leave.t0;
+  T.toiletOut = leave.t0 + 0.3;
+  T.done = leave.t1;
+  return { segs, T };
+}
+
 /**
  * Plush bunny that comes to taste the jelly.
  *
  *   const rabbit = new Rabbit(tray, { quality: "high" });   // hidden until play()
  *   rabbit.setOutfit({ head: "ribbon", face: "glasses", neck: "scarf", back: "wings" });
  *   //   persists across plays (also before the first); null / undefined / unknown id =
- *   //   empty slot. Ids: OUTFIT_SLOTS (head ribbon|crown|flowerband · face glasses ·
- *   //   neck scarf · back wings|cape). rabbit.outfit → a copy of the current choice.
+ *   //   empty slot. Ids: OUTFIT_SLOTS (head ribbon|crown|flowerband|witchhat · face glasses ·
+ *   //   neck scarf · back wings|cape · wand wand). rabbit.outfit → a copy of the current choice.
+ *   //   setOutfit({ ..., wand: "wand" }): carried across the back (fits wings / cape / scarf);
+ *   //   every visit it is waved during the arrival hops (no extra time) → event "wand".
+ *   rabbit.setFullness(0..1);   // belly: ≥ 0.5 rounder, 1 round; at 1 a normal visit starts with
+ *   //   a tummy hold + "burp" (adds T_BURP 0.95 s after "arrive"). Persists; eases while visible.
+ *   rabbit.setHappy(true);      // "eat" visits: ^^ eyes, small open smile, blush (still chews/reacts)
+ *   rabbit.toilet({ position, faceTo, onEvent });   // = play({ outcome: "toilet", ... })
  *   rabbit.play({ position: [x, 0, z], faceTo: [x, y, z], jelly: { center, width, height },
  *                 outcome: "eat" | "spit" | "kick" | "refuse", bites: 4,
  *                 mood: "happy" | "ok" | "sad" | "special", jellyColor: "#rrggbb",
@@ -1496,7 +1744,15 @@ function buildTimeline(outcome, bites, mood) {
  *           · leave 6.30 · hop ×2 · done 7.35
  *   It hops right up to the jelly (perching on the tray rim where it stands across it)
  *   so that its extended hind foot reaches the jelly's near side.
- * "hop" events are cosmetic; skip() does not replay them.
+ * "toilet" (≈ 7.3 s; never touches the jelly: hold / paws stay null; jelly = for clearance only):
+ *           toiletIn 0 {position:[x,0,z] (potty, tray space), yaw} · arrive 0.35 {position}
+ *           · hop 0.73/1.18 · hopOn 1.35 {to, height} · sit 1.90 · strain 2.20 {duration 1.4}
+ *           · flush 3.60 {position, duration 0.9} (fullness → 0) · smile 4.50
+ *           · wand 5.00 {duration} (wand worn) · hopOff 5.70 {to} · leave 6.25
+ *           · toiletOut 6.55 {position} · hop ×2 · done 7.30
+ * Full belly (setFullness(1), eat / spit / kick): burp 1.64 {duration 0.3} and every later
+ *   event +0.95 s. Wand worn: wand 0.38 {duration 0.48} (during the arrival hops).
+ * "hop" and "wand" events are cosmetic; skip() does not replay them.
  */
 export class Rabbit {
   constructor(parent, { quality = "high" } = {}) {
@@ -1558,11 +1814,26 @@ export class Rabbit {
       this.root.add(mesh);
       return mesh;
     });
-    this._outfit = { head: null, face: null, neck: null, back: null };
+    this._outfit = { head: null, face: null, neck: null, back: null, wand: null };
     this._outfitParts = new Map();
     this._outfitKey = "";
     this.swings = { scarf: new Swing(2.4, 0.22), cape: new Swing(1.9, 0.28) };
     this._wingPhase = 0;
+    this._wandBack = null;   // wand space → rig space on the back (current variant)
+
+    // Star dust from the wand's tip (tray space: it stays where it was shed).
+    this.dust = new THREE.InstancedMesh(sparkleGeometry(), createCandyMaterial(this.fur, COLORS.dust, { glow: 1.1 }), DUST);
+    this.dust.name = "RabbitStarDust";
+    this.dust.frustumCulled = false;
+    this.dust.visible = false;
+    this.dust.renderOrder = 4;
+    parent.add(this.dust);
+    this.dustSim = [];
+    this.potty = null; // built on first use (toilet visit / precompile)
+
+    // Belly (setFullness) and the smiling mood (setHappy).
+    this._fullness = 0; this._belly = 0; this._bellyGoal = 0;
+    this._happy = false;
 
     this.ears = [new EarSpring(), new EarSpring()];
     this.state = null;
@@ -1585,25 +1856,45 @@ export class Rabbit {
 
   get busy() { return this.state !== null; }
 
-  /** Current outfit (copy): { head, face, neck, back }, each an id or null. */
+  /** Current outfit (copy): { head, face, neck, back, wand }, each an id or null. */
   get outfit() { return { ...this._outfit }; }
 
   /** Dress up (persists across plays). Unknown ids / null / undefined = empty slot. */
-  setOutfit({ head = null, face = null, neck = null, back = null } = {}) {
+  setOutfit({ head = null, face = null, neck = null, back = null, wand = null } = {}) {
     const pick = (slot, id) => (OUTFIT_SLOTS[slot].includes(id) ? id : null);
-    this._outfit = { head: pick("head", head), face: pick("face", face), neck: pick("neck", neck), back: pick("back", back) };
+    this._outfit = { head: pick("head", head), face: pick("face", face), neck: pick("neck", neck), back: pick("back", back), wand: pick("wand", wand) };
     this._syncOutfit();
   }
+
+  /** Smiling mood (the happy buff): ^^ eyes, a small open smile and blush through "eat" visits. */
+  setHappy(on) { this._happy = Boolean(on); }
+  get happy() { return this._happy; }
+
+  /**
+   * Belly fullness 0..1 (persists). From 0.5 the belly gets a little rounder, at
+   * 1 it is visibly round; while full (1) a normal visit starts with a tummy
+   * hold and a "burp" event. Eases in while visible, instant while hidden.
+   */
+  setFullness(f) {
+    this._fullness = clamp01(Number(f) || 0);
+    this._bellyGoal = this._fullness < 0.5 ? 0 : 0.42 + 0.58 * Math.pow((this._fullness - 0.5) / 0.5, 1.2);
+    if (!this.state) this._setBelly(this._bellyGoal);
+  }
+  get fullness() { return this._fullness; }
+
+  _setBelly(b) { this._belly = b; this.fur.u.fullness.value = b; }
 
   // Worn pieces right now: the outfit, with the monocle replacing the face slot on a picky visit.
   _wornItems() {
     const o = this._outfit;
-    return [o.head, this.state?.picky ? "monocle" : o.face, o.neck, o.back].filter(Boolean);
+    return [o.head, this.state?.picky ? "monocle" : o.face, o.neck, o.back, o.wand].filter(Boolean);
   }
 
   // Pieces that adapt to a worn scarf: the monocle's chain hangs to it, the
-  // cape leaves out its cord and clasp (the scarf covers the neck).
+  // cape leaves out its cord and clasp (the scarf covers the neck); the wand
+  // lies over a scarf and over a cape.
   _outfitVariant(id) {
+    if (id === "wand") return `wand${this._outfit.neck === "scarf" ? "/scarf" : ""}${this._outfit.back === "cape" ? "/cape" : ""}`;
     return (id === "monocle" || id === "cape") && this._outfit.neck === "scarf" ? `${id}/scarf` : id;
   }
 
@@ -1612,6 +1903,7 @@ export class Rabbit {
     let part = this._outfitParts.get(key);
     if (!part) {
       part = buildOutfitItem(id, this.rig, { ...this._outfit });
+      if (id === "wand") part.back = wandBack(this._outfit);
       this._outfitParts.set(key, part);
     }
     return part;
@@ -1622,6 +1914,8 @@ export class Rabbit {
     if (key === this._outfitKey) return;
     this._outfitKey = key;
     const parts = ids.map((id) => this._outfitPart(id));
+    this._wandBack = ids.includes("wand") ? this._outfitPart("wand").back : null;
+    if (this._wandBack) this._wandBackInv = this._wandBack.clone().invert();
     ["solid", "glass"].forEach((kind, i) => {
       const mesh = this.outfitMeshes[i];
       const chunks = parts.map((p) => p[kind]).filter(Boolean);
@@ -1636,12 +1930,15 @@ export class Rabbit {
     // Outfit pipelines (solid + glass) do not depend on which pieces are worn:
     // compile them with a small representative piece that has both parts.
     this._syncOutfit(["glasses"]);
-    const parts = [this.root, this.hearts, this.sparkles, this.chunk, ...this.outfitMeshes];
+    const potty = this._ensurePotty();
+    const parts = [this.root, this.hearts, this.sparkles, this.chunk, this.dust, ...this.outfitMeshes, ...potty.parts];
     const was = parts.map((o) => o.visible);
     for (const o of parts) o.visible = true;
     try {
       await renderer.compileAsync(this.root, camera, scene);
       await renderer.compileAsync(this.chunk, camera, scene);
+      await renderer.compileAsync(this.dust, camera, scene);
+      await renderer.compileAsync(potty.group, camera, scene);
     } finally {
       parts.forEach((o, i) => { o.visible = was[i]; });
       this._syncOutfit();
@@ -1663,11 +1960,12 @@ export class Rabbit {
     outward.normalize();
     const side = v3(outward.z, 0, -outward.x);
     const j = jelly || { center: [0, 0.018, 0], width: 0.072, height: 0.036 };
-    outcome = outcome === "refuse" || outcome === "spit" || outcome === "kick" ? outcome : "eat";
-    mood = mood === "ok" || mood === "sad" || mood === "special" ? mood : "happy";
+    outcome = outcome === "refuse" || outcome === "spit" || outcome === "kick" || outcome === "toilet" ? outcome : "eat";
+    mood = outcome === "toilet" ? "happy" : mood === "ok" || mood === "sad" || mood === "special" ? mood : "happy";
     bites = outcome === "eat" ? Math.max(1, Math.min(8, Math.round(bites))) : 1;
     try { this.blob.color.value.set(jellyColor); } catch { this.blob.color.value.set("#ff8fb1"); }
-    const { segs, T } = buildTimeline(outcome, bites, mood);
+    const burp = outcome !== "toilet" && this._fullness >= 1;
+    const { segs, T } = buildTimeline(outcome, bites, mood, burp);
 
     this.state = {
       t: 0, segs, T, outcome, bites, mood, onEvent,
@@ -1688,7 +1986,33 @@ export class Rabbit {
       prevHead: null, prevVel: v3(), accel: v3(),
       lastPose: null, pawsTray: null,
       picky: Boolean(picky), kick: null, leaveFrom: null, leaveYaw: null,
+      burp, happy: this._happy && outcome === "eat", toilet: null, flourish: null, dustNext: 0,
     };
+    if (outcome === "toilet") {
+      // The potty stands a little further out than the usual seat, facing the
+      // same way as the bunny; the bunny comes in on its arrival side and
+      // hops off on the other side (kept outside the tray rim).
+      const C = P.clone().addScaledVector(outward, 0.004);
+      // a jelly that was kicked against the rim nearby: keep the dangling feet clear of it
+      const jc = v3(j.center[0], 0, j.center[2]), jr = (j.width ?? 0.072) / 2;
+      for (let k = 0; k < 8 && C.distanceTo(jc) < jr + 0.054; k += 1) C.addScaledVector(outward, 0.004);
+      const S1 = C.clone().addScaledVector(side, 0.058).addScaledVector(F, 0.008);
+      const S2 = C.clone().addScaledVector(side, -0.058).addScaledVector(F, 0.008);
+      const st = this.state;
+      st.toilet = { C, S1, S2, from: 1, outAt: T.toiletOut };
+      st.start = S1.clone().addScaledVector(outward, 0.05).addScaledVector(side, 0.026);
+      st.mid = S1.clone().addScaledVector(outward, 0.024).addScaledVector(side, 0.011);
+      st.seat = C;
+      this._setExit(S2, Math.atan2(S2.x - C.x, S2.z - C.z));
+      const potty = this._ensurePotty();
+      potty.place(toArr(C), st.yaw);
+      potty.update({ scale: 0 });
+    } else if (this.potty) this.potty.hide();
+    // Wand flourish (wand worn): during the arrival hops, or at the toilet smile.
+    if (this._outfit.wand) {
+      const t0 = outcome === "toilet" ? T.smile + 0.2 : 0.08;
+      this.state.flourish = { t0, t1: t0 + FLOURISH };
+    }
     this._buildEvents();
     this._syncOutfit();
     for (const e of this.ears) e.reset();
@@ -1696,7 +2020,22 @@ export class Rabbit {
     this.root.visible = true;
     this.hearts.visible = false;
     this.sparkles.visible = false;
+    this.dustSim.length = 0;
+    this.dust.visible = false;
     this.update(0, null);
+  }
+
+  /** Toilet visit (≈ 7.3 s) = play({ ...options, outcome: "toilet" }); see the class doc. */
+  toilet(options = {}) { this.play({ ...options, outcome: "toilet" }); }
+
+  _ensurePotty() {
+    if (!this.potty) {
+      this.potty = new Potty(this.parent, this.fur, {
+        ceramic: paint("#f6f3f0"), inside: paint("#e9f1f4"), water: paint("#bdeaf4"), waterDeep: paint("#86d0e6"),
+        heart: paint("#f7a8c2"), feather: paint("#fdfbf8"), featherShade: paint("#e6e9f5"),
+      });
+    }
+    return this.potty;
   }
 
   skip() {
@@ -1708,11 +2047,18 @@ export class Rabbit {
       // not at its kicking spot yet: leave from where it is
       if (s.t < s.T.sniff && s.lastPose) this._setExit(s.lastPose.pos.clone().setY(0), s.lastPose.yaw);
     }
+    if (s.toilet) {
+      // the potty pops away right away, from its current size
+      s.toilet.from = this._pottyScale(s.t);
+      s.toilet.outAt = s.T.leave;
+      for (const e of s.events) if (e.type === "toiletOut") e.t = s.T.leave + 1e-4;
+      if (s.t < s.T.hopOn && s.lastPose) this._setExit(s.lastPose.pos.clone().setY(0), s.lastPose.yaw);
+    }
     // Emit everything that would have happened before leaving, in order.
     for (const e of s.events) {
       if (e.t < s.T.leave && !s.emitted.has(e.id)) {
         s.emitted.add(e.id);
-        if (e.type === "hop") continue; // cosmetic, not a key event
+        if (e.type === "hop" || e.type === "wand") continue; // cosmetic, not key events
         const data = e.make(true);
         if (e.type === "bite") s.bitesDone = Math.max(s.bitesDone, data.index + 1);
         this._emit(e.type, data);
@@ -1731,7 +2077,9 @@ export class Rabbit {
     this.chunk.removeFromParent();
     this.geometry.dispose();
     this.fur.material.dispose();
-    for (const m of [this.shadow, this.hearts, this.sparkles, this.chunk, ...this.outfitMeshes]) { m.geometry.dispose(); m.material.dispose(); }
+    this.dust.removeFromParent();
+    for (const m of [this.shadow, this.hearts, this.sparkles, this.chunk, this.dust, ...this.outfitMeshes]) { m.geometry.dispose(); m.material.dispose(); }
+    this.potty?.dispose();
     this._outfitParts.clear();
   }
 
@@ -1749,9 +2097,25 @@ export class Rabbit {
   _buildEvents() {
     const s = this.state, T = s.T;
     const ev = (id, time, type, make) => s.events.push({ id, t: time, type, make });
-    ev("arrive", 0, "arrive", () => ({ position: toArr(s.seat) }));
-    ev("hop-a0", HOP.crouch + HOP.air, "hop", () => ({ phase: "arrive", index: 0 }));
-    ev("hop-a1", 0.5 + HOP.crouch + HOP.air, "hop", () => ({ phase: "arrive", index: 1 }));
+    if (s.toilet) {
+      const P = s.toilet;
+      ev("toiletIn", 0, "toiletIn", () => ({ position: toArr(P.C), yaw: s.yaw }));
+      ev("arrive", T.arrive, "arrive", () => ({ position: toArr(P.S1) }));
+      ev("hop-a0", T.arrive + HOP.crouch + HOP.air, "hop", () => ({ phase: "arrive", index: 0 }));
+      ev("hop-a1", T.arrive + 0.45 + HOP.crouch + HOP.air, "hop", () => ({ phase: "arrive", index: 1 }));
+      ev("hopOn", T.hopOn, "hopOn", () => ({ to: toArr(P.C), height: SEAT_H }));
+      ev("sit", T.sit, "sit", () => ({}));
+      ev("strain", T.strain, "strain", () => ({ duration: T_STRAIN }));
+      ev("flush", T.flush, "flush", () => { this.setFullness(0); return { position: toArr(P.C), duration: 0.9 }; });
+      ev("smile", T.smile, "smile", () => ({}));
+      ev("hopOff", T.hopOff, "hopOff", () => ({ to: toArr(P.S2) }));
+      ev("toiletOut", T.toiletOut, "toiletOut", () => ({ position: toArr(P.C) }));
+    } else {
+      ev("arrive", 0, "arrive", () => ({ position: toArr(s.seat) }));
+      ev("hop-a0", HOP.crouch + HOP.air, "hop", () => ({ phase: "arrive", index: 0 }));
+      ev("hop-a1", 0.5 + HOP.crouch + HOP.air, "hop", () => ({ phase: "arrive", index: 1 }));
+    }
+    if (s.flourish) ev("wand", s.flourish.t0 + 0.3 * FLOURISH, "wand", () => ({ duration: 0.48 * FLOURISH }));
     if (T.grab !== undefined) {
       ev("grab", T.grab, "grab", () => ({ paws: this._jellySides(T.grab).map(toArr), hold: toArr(s.liftFrom) }));
       ev("lift", T.grab + 1e-4, "lift", () => ({ hold: toArr(s.holdPoint) }));
@@ -1788,6 +2152,8 @@ export class Rabbit {
         ev("kick", seg.t0 + KICK_CONTACT, "kick", (skipped) => this._kickEvent(skipped));
       } else if (seg.name === "hmph") {
         ev("react", seg.t0, "react", () => ({ mood: "grumpy" }));
+      } else if (seg.name === "burp") {
+        ev("burp", seg.t0 + BURP_AT, "burp", () => ({ duration: 0.3 }));
       } else if (seg.name === "finish") {
         ev("finish", seg.t0, "finish", () => ({}));
       } else if (seg.name === "react") {
@@ -2050,6 +2416,11 @@ export class Rabbit {
   update(dt, jelly = null) {
     dt = Math.min(Math.max(dt || 0, 0), 0.1);
     this._updateChunk(dt);
+    this._updateDust(dt);
+    if (this._belly !== this._bellyGoal) {
+      const b = this._belly + (this._bellyGoal - this._belly) * (1 - Math.exp(-dt / 0.35));
+      this._setBelly(Math.abs(b - this._bellyGoal) < 1e-3 ? this._bellyGoal : b);
+    }
     const s = this.state;
     if (!s) return { hold: null, paws: null, mouth: this._mouthTray(), phase: "idle" };
     if (jelly && (jelly.center || jelly.bounds)) s.jellyNow = jelly;
@@ -2067,6 +2438,7 @@ export class Rabbit {
     }
     s.lastPose = finalPose;
     this._applyPose(finalPose, dt);
+    if (s.toilet) this._updatePotty(t);
 
     // Events crossing this frame ("done" waits for a flying/splatted chunk).
     for (const e of s.events) {
@@ -2095,9 +2467,61 @@ export class Rabbit {
   _finish() {
     this.state = null;
     this.root.visible = false;
+    if (this.potty) this.potty.hide();
+    this.dustSim.length = 0; this.dust.visible = false;
+    this._setBelly(this._bellyGoal);
     this.hearts.visible = false;
     this.sparkles.visible = false;
     this._syncOutfit(); // a picky visit's monocle comes off
+  }
+
+  // Potty size at time t: springy pop-in at 0, anticipation + shrink at outAt.
+  _pottyScale(t) {
+    const P = this.state.toilet;
+    if (t >= P.outAt) {
+      const k = (t - P.outAt) / 0.35;
+      return k >= 1 ? 0 : P.from * (1 + 0.14 * Math.sin(Math.PI * Math.min(1, k * 2.2))) * (1 - easeIn(k));
+    }
+    return t <= 0 ? 0 : 1 - Math.exp(-7 * t) * Math.cos(13 * t);
+  }
+
+  _updatePotty(t) {
+    const s = this.state, T = s.T;
+    const scale = this._pottyScale(t);
+    const pop = t < T.arrive ? Math.exp(-6 * t) * Math.sin(13 * t) : 0;
+    const strain = s.skipped ? 0 : pulse(t, T.strain, T.strain + T_STRAIN);
+    const fl = s.skipped ? -1 : t - T.flush;
+    let squash = 1 + 0.18 * pop - 0.035 * strain * (0.5 + 0.5 * Math.sin(t * 2 * Math.PI * 3));
+    if (fl >= 0 && fl < 0.9) squash *= 1 + 0.035 * Math.sin(fl * 2 * Math.PI * 4) * (1 - fl / 0.9);
+    // sits down: the potty gives a little under the bunny
+    if (!s.skipped) squash *= 1 - 0.05 * pulse(t, T.sit - 0.05, T.sit + 0.25);
+    const jiggle = 0.03 * strain * Math.sin(t * 2 * Math.PI * 7.5);
+    this.potty.update({ scale, squash, jiggle, flush: fl });
+    if (scale <= 0 && t > s.toilet.outAt) this.potty.hide();
+  }
+
+  // Star dust: spawned at the wand's tip while it is waved (tray space), it
+  // drifts down and twinkles out.
+  _updateDust(dt) {
+    const list = this.dustSim;
+    if (!list.length) { if (this.dust.visible) this.dust.visible = false; return; }
+    const m = this._m, q = this._q, scl = v3();
+    for (let i = 0; i < DUST; i += 1) {
+      const d = list[i];
+      if (!d) { m.makeScale(0, 0, 0); this.dust.setMatrixAt(i, m); continue; }
+      d.age += dt;
+      d.p.addScaledVector(d.v, dt);
+      d.v.multiplyScalar(Math.exp(-dt * 2.5)).y -= 0.015 * dt;
+      const k = d.age / d.life;
+      if (k >= 1) { list[i] = null; m.makeScale(0, 0, 0); this.dust.setMatrixAt(i, m); continue; }
+      q.setFromEuler(this._e.set(0, d.yaw, d.spin + d.age * 6));
+      scl.setScalar(Math.max(1e-5, d.size * Math.sin(Math.PI * Math.min(1, k * 1.4 + 0.08)) * (0.75 + 0.25 * Math.sin(d.age * 40 + i))));
+      m.compose(d.p, q, scl);
+      this.dust.setMatrixAt(i, m);
+    }
+    if (list.every((d) => !d)) { list.length = 0; this.dust.visible = false; return; }
+    this.dust.visible = true;
+    this.dust.instanceMatrix.needsUpdate = true;
   }
 
   // -------------------------------------------------------------------------
@@ -2417,6 +2841,80 @@ export class Rabbit {
         this._reactPose(pose, u);
         break;
       }
+      case "burp": {
+        // Full: both paws on the round tummy (a little rub), leans back, holds
+        // it in (cheeks puff), 끄억 (head tips back, mouth pops open), a sheepish blush.
+        const hold = easeOut(u / 0.2) * (1 - sstep(0.72, 0.95, u));
+        const burst = pulse(u, BURP_AT - 0.02, BURP_AT + 0.26);
+        pose.tummy = hold;
+        pose.leanExtra = -0.07 * hold - 0.05 * burst;
+        pose.cheekPuff = 0.55 * sstep(0.08, 0.3, u) * (1 - sstep(BURP_AT - 0.04, BURP_AT + 0.02, u));
+        pose.mouthOpen = 0.8 * burst;
+        pose.headPitch = -0.05 * hold - 0.26 * burst;
+        pose.squash = 1 + 0.05 * burst - 0.03 * pulse(u, 0.1, 0.35);
+        pose.squint = 0.25 * hold + 0.5 * burst;
+        pose.earWobble = 0.7 * burst;
+        pose.earPerk = 0.2 - 0.3 * burst;
+        pose.eyesWide = 0.45 * pulse(u, BURP_AT + 0.2, 0.9);
+        pose.blush = 0.5 + 0.6 * sstep(BURP_AT, BURP_AT + 0.2, u);
+        break;
+      }
+      case "toiletIn": {
+        pose.pos.copy(s.start); pose.appear = 1e-4;
+        break;
+      }
+      case "tArrive": {
+        // two hops in beside the potty, ending turned toward it
+        const P = s.toilet;
+        const hi = u < 0.45 ? 0 : 1;
+        const hu = u - hi * 0.45;
+        const [a, b] = hi === 0 ? [s.start, s.mid] : [s.mid, P.S1];
+        const h = hopShape(hu, hi === 0 ? 0.02 : 0.016);
+        pose.pos.copy(a).lerp(b, easeInOut(h.k));
+        if (u >= 0.9) pose.pos.copy(P.S1);
+        pose.hopY = h.y; pose.squash = h.s;
+        const travel = Math.atan2(b.x - a.x, b.z - a.z), toPotty = Math.atan2(P.C.x - P.S1.x, P.C.z - P.S1.z);
+        pose.yaw = hi === 0 ? travel : angleLerp(travel, toPotty, easeInOut((hu - 0.05) / 0.4));
+        pose.appear = lerp(0.35, 1, easeOutBack(u / 0.3));
+        pose.earPerk = h.k > 0 && h.k < 1 ? -0.15 : 0.3;
+        pose.pawTuck = h.y > 0 ? 1 : 0;
+        pose.look.copy(P.C).setY(0.03);
+        break;
+      }
+      case "hopOn": {
+        const P = s.toilet;
+        const h = hopShape(u, 0.02);
+        const e = easeInOut(h.k);
+        pose.pos.copy(P.S1).lerp(P.C, e);
+        pose.hopY = h.y; pose.squash = h.s;
+        pose.perch = SEAT_H * e; pose.seated = sstep(0.55, 1, h.k);
+        const toPotty = Math.atan2(P.C.x - P.S1.x, P.C.z - P.S1.z);
+        pose.yaw = angleLerp(toPotty, s.yaw, easeInOut(h.k));
+        pose.pawTuck = h.y > 0 ? 1 : 0;
+        pose.earPerk = h.k > 0 && h.k < 1 ? -0.2 : 0.3;
+        pose.eyesWide = 0.3;
+        break;
+      }
+      case "sit": case "strain": case "flush": case "smile": {
+        pose.pos.copy(s.toilet.C);
+        pose.perch = SEAT_H; pose.seated = 1;
+        this._pottyPose(pose, seg.name, u, t);
+        break;
+      }
+      case "hopOff": {
+        const P = s.toilet;
+        const h = hopShape(u - 0.04, 0.017);
+        const e = easeInOut(h.k);
+        pose.pos.copy(P.C).lerp(P.S2, e);
+        pose.hopY = h.y; pose.squash = h.s;
+        pose.perch = SEAT_H * (1 - e); pose.seated = 1 - sstep(0, 0.45, h.k);
+        pose.yaw = angleLerp(s.yaw, s.leaveYaw, easeInOut(u / 0.3));
+        pose.pawTuck = h.y > 0 ? 1 : 0;
+        pose.happyEyes = 1 - sstep(0.3, 0.5, u);
+        pose.smile = 0.6 * (1 - sstep(0.2, 0.45, u));
+        pose.earPerk = 0.4; pose.blush = 0.7; pose.tailWag = 1;
+        break;
+      }
       default: { // leave
         const from = s.leaveFrom || s.seat;
         const legs = [[from, s.exitA], [s.exitA, s.exitB]];
@@ -2455,7 +2953,84 @@ export class Rabbit {
     if (T.holdEnd !== undefined && t >= T.holdEnd) s.pawsTray = null;
     else if (pose.pawMode > 0) s.pawsTray = [pose.pawL.clone(), pose.pawR.clone()];
     if (s.outcome === "kick") this._perch(pose);
+    // Happy buff: smiles through the visit (^^ eyes, a small open smile, rosy
+    // cheeks) except while the mouth is busy (bites, chewing) — eyes stay ^^.
+    if (s.happy) {
+      const busy = seg.name === "bite" || seg.name === "chew" || seg.name === "ponder" || seg.name === "finish" || seg.name === "lift" || seg.name === "burp";
+      pose.happyEyes = Math.max(pose.happyEyes, 1 - pose.scrunch);
+      if (!busy) pose.smile = Math.max(pose.smile, 0.5 * (1 - sstep(0.05, 0.3, pose.mouthOpen)));
+      pose.blush = Math.max(pose.blush, 0.75);
+    }
+    // Wand flourish: u 0..1 over FLOURISH seconds (the arm and wand are posed in _applyPose).
+    const fl = s.flourish;
+    if (fl && !s.skipped && t >= fl.t0 && t < fl.t1) pose.fl = (t - fl.t0) / FLOURISH;
+    if (s.toilet && pose.seated > 0) {
+      // perched on the potty: feet dangle in front of the bowl, paws ride along
+      pose.footLiftL = pose.footLiftR = pose.perch - 0.0074 * pose.seated;
+      pose.pawLift = pose.perch + 0.8 * pose.hopY;
+    } else if (s.toilet && pose.perch > 0) pose.pawLift = pose.perch + 0.8 * pose.hopY;
     return pose;
+  }
+
+  // Sitting on the potty: settle, strain (끙), flush, beam (방긋).
+  _pottyPose(pose, name, u, t) {
+    const s = this.state;
+    pose.yaw = s.yaw;
+    pose.look.copy(s.faceTo);
+    if (name === "sit") {
+      // plops down: squash bounce, feet swing, a satisfied little wiggle
+      pose.squash = 1 - 0.1 * Math.exp(-u * 9) * Math.cos(u * 26);
+      pose.pawGrip = easeOut(u / 0.25);
+      pose.footSwing = 0.6;
+      pose.earPerk = 0.3; pose.earWobble = 0.4 * (1 - u / 0.3);
+      pose.eyesWide = 0.25;
+    } else if (name === "strain") {
+      // 끙: eyes squeezed shut (> <), cheeks puffed, ears stiff and quivering,
+      // body squeezing in pulses with a wiggle, gripping the rim, sweat, blushing.
+      const env = sstep(0, 0.12, u) * (1 - sstep(T_STRAIN - 0.12, T_STRAIN, u));
+      const push = 0.5 + 0.5 * Math.sin(u * 2 * Math.PI * 1.6 - 1.2);
+      pose.scrunch = env;
+      pose.cheekPuff = (0.55 + 0.25 * push) * env;
+      pose.squash = 1 - (0.035 + 0.045 * push) * env;
+      pose.stretch = 1 - 0.03 * push * env;
+      pose.shudder = (0.25 + 0.4 * push) * env;
+      pose.yawExtra = 0.07 * Math.sin(u * 2 * Math.PI * 1.25) * env;
+      pose.headRoll = -0.05 * Math.sin(u * 2 * Math.PI * 1.25) * env;
+      pose.headPitch = 0.1 * env;
+      pose.leanExtra = 0.05 * env;
+      pose.earPerk = 0.95 * env + 0.3 * (1 - env); pose.earSplay = -0.15 * env;
+      pose.earWobble = 0.35 * env * Math.sin(u * 2 * Math.PI * 9);
+      pose.pawGrip = 1;
+      pose.blush = 0.5 + 0.8 * sstep(0.1, 0.8, u);
+      pose.sweat = sstep(0.25, 0.4, u) * (1 - sstep(T_STRAIN - 0.08, T_STRAIN, u)); pose.sweatSlide = sstep(0.4, T_STRAIN, u);
+      pose.footSwing = 0;
+      pose.tailWag = 0.3 * env;
+    } else if (name === "flush") {
+      // flush: eyes pop open (오!), a little hop on the seat, relief
+      pose.eyesWide = 0.85 * pulse(u, 0.0, 0.7);
+      const h = hopShape(u - 0.06, 0.006);
+      pose.hopY = h.y; pose.squash = h.s;
+      pose.mouthOpen = 0.32 * pulse(u, 0.04, 0.45);
+      pose.earPerk = 0.7; pose.earWobble = 0.5 * pulse(u, 0.1, 0.5);
+      pose.pawGrip = 1 - 0.5 * sstep(0.4, 0.9, u);
+      pose.blush = 1.1 - 0.4 * u;
+      pose.headPitch = 0.08 * pulse(u, 0.1, 0.7); // peeks down at the swirl
+      pose.footSwing = 0.5 * sstep(0.4, 0.9, u);
+    } else {
+      // 방긋: big smile with ^^ eyes, open "D" mouth, cheering paws, hearts and
+      // twinkles, happily kicking feet and bouncing on the seat.
+      pose.happyEyes = sstep(0.0, 0.1, u);
+      pose.smile = sstep(0.02, 0.16, u);
+      pose.blush = 1.2;
+      pose.pawCheer = sstep(0.0, 0.2, u) * (1 - sstep(1.0, 1.2, u));
+      pose.hopY = 0.004 * Math.abs(Math.sin(u * 2 * Math.PI * 1.4));
+      pose.squash = 1 - 0.03 * Math.abs(Math.cos(u * 2 * Math.PI * 1.4));
+      pose.earPerk = 0.7; pose.earSplay = 0.25 * sstep(0.1, 0.3, u);
+      pose.headRoll = 0.13 * Math.sin(u * 2 * Math.PI * 1.4) * sstep(0.2, 0.4, u);
+      pose.tailWag = 1;
+      pose.footSwing = 1;
+      pose.hearts = u; pose.sparkles = u;
+    }
   }
 
   // One bite: wind-up, lunge to the jelly's near top edge (contact), tear back,
@@ -2614,6 +3189,21 @@ export class Rabbit {
       idleL.lerp(v3(0.0112, 0.0075, 0.035), pose.pawBrace);
       idleR.lerp(v3(-0.0112, 0.0075, 0.035), pose.pawBrace);
     }
+    if (this._belly > 0) { // a round belly pushes the resting paws forward
+      const b = this._belly * 0.0072;
+      idleL.z += b; idleR.z += b;
+    }
+    if (pose.tummy > 0) { // paws on the tummy, rubbing it
+      const rub = 0.0014 * Math.sin(t * 2 * Math.PI * 2.6), z = 0.0305 + 0.0075 * this._belly;
+      idleL.lerp(v3(0.0078 + rub, 0.0205 + rub, z), pose.tummy);
+      idleR.lerp(v3(-0.0078 + rub, 0.0205 - rub, z), pose.tummy);
+    }
+    if (pose.pawGrip > 0) { // holding on to the potty's rim (relative to the seat)
+      idleL.lerp(v3(0.0218, 0.0035, 0.0055), pose.pawGrip);
+      idleR.lerp(v3(-0.0218, 0.0035, 0.0055), pose.pawGrip);
+    }
+    if (pose.fl >= 0) idleR.lerp(this._flourishPaw(pose.fl), this._flourishWeight(pose.fl));
+    if (pose.pawLift) { idleL.y += pose.pawLift; idleR.y += pose.pawLift; }
     if (pose.pawMode > 0) {
       pawL.copy(pose.pawL).applyMatrix4(this._rootInv);
       pawR.copy(pose.pawR).applyMatrix4(this._rootInv);
@@ -2638,6 +3228,13 @@ export class Rabbit {
       R.footR.position.y += (pose.footLiftR - pose.perch) / sq;
     }
     if (pose.kickWind > 0 || pose.kickLeg > 0 || pose.thump > 0) this._kickFoot(pose);
+    if (pose.seated > 0) { // dangling in front of the potty's bowl, toes down, swinging
+      for (const [foot, side] of [[R.footL, 1], [R.footR, -1]]) {
+        foot.position.z += 0.0105 * pose.seated;
+        const swing = pose.footSwing * 0.32 * Math.sin(t * 2 * Math.PI * 2.4 + (side > 0 ? 0 : Math.PI));
+        foot.quaternion.multiply(this._q.setFromEuler(this._e.set((0.42 + swing) * pose.seated, 0, 0)));
+      }
+    }
     R.hips.position.z += slide;
     R.hips.position.y += rise;
     R.hips.rotation.set(lean, 0, pose.shudder * 0.05 * Math.sin(t * 2 * Math.PI * 16));
@@ -2683,6 +3280,11 @@ export class Rabbit {
     const shown = sstep(0, 0.1, mouthOpen); // fully hidden when closed
     R.mouth.scale.set(Math.max(0.02, (0.7 + 0.3 * mouthOpen) * shown), Math.max(0.02, mouthOpen), Math.max(0.02, shown));
     R.jaw.rotation.x = 0.35 * mouthOpen;
+    const smile = clamp01(pose.smile), grin = sstep(0, 0.08, smile);
+    // (hidden pieces shrink to a speck, never to 0: the normal matrix stays invertible)
+    R.smile.scale.set(Math.max(1e-4, (0.5 + 0.5 * smile) * grin), Math.max(1e-4, smile), Math.max(1e-4, grin));
+    R.sweat.scale.setScalar(Math.max(1e-4, pose.sweat * (1 + 0.15 * pulse(pose.sweat, 0.5, 1))));
+    R.sweat.position.y -= 0.0026 * pose.sweatSlide;
     R.jaw.position.x += 0.0004 * pose.chew;
     R.tongue.scale.setScalar(Math.max(1e-3, pose.tongue));
     R.tongue.rotation.x = 0.35 * pose.tongue;
@@ -2708,9 +3310,11 @@ export class Rabbit {
     this._solveArm(R.shoulderL, R.pawL, pawL);
     this._solveArm(R.shoulderR, R.pawR, pawR);
     this.rig.skel.updateMatrixWorld(true);
+    if (pose.fl >= 0 && this._wandBack) this._wandInPaw(pose.fl, dt);
 
     this._uploadBones();
     this._updateShadow(pose);
+    if (s.toilet) this.root.visible = t >= s.T.arrive || s.skipped;
     this._updateHearts(pose);
     this._updateSparkles(pose);
     this._updateSun();
@@ -2753,17 +3357,72 @@ export class Rabbit {
     if (o.back === "cape") {
       const sw = this.swings.cape;
       sw.step(dt, [0.03 + 0.22 * air, 0], [(local.z * 0.8 + local.y * 0.35) * 8, -local.x * 6]);
-      R.capeHem.quaternion.multiply(this._q.setFromEuler(this._e.set(Math.max(0, sw.a[0]), 0, Math.max(-0.3, Math.min(0.3, sw.a[1])))));
+      const lift = o.wand ? Math.min(0.06, Math.max(0, sw.a[0])) : Math.max(0, sw.a[0]); // the wand lies over the hem
+      R.capeHem.quaternion.multiply(this._q.setFromEuler(this._e.set(lift, 0, Math.max(-0.3, Math.min(0.3, sw.a[1])))));
     }
     if (o.back === "wings") {
       // gentle flutter; quick beats while airborne or cheering
       const excited = Math.max(air, pose.hearts >= 0 ? 1 : 0, pose.pawCheer);
       this._wingPhase += dt * 2 * Math.PI * lerp(2.2, 7.5, excited);
-      const f = Math.sin(this._wingPhase) * lerp(0.13, 0.42, excited) + 0.05;
+      let f = Math.sin(this._wingPhase) * lerp(0.13, 0.42, excited) + 0.05;
+      if (o.wand) f = 0.02 + Math.abs(f - 0.02); // with the wand across the back they only beat backward
       for (const [b, side] of [[R.wingL, 1], [R.wingR, -1]]) {
         b.quaternion.multiply(this._q.setFromEuler(this._e.set(0.04 * Math.sin(this._wingPhase + 0.6), side * f, 0)));
       }
     }
+  }
+
+  // Wand flourish (u 0..1): the right paw reaches over its shoulder for the
+  // wand, swings it out in front, waves it (star dust), and puts it back.
+  _flourishPaw(u) {
+    const reach = v3(-0.0172, 0.0555, -0.0035);
+    const ph = u * FLOURISH * 2 * Math.PI * 2.3;
+    const wave = v3(-0.0305 + 0.0045 * Math.sin(ph), 0.048 + 0.0025 * Math.cos(2 * ph), 0.027);
+    if (u < 0.16) return reach;
+    if (u < 0.3) return reach.lerp(wave, easeInOut((u - 0.16) / 0.14));
+    if (u < 0.78) return wave;
+    if (u < 0.9) return wave.lerp(reach, easeInOut((u - 0.78) / 0.12));
+    return reach;
+  }
+  _flourishWeight(u) { return u < 0.16 ? easeInOut(u / 0.16) : u > 0.9 ? 1 - easeInOut((u - 0.9) / 0.1) : 1; }
+
+  // Moves the wand bone from its place on the back into the right paw.
+  _wandInPaw(u, dt) {
+    const R = this.rig.bones, s = this.state;
+    const out = u < 0.3 ? sstep(0.16, 0.3, u) : 1 - sstep(0.78, 0.9, u);
+    if (out <= 0) return;
+    const W = this._wandM || (this._wandM = { hand: new THREE.Matrix4(), bind: new THREE.Matrix4().makeTranslation(WAND_PIVOT.x, WAND_PIVOT.y, WAND_PIVOT.z), m: new THREE.Matrix4(), p: v3(), q: new THREE.Quaternion(), sc: v3() });
+    const ph = u * FLOURISH * 2 * Math.PI * 2.3;
+    const th = 0.42 + 0.32 * Math.sin(ph) * sstep(0.26, 0.36, u) * (1 - sstep(0.72, 0.8, u));
+    const A = v3(-Math.sin(th), Math.cos(th), 0.3).normalize();
+    const Z = v3(0, 0, 1).addScaledVector(A, -A.z).normalize();
+    const X = A.clone().cross(Z);
+    const paw = v3().setFromMatrixPosition(R.pawR.matrixWorld);
+    W.hand.makeBasis(X, A, Z).setPosition(paw);
+    // bone world = hand · back⁻¹ · bind  →  local (under the collar), blended with the rest pose
+    W.m.copy(R.collar.matrixWorld).invert().multiply(W.hand).multiply(this._wandBackInv).multiply(W.bind);
+    W.m.decompose(W.p, W.q, W.sc);
+    const k = easeInOut(out);
+    R.wand.position.lerp(W.p, k);
+    R.wand.quaternion.slerp(W.q, k);
+    R.wand.scale.lerp(W.sc, k);
+    R.wand.updateMatrixWorld(true);
+    // star dust from the tip while waving
+    if (out < 0.99 || u < 0.3 || u > 0.8) return;
+    s.dustClock = (s.dustClock || 0) + dt;
+    const tip = v3(0, WAND.tip, 0).applyMatrix4(W.hand).applyMatrix4(this.root.matrix);
+    while (s.dustClock >= 0.032) {
+      s.dustClock -= 0.032;
+      const n = s.dustNext++, i = n % DUST;
+      const h = (k) => { const x = Math.sin(n * 12.9898 + k * 78.233) * 43758.5453; return x - Math.floor(x); };
+      this.dustSim[i] = {
+        p: tip.clone().add(v3(h(1) - 0.5, h(2) - 0.5, h(3) - 0.5).multiplyScalar(0.005)),
+        v: v3((h(4) - 0.5) * 0.06, (h(5) - 0.35) * 0.05, (h(6) - 0.5) * 0.06),
+        // (they face the way the bunny faces: toward the viewer, like the twinkles)
+        age: 0, life: 0.55 + 0.35 * h(7), size: 0.0024 + 0.0016 * h(8), yaw: s.yaw + (h(9) - 0.5) * 0.6, spin: h(10) * 6.28,
+      };
+    }
+    this.dust.visible = true;
   }
 
   // Chest-space head offset that brings the mouth to the bite target.
@@ -2857,7 +3516,7 @@ export class Rabbit {
     const air = clamp01(pose.hopY / 0.025);
     this.shadow.position.set(0, 0.0004, 0.004);
     this.shadow.scale.set(0.078 * (1 - 0.3 * air), 1, 0.074 * (1 - 0.3 * air));
-    this.shadowOpacity.value = 0.5 * (1 - 0.55 * air);
+    this.shadowOpacity.value = 0.5 * (1 - 0.55 * air) * (1 - 0.8 * pose.seated);
   }
 
   _updateHearts(pose) {
@@ -2873,7 +3532,9 @@ export class Rabbit {
       const side = [0, 1, -1, 0.55, -0.55, 0.2][i];
       if (k <= 0 || k >= 1 || (!special && i >= 3)) { m.makeScale(0, 0, 0); this.hearts.setMatrixAt(i, m); continue; }
       const spread = special ? 0.024 : 0.016;
-      pos.set(top.x + side * spread + 0.004 * Math.sin(k * 9 + i), top.y + 0.026 + (special ? 0.06 : 0.045) * easeOut(k) + (i % 3 === 0 ? 0.006 : 0), top.z + 0.008);
+      // (on the potty the bunny sits higher: its hearts stay lower, in a phone's frame)
+      const rise = special ? 0.06 : s.toilet ? 0.03 : 0.045, over = s.toilet ? 0.016 : 0.026;
+      pos.set(top.x + side * spread * (s.toilet ? 1.5 : 1) + 0.004 * Math.sin(k * 9 + i), top.y + over + rise * easeOut(k) + (i % 3 === 0 ? 0.006 : 0), top.z + 0.008);
       const sc = 0.0105 * easeOutBack(Math.min(1, k * 4)) * (1 - sstep(0.7, 1, k)) * (i === 0 ? 1.15 : 0.9);
       q.setFromEuler(this._e.set(0, Math.sin(k * 5 + i) * 0.6, side * -0.25));
       scl.setScalar(Math.max(1e-4, sc));
@@ -2947,6 +3608,7 @@ function defaultPose() {
     blink: 0, squint: 0, eyesWide: 0, happyEyes: 0, scrunch: 0,
     mouthOpen: 0, chew: 0, cheekPuff: 0, blush: 0, noseTwitch: 0, tailWag: 0, tongue: 0,
     hearts: -1, sparkles: -1,
+    tummy: 0, seated: 0, pawGrip: 0, pawLift: 0, footSwing: 0, smile: 0, sweat: 0, sweatSlide: 0, fl: -1,
     kickWind: 0, kickLeg: 0, kickSide: 1, thump: 0, pawBrace: 0, earSwing: 0, perch: 0, footLiftL: 0, footLiftR: 0,
   };
 }
@@ -2963,7 +3625,7 @@ function lerpPose(a, b, t) {
     const from = a[k];
     if (v && v.isVector3) o[k] = from.clone().lerp(v, t);
     else if (k === "yaw" || k === "yawExtra") o[k] = angleLerp(from, v, t);
-    else if (k === "hearts" || k === "sparkles" || k === "wave") o[k] = v;
+    else if (k === "hearts" || k === "sparkles" || k === "wave" || k === "fl") o[k] = v;
     else o[k] = lerp(from, v, t);
   }
   return o;

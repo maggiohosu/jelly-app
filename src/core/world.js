@@ -59,8 +59,12 @@ const GLITTER_MAX = 360, STARS_MAX = 36;
 // `factor` (linear) within `radius`, never below `minScale` in total.
 export const BITE = Object.freeze({ radius: 0.014, factor: 0.5, minScale: 0.35, scale: 0.87 });
 // Append only: eyeClosed / eyeHappy / mouthOpen / beakOpen are the
-// expressions the idle motions swap in (same anchor, same scale).
-export const DECOR_KINDS = Object.freeze(["eye", "nose", "mouth", "blush", "muzzle", "earInner", "cherry", "beak", "eyeClosed", "eyeHappy", "mouthOpen", "beakOpen"]);
+// expressions the idle motions swap in (same anchor, same scale); whisker
+// (the cat's three whiskers of one side) sits on the surface like the face;
+// strawberry (a strawberry half set INSIDE the cat, shapes.js anchor.inside)
+// is a material point deep in the body — drawn opaque under the jelly and
+// seen through it, never a gem, eaten with the bite around it like any decor.
+export const DECOR_KINDS = Object.freeze(["eye", "nose", "mouth", "blush", "muzzle", "earInner", "cherry", "beak", "eyeClosed", "eyeHappy", "mouthOpen", "beakOpen", "whisker", "strawberry"]);
 // Decorations are drawn on top of the jelly (render/decor.js overlay pass), so
 // they anchor ON the rendered surface; shapes.js projects anchors onto it.
 const DECOR_INSET = 0;
@@ -100,19 +104,16 @@ const CHIRP_AT = [0.12, 0.56, 1.0];
 const HOP_AT = [0.36, 0.9];
 const PLOP_AT = 1.5;
 export const MOVES = Object.freeze({
-  // 하품: the head stretches up and a little back, slowly (eyes shut, the
-  // mouth opens wide and closes), then a little stretch of the whole cat.
+  // 하품: the whole dome (the head with its ears) stretches up and a little
+  // back, slowly (eyes shut, the mouth opens wide and closes), then a last
+  // stretch: up a little more while both front paws push out, and it settles.
   yawn: {
-    duration: 1.8, regions: { head: 1.8, pawL: 0.6, pawR: 0.6, haunch: 1.2, tail: 0.5 },
+    duration: 1.8, regions: { head: 1.8, pawL: 0.6, pawR: 0.6 },
     drive(t, set) {
       const e = env(t, 0.05, 0.6, 1.1, 0.5), s = env(t, 1.15, 0.3, 1.45, 0.33);
-      set("head", 0, 10 * e, -2 * e, env(t, 0, 0.15, 1.5, 0.15));
+      set("head", 0, 9 * e + 2.5 * s, -1.5 * e, env(t, 0, 0.15, 1.5, 0.15));
       const on = env(t, 1.08, 0.12, 1.66, 0.14);
-      if (on > 0) {
-        set("pawL", 0, 0, 3 * s, on); set("pawR", 0, 0, 3 * s, on);
-        set("haunch", 3.5 * s, 3 * s, 0, on);
-        set("tail", 0, 3 * s, 0, on);
-      }
+      if (on > 0) { set("pawL", -1.5 * s, 1 * s, 3 * s, on); set("pawR", 1.5 * s, 1 * s, 3 * s, on); }
     },
     face(t, show) {
       if (t > 0.12 && t < 1.55) show("eye", KIND.eyeClosed, 1);
@@ -120,10 +121,10 @@ export const MOVES = Object.freeze({
     },
     cues: [{ t: 0.2, cue: "open", index: 0 }, { t: 1.2, cue: "stretch", index: 0 }],
   },
-  // 냥냥펀치: the front paws jab forward (toward the face side) and up,
-  // alternately, twice each; squinting ^^ eyes, a small open mouth.
+  // 냥냥펀치: the two little front paws jab forward (toward the face side)
+  // and up, alternately, twice each; squinting ^^ eyes, a small open mouth.
   punch: {
-    duration: 1.1, regions: { pawL: 0.6, pawR: 0.6, head: 1.2 },
+    duration: 1.1, regions: { pawL: 0.7, pawR: 0.7, head: 1.2 },
     drive(t, set) {
       // each jab: lifted first and set down last, so the paw does not
       // scrape (and creep) along the tray
@@ -133,8 +134,8 @@ export const MOVES = Object.freeze({
         a[0] += stroke(t, t0, 0.07, 0.24); a[1] += stroke(t, t0 + 0.012, 0.065, 0.1);
       });
       const on = env(t, 0.04, 0.06, 1.0, 0.08), e = env(t, 0.02, 0.12, 0.95, 0.13);
-      set("pawL", -2.5 * L[1], 7 * L[0], 5 * L[1], on);
-      set("pawR", 2.5 * Rr[1], 7 * Rr[0], 5 * Rr[1], on);
+      set("pawL", -2.5 * L[1], 8 * L[0], 6.5 * L[1], on);
+      set("pawR", 2.5 * Rr[1], 8 * Rr[0], 6.5 * Rr[1], on);
       set("head", 0, -1 * e, 2 * e, e);
     },
     face(t, show) {
@@ -364,8 +365,9 @@ export class JellyWorld {
       const x = cross3(y, z);
       const q0 = quatFromBasis(x, y, z, [0, 0, 0, 1]);
       const rgb = d.color ? hexToRgb(d.color) : [-1, -1, -1];
-      // name: the designed kind; show / mul: an expression swapped in by a motion (−1 = none) and its scale
-      this.decor.push({ kind, name: d.kind, show: -1, mul: 1, tet: e, bary: L.bary.slice(), q0, scale: d.scale || 0.003, rgb, quat: q0.slice() });
+      // name: the designed kind; show / mul: an expression swapped in by a motion (−1 = none) and its scale;
+      // inner: a piece set inside the body (rest centre, radius m), which gems keep clear of
+      this.decor.push({ kind, name: d.kind, show: -1, mul: 1, tet: e, bary: L.bary.slice(), q0, scale: d.scale || 0.003, rgb, quat: q0.slice(), inner: d.inside ? { u: d.u.slice(), r: d.scale || 0.003 } : null });
     }
   }
 
@@ -1061,8 +1063,15 @@ export class JellyWorld {
     return null;
   }
 
+  // (also the pieces set inside the jelly — the cat's strawberries — while
+  // they are there: a gem never ends up stuck in one; they count as decor,
+  // never as gems)
   overlapsGem(u, radius) {
     for (const g of this.gems) if (Math.hypot(g.u[0] - u[0], g.u[1] - u[1], g.u[2] - u[2]) < (g.radius + radius) * 0.9) return true;
+    return this.inInner(u, radius);
+  }
+  inInner(u, radius) {
+    for (const d of this.decor) if (d.inner && Math.hypot(d.inner.u[0] - u[0], d.inner.u[1] - u[1], d.inner.u[2] - u[2]) < (d.inner.r + radius) * 0.9) return true;
     return false;
   }
 
@@ -1102,8 +1111,11 @@ export class JellyWorld {
     if (rare && this.rareCount >= RARE_CAPACITY) { this.events.push({ type: "rareFull", rare: rareRef, count }); return; }
     const placed = [];
     for (let n = 0; n < count && this.gems.length < this.gemCapacity && !(rare && this.rareCount >= RARE_CAPACITY); n++) {
-      for (let tries = 0; tries < 60; tries++) {
-        const u = [bnd[0] + Math.random() * (bnd[3] - bnd[0]), bnd[1] + (0.45 + 0.45 * Math.random()) * (bnd[4] - bnd[1]), bnd[2] + Math.random() * (bnd[5] - bnd[2])];
+      // the upper part first (they land where they show); a shape that is
+      // narrow up there (the cat's dome) gets a second round over all of it
+      for (let tries = 0; tries < 120; tries++) {
+        const lo = tries < 60 ? 0.45 : 0.08, span = tries < 60 ? 0.45 : 0.82;
+        const u = [bnd[0] + Math.random() * (bnd[3] - bnd[0]), bnd[1] + (lo + span * Math.random()) * (bnd[4] - bnd[1]), bnd[2] + Math.random() * (bnd[5] - bnd[2])];
         if (!this.gemFits(u, radius) || this.overlapsGem(u, radius)) continue;
         const gem = this.makeGem(rare ? rare.index : shape >= 0 ? shape : Math.floor(Math.random() * shapes), color >= 0 ? color : Math.floor(Math.random() * colors), radius, u, rare);
         const e = this.type.locator.locate(u[0], u[1], u[2]), T = [0, 0, 0];
@@ -1189,7 +1201,7 @@ export class JellyWorld {
           u[1] + (Math.random() * 2 - 1) * step + g[1] / gl * sink,
           u[2] + (Math.random() * 2 - 1) * step + g[2] / gl * sink,
         ];
-        if (this.gemFits(p, gem.radius)) gem.u = p;
+        if (this.gemFits(p, gem.radius) && !this.inInner(p, gem.radius)) gem.u = p;
       }
     }
     // Keep gems apart (undeformed coordinates).
@@ -1201,8 +1213,10 @@ export class JellyWorld {
       const push = (min - d) / 2 / d;
       const pa = [a.u[0] + dx * push, a.u[1] + dy * push, a.u[2] + dz * push];
       const pb = [b.u[0] - dx * push, b.u[1] - dy * push, b.u[2] - dz * push];
-      if (this.gemFits(pa, a.radius)) a.u = pa;
-      if (this.gemFits(pb, b.radius)) b.u = pb;
+      // Never push a gem into a strawberry (or other inner decor) while
+      // making room — the wander step above already respects that.
+      if (this.gemFits(pa, a.radius) && !this.inInner(pa, a.radius)) a.u = pa;
+      if (this.gemFits(pb, b.radius) && !this.inInner(pb, b.radius)) b.u = pb;
     }
     // World pose follows the containing tet's deformation.
     for (const gem of gems) {

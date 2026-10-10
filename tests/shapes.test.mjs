@@ -180,9 +180,9 @@ for (const id of NEW) {
   evaluateSurface(stencils, pos, surf);
   computeVertexNormals(surf, stencils.indices, normals);
   const bTris = boundary.flat();
-  const kinds = new Set(["eye", "nose", "mouth", "blush", "muzzle", "earInner", "cherry", "beak"]);
-  const decorProblems = [];
-  let worstCage = 0, worstSurf = 0;
+  const kinds = new Set(["eye", "nose", "mouth", "blush", "muzzle", "earInner", "cherry", "beak", "whisker", "strawberry"]);
+  const decorProblems = [], innerProblems = [];
+  let worstCage = 0, worstSurf = 0, shallowest = Infinity;
   for (const d of look.decor) {
     const tag = `${d.kind}@${d.u.map(mm).join(",")}`;
     if (!kinds.has(d.kind)) decorProblems.push(`${tag} unknown kind`);
@@ -190,6 +190,16 @@ for (const id of NEW) {
     if (d.color !== undefined && !/^#[0-9a-f]{6}$/i.test(d.color)) decorProblems.push(`${tag} colour ${d.color}`);
     const nl = Math.hypot(...d.n), ul = Math.hypot(...d.up), nu = d.n[0] * d.up[0] + d.n[1] * d.up[1] + d.n[2] * d.up[2];
     if (Math.abs(nl - 1) > 1e-6 || Math.abs(ul - 1) > 1e-6 || Math.abs(nu) > 1e-6) decorProblems.push(`${tag} n/up not orthonormal`);
+    if ((d.kind === "strawberry") !== Boolean(d.inside)) decorProblems.push(`${tag} inside flag ${d.inside}`);
+    if (d.inside) {
+      // pieces set inside the body: located in a tet, a few mm under the
+      // cage surface (deep enough for their relief, shallow enough to show)
+      const depth = Math.sqrt(nearestOnMesh(d.u, pos, bTris).d2);
+      shallowest = Math.min(shallowest, depth);
+      if (locator.locate(...d.u) < 0) innerProblems.push(`${tag} not inside the cage`);
+      if (!(depth >= 0.003 && depth <= 0.012)) innerProblems.push(`${tag} ${mm(depth)} mm under the cage surface`);
+      continue;
+    }
     const cageHit = nearestOnMesh(d.u, pos, bTris), surfHit = nearestOnMesh(d.u, surf, stencils.indices);
     worstCage = Math.max(worstCage, Math.sqrt(cageHit.d2)); worstSurf = Math.max(worstSurf, Math.sqrt(surfHit.d2));
     if (Math.sqrt(cageHit.d2) > 0.0015) decorProblems.push(`${tag} ${mm(Math.sqrt(cageHit.d2))} mm off the cage surface`);
@@ -203,17 +213,18 @@ for (const id of NEW) {
     if (locator.locate(...out) >= 0) decorProblems.push(`${tag} n points inward`);
     if (locator.locate(...inn) < 0) decorProblems.push(`${tag} not embedded under the surface`);
   }
-  const need = { pudding: [], cake: ["cherry"], bear: ["eye", "eye", "nose", "mouth", "blush", "blush", "blush", "blush"], cat: ["eye", "eye", "nose", "mouth", "muzzle", "earInner", "earInner"], bird: ["eye", "eye", "beak"] }[id];
+  const need = { pudding: [], cake: ["cherry"], bear: ["eye", "eye", "nose", "mouth", "blush", "blush", "blush", "blush"], cat: ["eye", "eye", "mouth", "whisker", "whisker", "strawberry", "strawberry", "strawberry", "strawberry", "strawberry"], bird: ["eye", "eye", "beak"] }[id];
   const have = look.decor.map((d) => d.kind).sort().join(","), wanted = need.slice().sort().join(",");
   check(`${id}: decorations ${need.length ? need.join(" ") : "(none)"}`, have === wanted, have);
   check(`${id}: decorations sit on the rendered surface, unit outward normals`, decorProblems.length === 0,
     decorProblems.length ? decorProblems.slice(0, 4).join("; ") : `≤ ${mm(worstCage)} mm from the cage, ≤ ${(worstSurf * 1e6).toFixed(0)} µm from the rendered surface`);
+  if (look.decor.some((d) => d.inside)) check(`${id}: inner pieces (strawberries) inside the body, 3–12 mm under the surface`, innerProblems.length === 0, innerProblems.length ? innerProblems.slice(0, 4).join("; ") : `shallowest ${mm(shallowest)} mm`);
 }
 
 // ---------------------------------------------------------------- idle motions (data)
 {
   check("idle motions only for the cat and the bird", ["flower", "pudding", "cake", "bear"].every((id) => shapeMotions(id) === null) && shapeMotions("cat") && shapeMotions("bird"));
-  for (const [id, interval, moves, need] of [["cat", 5, ["yawn", "punch"], ["head", "pawL", "pawR", "haunch", "tail"]], ["bird", 7, ["flap", "chirp"], ["head", "wingL", "wingR", "tail"]]]) {
+  for (const [id, interval, moves, need] of [["cat", 5, ["yawn", "punch"], ["head", "pawL", "pawR"]], ["bird", 7, ["flap", "chirp"], ["head", "wingL", "wingR", "tail"]]]) {
     const M = shapeMotions(id), cage = makeShapeCage(id), P = cage.pos, n = P.length / 3;
     const unit = (v) => Math.abs(Math.hypot(...v) - 1) < 1e-9;
     check(`${id}: motions every ${interval} s (${moves.join(" / ")}), frozen and cached`, M === shapeMotions(id) && Object.isFrozen(M) && M.interval === interval && M.moves.join() === moves.join() && Object.isFrozen(M.regions));
