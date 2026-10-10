@@ -85,11 +85,11 @@ const extrasOf = (o) => [o.gems, o.additive, o.texture, o.shape].filter(Boolean)
 // 4) difficulty: k by level, golden / picky stricter
 {
   const v8 = { 1: 1.6, 2: 1.6, 3: 1.4, 4: 1.4, 5: 1.2, 6: 1.2, 7: 1.0, 8: 1.0, 9: 0.9, 10: 0.9, 11: 0.8, 12: 0.8, 13: 0.7, 20: 0.7 };
-  check("colour tolerance k = the v8 level curve × 4/3 (v9.2 ×2, v9.3 ×2/3)", Object.entries(v8).every(([l, k]) => Math.abs(toleranceFor(Number(l)) - k * 4 / 3) < 1e-12));
+  check("colour tolerance k = the v8 level curve × 1.2 (v9.2 ×2, v9.3 ×2/3, v9.4 ×0.9)", Object.entries(v8).every(([l, k]) => Math.abs(toleranceFor(Number(l)) - k * 1.2) < 1e-12));
   check("colorScore = clamp01(1 − (ΔE − 5k)/(28k))", colorScoreFor(5, 1) === 1 && Math.abs(colorScoreFor(19, 1) - 0.5) < 1e-12 && Math.abs(colorScoreFor(8, 1.6) - 1) < 1e-12 && colorScoreFor(60, 1.6) === 0 && Math.abs(colorScoreFor(19, 0.7) - (1 - (19 - 3.5) / 19.6)) < 1e-12);
   const r = rng(21);
   const ks = ["normal", "golden", "memory", "picky"].map((kind) => orderAt(9, r, 1, { kind }).k);
-  check("order.k = toleranceFor(level) × (golden 0.85 | picky 0.7 | 1)", Math.abs(ks[0] - 1.2) < 1e-12 && Math.abs(ks[1] - 1.2 * 0.85) < 1e-12 && Math.abs(ks[2] - 1.2) < 1e-12 && Math.abs(ks[3] - 1.2 * 0.7) < 1e-12, ks.map((k) => k.toFixed(3)).join(" "));
+  check("order.k = toleranceFor(level) × (golden 0.85 | picky 0.7 | 1)", Math.abs(ks[0] - 1.08) < 1e-12 && Math.abs(ks[1] - 1.08 * 0.85) < 1e-12 && Math.abs(ks[2] - 1.08) < 1e-12 && Math.abs(ks[3] - 1.08 * 0.7) < 1e-12, ks.map((k) => k.toFixed(3)).join(" "));
   const easy = orderAt(1, rng(3), 1), hard = { ...easy, k: 0.7 };
   const off = perfect(easy, { sigma: mixSigma(easy.base, { ...easy.drops, water: 2 }) });
   check("the same miss scores lower at a stricter k", scoreOrder(hard, off).colorScore <= scoreOrder(easy, off).colorScore && scoreOrder({ ...easy, k: undefined }, off).k === 1);

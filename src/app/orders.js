@@ -167,9 +167,9 @@ export function colorInfo(name) {
 
 /** The v8 level curve of the colour tolerance (1 = the v7 scale). */
 const v8Tolerance = (level) => (level <= 2 ? 1.6 : level <= 4 ? 1.4 : level <= 6 ? 1.2 : level <= 8 ? 1.0 : level <= 10 ? 0.9 : level <= 12 ? 0.8 : 0.7);
-/** Overall scale on the v8 curve: v9.2 doubled it, v9.3 took that to 2/3
- * (2 × 2/3 = 4/3 of v8 — Lv1–2 ≈ 2.13 … Lv13+ ≈ 0.93). */
-export const TOLERANCE_SCALE = 4 / 3;
+/** Overall scale on the v8 curve: v9.2 doubled it, v9.3 took that to 2/3,
+ * v9.4 10 % less (2 × 2/3 × 0.9 = 1.2 of v8 — Lv1–2 1.92 … Lv13+ 0.84). */
+export const TOLERANCE_SCALE = 1.2;
 /** Colour tolerance factor k by friendship level. */
 export function toleranceFor(level = 1) {
   return v8Tolerance(level) * TOLERANCE_SCALE;
