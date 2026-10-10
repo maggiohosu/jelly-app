@@ -48,6 +48,7 @@ const T_ARRIVE = 1.2, T_REACH = 0.55, T_LIFT = 0.6, T_BITE = 0.72, T_FINISH = 0.
 const BITE_CONTACT = 0.26, BITE_CHEW = 0.4;
 const T_BURP = 0.95, BURP_AT = 0.44;   // full belly: tummy hold, 끄억 at BURP_AT into it
 const T_ARRIVE_T = 1.0, T_STRAIN = 1.4; // toilet visit: arrival beside the potty, 끙
+const T_NOPE_SHAKE = 1.0, T_NOPE_HUH = 0.25; // "nope" trip (not full): 절레절레 on the seat, then a pout
 // "kick": approach (two hops) · sniff · head shake · hop-turn · kick · 흥 (grumpy).
 const T_APPROACH = 1.0, T_SNIFF = 1.2, T_SHAKE = 0.9, T_TURN = 0.4, T_KICK = 0.6, T_HMPH = 1.0;
 const KICK_CONTACT = 0.3;      // s into the kick segment when the foot hits the jelly
@@ -1633,11 +1634,11 @@ const SPIT_TURN = 0.62;          // rad the head turns to the bunny's right befo
 const CHUNK_R = 0.0055;          // spat-out chunk radius (m)
 
 // Segment timeline per outcome. Every segment: { name, t0, t1, dur, ...extra }.
-function buildTimeline(outcome, bites, mood, burp = false) {
+function buildTimeline(outcome, bites, mood, burp = false, full = true) {
   const segs = [];
   let t = 0;
   const add = (name, dur, extra = {}) => { const seg = { name, t0: t, t1: t + dur, dur, ...extra }; segs.push(seg); t += dur; return seg; };
-  if (outcome === "toilet") return toiletTimeline(add, segs);
+  if (outcome === "toilet") return toiletTimeline(add, segs, full);
   add("arrive", T_ARRIVE);
   if (burp) add("burp", T_BURP); // full: holds its tummy, 끄억
   if (outcome === "kick") {
@@ -1682,15 +1683,23 @@ function buildTimeline(outcome, bites, mood, burp = false) {
 
 // Toilet visit: the potty pops in, the bunny hops in beside it, hops on, sits,
 // strains (끙), flushes, beams (방긋), hops off and leaves; the potty pops away.
-function toiletTimeline(add, segs) {
+// Not full ("nope"): sits a little longer, shakes its head 절레절레 (tShake), pouts
+// (tHuh), hops off and leaves — no strain / flush / smile / wand.
+function toiletTimeline(add, segs, full = true) {
   const T = {};
   T.toiletIn = add("toiletIn", 0.35).t0;
   T.arrive = add("tArrive", T_ARRIVE_T).t0;
   T.hopOn = add("hopOn", 0.55).t0;
-  T.sit = add("sit", 0.3).t0;
-  T.strain = add("strain", T_STRAIN).t0;
-  T.flush = add("flush", 0.9).t0;
-  T.smile = add("smile", 1.2).t0;
+  if (full) {
+    T.sit = add("sit", 0.3).t0;
+    T.strain = add("strain", T_STRAIN).t0;
+    T.flush = add("flush", 0.9).t0;
+    T.smile = add("smile", 1.2).t0;
+  } else {
+    T.sit = add("sit", 0.4).t0;
+    T.shake = add("tShake", T_NOPE_SHAKE).t0;
+    add("tHuh", T_NOPE_HUH);
+  }
   T.hopOff = add("hopOff", 0.55).t0;
   const leave = add("leave", T_LEAVE);
   T.leave = leave.t0;
@@ -1712,7 +1721,8 @@ function toiletTimeline(add, segs) {
  *   rabbit.setFullness(0..1);   // belly: ≥ 0.5 rounder, 1 round; at 1 a normal visit starts with
  *   //   a tummy hold + "burp" (adds T_BURP 0.95 s after "arrive"). Persists; eases while visible.
  *   rabbit.setHappy(true);      // "eat" visits: ^^ eyes, small open smile, blush (still chews/reacts)
- *   rabbit.toilet({ position, faceTo, onEvent });   // = play({ outcome: "toilet", ... })
+ *   rabbit.toilet({ position, faceTo, jelly, onEvent, full = true });   // = play({ outcome: "toilet", ... })
+ *   //   full: false = "nope" trip (sits, shakes its head 절레절레, leaves; fullness untouched)
  *   rabbit.play({ position: [x, 0, z], faceTo: [x, y, z], jelly: { center, width, height },
  *                 outcome: "eat" | "spit" | "kick" | "refuse", bites: 4,
  *                 mood: "happy" | "ok" | "sad" | "special", jellyColor: "#rrggbb",
@@ -1750,6 +1760,10 @@ function toiletTimeline(add, segs) {
  *           · flush 3.60 {position, duration 0.9} (fullness → 0) · smile 4.50
  *           · wand 5.00 {duration} (wand worn) · hopOff 5.70 {to} · leave 6.25
  *           · toiletOut 6.55 {position} · hop ×2 · done 7.30
+ * "toilet", full: false ("nope", ≈ 5.2 s; no strain / flush / smile / wand; fullness untouched):
+ *           toiletIn 0 · arrive 0.35 · hop 0.73/1.18 · hopOn 1.35 · sit 1.90
+ *           · shake 2.30 {duration 1.0, swings 4} · hopOff 3.55 {to} · leave 4.10
+ *           · toiletOut 4.40 {position} · hop ×2 · done 5.15
  * Full belly (setFullness(1), eat / spit / kick): burp 1.64 {duration 0.3} and every later
  *   event +0.95 s. Wand worn: wand 0.38 {duration 0.48} (during the arrival hops).
  * "hop" and "wand" events are cosmetic; skip() does not replay them.
@@ -1946,7 +1960,7 @@ export class Rabbit {
   }
 
   // -------------------------------------------------------------------------
-  play({ position = [0, 0, -0.111], faceTo = [0, 0.02, 0], jelly = null, bites = 4, mood = "happy", outcome = "eat", jellyColor = "#ff8fb1", picky = false, onEvent = null } = {}) {
+  play({ position = [0, 0, -0.111], faceTo = [0, 0.02, 0], jelly = null, bites = 4, mood = "happy", outcome = "eat", jellyColor = "#ff8fb1", picky = false, onEvent = null, full = true } = {}) {
     if (this.state) this._finish();
     const P = v3(position[0], 0, position[2]);
     const face = v3(faceTo[0], 0, faceTo[2]);
@@ -1965,7 +1979,8 @@ export class Rabbit {
     bites = outcome === "eat" ? Math.max(1, Math.min(8, Math.round(bites))) : 1;
     try { this.blob.color.value.set(jellyColor); } catch { this.blob.color.value.set("#ff8fb1"); }
     const burp = outcome !== "toilet" && this._fullness >= 1;
-    const { segs, T } = buildTimeline(outcome, bites, mood, burp);
+    full = outcome !== "toilet" || full !== false;
+    const { segs, T } = buildTimeline(outcome, bites, mood, burp, full);
 
     this.state = {
       t: 0, segs, T, outcome, bites, mood, onEvent,
@@ -1999,7 +2014,7 @@ export class Rabbit {
       const S1 = C.clone().addScaledVector(side, 0.058).addScaledVector(F, 0.008);
       const S2 = C.clone().addScaledVector(side, -0.058).addScaledVector(F, 0.008);
       const st = this.state;
-      st.toilet = { C, S1, S2, from: 1, outAt: T.toiletOut };
+      st.toilet = { C, S1, S2, from: 1, outAt: T.toiletOut, full };
       st.start = S1.clone().addScaledVector(outward, 0.05).addScaledVector(side, 0.026);
       st.mid = S1.clone().addScaledVector(outward, 0.024).addScaledVector(side, 0.011);
       st.seat = C;
@@ -2009,7 +2024,7 @@ export class Rabbit {
       potty.update({ scale: 0 });
     } else if (this.potty) this.potty.hide();
     // Wand flourish (wand worn): during the arrival hops, or at the toilet smile.
-    if (this._outfit.wand) {
+    if (this._outfit.wand && full) {
       const t0 = outcome === "toilet" ? T.smile + 0.2 : 0.08;
       this.state.flourish = { t0, t1: t0 + FLOURISH };
     }
@@ -2025,7 +2040,7 @@ export class Rabbit {
     this.update(0, null);
   }
 
-  /** Toilet visit (≈ 7.3 s) = play({ ...options, outcome: "toilet" }); see the class doc. */
+  /** Toilet visit (≈ 7.3 s; full: false → "nope" trip ≈ 5.2 s) = play({ ...options, outcome: "toilet" }); see the class doc. */
   toilet(options = {}) { this.play({ ...options, outcome: "toilet" }); }
 
   _ensurePotty() {
@@ -2105,9 +2120,11 @@ export class Rabbit {
       ev("hop-a1", T.arrive + 0.45 + HOP.crouch + HOP.air, "hop", () => ({ phase: "arrive", index: 1 }));
       ev("hopOn", T.hopOn, "hopOn", () => ({ to: toArr(P.C), height: SEAT_H }));
       ev("sit", T.sit, "sit", () => ({}));
-      ev("strain", T.strain, "strain", () => ({ duration: T_STRAIN }));
-      ev("flush", T.flush, "flush", () => { this.setFullness(0); return { position: toArr(P.C), duration: 0.9 }; });
-      ev("smile", T.smile, "smile", () => ({}));
+      if (P.full) {
+        ev("strain", T.strain, "strain", () => ({ duration: T_STRAIN }));
+        ev("flush", T.flush, "flush", () => { this.setFullness(0); return { position: toArr(P.C), duration: 0.9 }; });
+        ev("smile", T.smile, "smile", () => ({}));
+      } else ev("shake", T.shake, "shake", () => ({ duration: T_NOPE_SHAKE, swings: 4 }));
       ev("hopOff", T.hopOff, "hopOff", () => ({ to: toArr(P.S2) }));
       ev("toiletOut", T.toiletOut, "toiletOut", () => ({ position: toArr(P.C) }));
     } else {
@@ -2489,8 +2506,9 @@ export class Rabbit {
     const s = this.state, T = s.T;
     const scale = this._pottyScale(t);
     const pop = t < T.arrive ? Math.exp(-6 * t) * Math.sin(13 * t) : 0;
-    const strain = s.skipped ? 0 : pulse(t, T.strain, T.strain + T_STRAIN);
-    const fl = s.skipped ? -1 : t - T.flush;
+    const full = s.toilet.full;
+    const strain = s.skipped || !full ? 0 : pulse(t, T.strain, T.strain + T_STRAIN);
+    const fl = s.skipped || !full ? -1 : t - T.flush;
     let squash = 1 + 0.18 * pop - 0.035 * strain * (0.5 + 0.5 * Math.sin(t * 2 * Math.PI * 3));
     if (fl >= 0 && fl < 0.9) squash *= 1 + 0.035 * Math.sin(fl * 2 * Math.PI * 4) * (1 - fl / 0.9);
     // sits down: the potty gives a little under the bunny
@@ -2895,7 +2913,7 @@ export class Rabbit {
         pose.eyesWide = 0.3;
         break;
       }
-      case "sit": case "strain": case "flush": case "smile": {
+      case "sit": case "strain": case "flush": case "smile": case "tShake": case "tHuh": {
         pose.pos.copy(s.toilet.C);
         pose.perch = SEAT_H; pose.seated = 1;
         this._pottyPose(pose, seg.name, u, t);
@@ -2910,9 +2928,15 @@ export class Rabbit {
         pose.perch = SEAT_H * (1 - e); pose.seated = 1 - sstep(0, 0.45, h.k);
         pose.yaw = angleLerp(s.yaw, s.leaveYaw, easeInOut(u / 0.3));
         pose.pawTuck = h.y > 0 ? 1 : 0;
-        pose.happyEyes = 1 - sstep(0.3, 0.5, u);
-        pose.smile = 0.6 * (1 - sstep(0.2, 0.45, u));
-        pose.earPerk = 0.4; pose.blush = 0.7; pose.tailWag = 1;
+        if (P.full) {
+          pose.happyEyes = 1 - sstep(0.3, 0.5, u);
+          pose.smile = 0.6 * (1 - sstep(0.2, 0.45, u));
+          pose.earPerk = 0.4; pose.blush = 0.7; pose.tailWag = 1;
+        } else { // still a bit grumpy: half-lidded, ears low
+          pose.squint = 0.6 * (1 - sstep(0.3, 0.55, u));
+          pose.cheekPuff = 0.5 * (1 - sstep(0.1, 0.4, u));
+          pose.earDroop = 0.3 * (1 - sstep(0.4, 0.55, u)); pose.earPerk = -0.25 + 0.35 * sstep(0.4, 0.55, u);
+        }
         break;
       }
       default: { // leave
@@ -2982,8 +3006,43 @@ export class Rabbit {
       pose.squash = 1 - 0.1 * Math.exp(-u * 9) * Math.cos(u * 26);
       pose.pawGrip = easeOut(u / 0.25);
       pose.footSwing = 0.6;
-      pose.earPerk = 0.3; pose.earWobble = 0.4 * (1 - u / 0.3);
+      pose.earPerk = 0.3; pose.earWobble = 0.4 * Math.max(0, 1 - u / 0.3);
       pose.eyesWide = 0.25;
+      if (!s.toilet.full) {
+        // "hm?": peeks down into the bowl, head tilting — nothing to do here
+        const e = sstep(0.18, 0.4, u);
+        pose.headPitch = 0.12 * e; pose.headRoll = 0.16 * e;
+        pose.eyesWide = 0.25 + 0.25 * e; pose.earTilt = e;
+      }
+    } else if (name === "tShake") {
+      // 절레절레 on the seat (same style as the kick's head shake): ≈ 4 swings,
+      // eyes squeezed shut, cheeks puffed, ears flopping, a sweat drop, gripping the rim.
+      const env = sstep(0.06, 0.18, u) * (1 - sstep(0.9, 1, u));
+      const w = 2 * Math.PI * SHAKE_HZ, ph = w * Math.max(0, u - 0.1);
+      const tilt = 1 - sstep(0.04, 0.2, u);
+      pose.headYaw = 0.52 * Math.sin(ph) * env;
+      pose.headRoll = 0.16 * tilt - 0.1 * Math.sin(ph) * env;
+      pose.headPitch = 0.12 * tilt + 0.02 * env;
+      pose.earTilt = tilt;
+      pose.earSwing = -0.42 * w * w * Math.sin(ph) * env;
+      pose.scrunch = sstep(0.06, 0.16, u) * (1 - sstep(0.86, 0.98, u));
+      pose.squint = 0.6 * sstep(0.86, 0.98, u);
+      pose.cheekPuff = 0.45 * sstep(0.04, 0.16, u);
+      pose.earDroop = 0.25 * env; pose.earPerk = 0.3 - 0.55 * env;
+      pose.yawExtra = 0.04 * Math.sin(ph) * env;
+      pose.squash = 1 - 0.02 * env;
+      pose.pawGrip = 1;
+      pose.sweat = sstep(0.3, 0.45, u); pose.sweatSlide = 0.6 * sstep(0.45, 1, u);
+      pose.footSwing = 0;
+    } else if (name === "tHuh") {
+      // pout: half-lidded, cheeks puffed, ears flat, head turned a little away (흥)
+      const e = easeOut(clamp01(u / 0.15));
+      pose.squint = 0.6;
+      pose.cheekPuff = 0.5 * e;
+      pose.headYaw = 0.18 * e; pose.headPitch = -0.08 * e; pose.yawExtra = 0.08 * e;
+      pose.earDroop = 0.3; pose.earPerk = -0.25;
+      pose.pawGrip = 1 - sstep(0.1, 0.25, u);
+      pose.sweat = 1 - sstep(0.12, 0.25, u); pose.sweatSlide = 0.6 + 0.4 * sstep(0, 0.25, u);
     } else if (name === "strain") {
       // 끙: eyes squeezed shut (> <), cheeks puffed, ears stiff and quivering,
       // body squeezing in pulses with a wiggle, gripping the rim, sweat, blushing.

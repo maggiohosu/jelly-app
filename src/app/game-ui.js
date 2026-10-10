@@ -1,5 +1,5 @@
 // DOM side of the bunny game: coin / friendship HUD (title, combo chip, the
-// v9 tummy gauge and happy-buff chip), the order card (kinds, compact conditions, time bonus, memory hide / peek, the
+// v9 happy-buff chip and the v10 nope chip; the tummy itself is a secret), the order card (kinds, compact conditions, time bonus, memory hide / peek, the
 // one-tap "new jelly for this order" button), the reward card after a meal
 // (with its coin breakdown), follow-ups queued one after another (notices,
 // level-up gift boxes), the card-pull overlay (three face-down cards → pick →
@@ -60,20 +60,17 @@ export function createGameUI({ progress, rareInfo, rareIcon, rareThumb, onPull, 
     renderCombo();
     renderTummy();
   }
-  // 🍮 tummy gauge (above the toolbar; red + pulsing when full) and the 😊
-  // happy chip on the order card while buffed meals are left (progress.js v9)
+  // The tummy's chips on the order card (progress.js v9/v10): 😊 while
+  // buffed meals are left, 🚽 after a trip for nothing (헛걸음) while its
+  // penalised outcomes are left. Fullness itself is never shown (a secret:
+  // the bunny's belly and its burp are the hints).
   function renderTummy() {
-    const n = progress.fullness, max = progress.fullnessMax, full = progress.isFull, el = $("tummy");
-    el.classList.toggle("full", full);
-    el.classList.toggle("high", !full && n >= max * 0.75);
-    el.setAttribute("aria-valuenow", String(n));
-    el.setAttribute("aria-valuemax", String(max));
-    el.setAttribute("aria-label", full ? `토끼 배부름 ${n}/${max}, 너무 배불러요! 화장실에 보내 주세요` : `토끼 배부름 ${n}/${max}`);
-    $("tummy-fill").style.width = `${Math.round(100 * Math.min(1, n / max))}%`;
-    $("tummy-count").textContent = `${n}/${max}`;
     const h = progress.happyTurns, chip = $("happy-chip");
     chip.hidden = !(h > 0);
     if (h > 0) { chip.textContent = `😊 기분 최고 ★+1 · 남은 ${h}회`; chip.setAttribute("aria-label", `토끼 기분 최고: 꾸민 젤리 별 +1, 남은 ${h}회`); }
+    const n = progress.nopeTurns, nope = $("nope-chip");
+    nope.hidden = !(n > 0);
+    if (n > 0) { nope.textContent = `🚽 헛걸음 ★−1 · 남은 ${n}회`; nope.setAttribute("aria-label", `화장실 헛걸음: 별 −1, 남은 ${n}회`); }
   }
   // 🔥 combo chip (on the order card): visible while the ★3 streak is ≥ 2
   function renderCombo() {
@@ -159,9 +156,14 @@ export function createGameUI({ progress, rareInfo, rareIcon, rareThumb, onPull, 
   // ---------------------------------------------------------------- reward
   // kind: "eat" (stars 1..4, ★4 = special) | "spit" | "kick" (coins lost).
   // breakdown (eat): {base, rare, combo, kind, time, overflow} from progress.feed().
-  // starMod (v9 tummy, progress.modifyStars().mod): "full" → "배불러요 ★−1"
-  // badge, "happy" → "기분 최고 ★+1"; stars are already the final ones.
-  async function showReward({ kind = "eat", stars = 1, coins = 0, xp = 0, mood, levelUps = [], bonus = 0, breakdown = null, orderKind = "normal", streak = 0, starMod = null }) {
+  // starMod (the tummy, progress.modifyStars()): the whole result, or just its
+  // mod string. Badges: full → "🍮 배불러요 ★−1", nope → "🚽 헛걸음 ★−1",
+  // happy → "😊 기분 최고 ★+1"; "cancel" shows the bonus and the penalty with
+  // "= ±0". nopeTurns / happyTurns = turns left after this outcome ("· 남은
+  // n회" when > 0). Stars are already the final ones.
+  async function showReward({ kind = "eat", stars = 1, coins = 0, xp = 0, mood, levelUps = [], bonus = 0, breakdown = null, orderKind = "normal", streak = 0, starMod = null, nopeTurns = 0, happyTurns = 0 }) {
+    const sm = typeof starMod === "string" ? { mod: starMod, full: starMod === "full", nope: starMod === "nope", happy: starMod === "happy" } : starMod || { mod: null };
+    const smod = sm.mod;
     const card = $("reward"), inner = card.querySelector(".reward-card");
     inner.classList.toggle("spit", kind === "spit");
     inner.classList.toggle("kick", kind === "kick");
@@ -174,13 +176,21 @@ export function createGameUI({ progress, rareInfo, rareIcon, rareThumb, onPull, 
     $("reward-text").textContent = kind === "kick" ? "뻥! 냄새만 맡고 차 버렸어요"
       : kind === "spit" ? "퉤! 토끼 입맛에 너무 안 맞았어요"
       : mood === "special" ? (bonus ? "최고예요!! 레어 보석까지 들어간 특별한 젤리!" : "최고예요!! 기분 좋은 날의 특별한 젤리!")
-      : mood === "happy" ? (bonus ? "레어 보석 덕분에 별 하나 더! 맛있어요" : starMod === "happy" ? "기분이 좋아서 별 하나 더! 맛있어요" : "완전 맛있어요! 주문 그대로예요")
-      : mood === "ok" ? (bonus ? "레어 보석이 반짝여서 별 하나 더!" : starMod === "happy" ? "기분이 좋아서 별 하나 더!" : "맛있어요! 조금 달랐지만 좋아요")
+      : mood === "happy" ? (bonus ? "레어 보석 덕분에 별 하나 더! 맛있어요" : smod === "happy" ? "기분이 좋아서 별 하나 더! 맛있어요" : "완전 맛있어요! 주문 그대로예요")
+      : mood === "ok" ? (bonus ? "레어 보석이 반짝여서 별 하나 더!" : smod === "happy" ? "기분이 좋아서 별 하나 더!" : "맛있어요! 조금 달랐지만 좋아요")
       : "음… 주문이랑 많이 달라요";
-    const modEl = $("reward-mod");
-    modEl.hidden = !(starMod === "full" || starMod === "happy");
-    modEl.className = `reward-mod ${starMod || ""}`;
-    modEl.textContent = starMod === "full" ? "🍮 배불러요 ★−1" : starMod === "happy" ? "😊 기분 최고 ★+1" : "";
+    const modEl = $("reward-mod"), left = (n) => (n > 0 ? ` · 남은 ${n}회` : "");
+    const badges = [];
+    const happyBadge = `<span class="happy">😊 기분 최고 ★+1${kind === "eat" ? left(happyTurns) : ""}</span>`;
+    if (smod === "happy") badges.push(happyBadge);
+    if (smod === "cancel" && (sm.happy ?? true)) badges.push(happyBadge);
+    // the penalty: full wins the label (both together are still −1)
+    if (smod === "full" || (smod === "cancel" && sm.full)) badges.push(`<span class="full">🍮 배불러요 ★−1</span>`);
+    else if (smod === "nope" || (smod === "cancel" && sm.nope)) badges.push(`<span class="nope">🚽 헛걸음 ★−1${left(nopeTurns)}</span>`);
+    if (smod === "cancel") badges.push(`<span class="net">= ±0</span>`);
+    modEl.hidden = badges.length === 0;
+    modEl.className = `reward-mod ${smod || ""}`;
+    modEl.innerHTML = badges.join("");
     const loss = kind === "spit" || kind === "kick";
     const coinsEl = $("reward-coins");
     coinsEl.classList.toggle("loss", loss);

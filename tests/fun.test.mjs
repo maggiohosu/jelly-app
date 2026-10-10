@@ -1,13 +1,14 @@
 // v8 fun systems: consumable rare-gem stock, migration of v7 saves, card
 // pulls (bundles, tier ups, 1/100 shape cards), level rewards / gift boxes,
 // combo / time bonus / golden / picky / memory, colour book, secret recipes,
-// achievements, outfits / themes / titles; v9 tummy (fullness gauge, full
-// penalty, toilet, happy buff + ★4 overflow, toilet badges), outfit cards
-// (witch hat / wand) and the v9 save migration. Pure logic: `node tests/fun.test.mjs`.
+// achievements, outfits / themes / titles; v9/v10 tummy (hidden random
+// fullness threshold, full penalty, toilet any time: real trip / nope trip,
+// happy buff + ★4 overflow, ±1 clamp, turn use, toilet badges), outfit cards
+// (witch hat / wand) and the v9/v10 save migration. Pure logic: `node tests/fun.test.mjs`.
 import { mixSigma, nameColor, familyOf, rollOutcome, COLOR_NAMES, ORDER_ADDITIVE_MIN, GEM_HEART, GEM_DROPLET } from "../src/app/orders.js";
 import {
   Progress, PROGRESS_KEY, PULL_COST, BUNDLE, COINS_BY_STARS, OWNED_SHAPE_COINS, MEMORY_PEEK_COST, LEVEL_REWARDS,
-  FULLNESS_MAX, HAPPY_TURNS, OVERFLOW_COINS, OUTFIT_CARD_CHANCE, SHAPE_CARD_CHANCE, comboMultiplier, timeBonusFor,
+  FULLNESS_MIN, FULLNESS_MAX, HAPPY_TURNS, NOPE_TURNS, OVERFLOW_COINS, rollFullnessThreshold, OUTFIT_CARD_CHANCE, SHAPE_CARD_CHANCE, comboMultiplier, timeBonusFor,
 } from "../src/app/progress.js";
 import {
   ACHIEVEMENTS, OUTFITS, OUTFIT_SLOTS, CARD_OUTFITS, THEMES, SECRET_RECIPES, COLOR_BOOK_REWARDS, GIFT_ODDS, rollGift, findSecret,
@@ -290,90 +291,148 @@ const sum = (list, key = "coins") => list.reduce((a, x) => a + (x[key] || 0), 0)
   check("LEVEL_REWARDS stay frozen data", Object.isFrozen(LEVEL_REWARDS) && Object.isFrozen(LEVEL_REWARDS[3]));
 }
 
-// 12) v9 fullness gauge: +1 per eaten jelly only, full at 20, saved
+// 12) v10 hidden fullness: random threshold 5..15, +1 per eaten jelly only, saved
 {
-  const p = new Progress(memoryStorage(), rng(14));
+  check("constants: threshold 5..15, 3 happy turns, 2 nope turns, overflow 10 coins", FULLNESS_MIN === 5 && FULLNESS_MAX === 15 && HAPPY_TURNS === 3 && NOPE_TURNS === 2 && OVERFLOW_COINS === 10);
+  const seen = new Set(Array.from({ length: 5000 }, (_, i) => rollFullnessThreshold(rng(i))));
+  check("rollFullnessThreshold: every integer 5..15, nothing else", [...seen].sort((x, y) => x - y).join() === "5,6,7,8,9,10,11,12,13,14,15");
+  check("rollFullnessThreshold edges: 0 → 5, 0.999… → 15", rollFullnessThreshold(() => 0) === 5 && rollFullnessThreshold(() => 0.9999999) === 15);
+  const counts = new Array(16).fill(0), r0 = rng(77);
+  for (let i = 0; i < 22000; i++) counts[rollFullnessThreshold(r0)]++;
+  check("the threshold is uniform (each ≈ 1/11)", counts.slice(5).every((c) => Math.abs(c / 22000 - 1 / 11) < 0.01), counts.slice(5).join(","));
+  const p = new Progress(memoryStorage(), rng(14), { tummyRandom: () => 0.5 });   // threshold 10
   p.state.xp = 100000; p.state.rewardedLevel = p.level.level;
-  check("constants: full at 20, 5 happy turns, overflow 10 coins", FULLNESS_MAX === 20 && HAPPY_TURNS === 5 && OVERFLOW_COINS === 10 && p.fullnessMax === 20);
-  check("a fresh bunny is not full and not happy", p.fullness === 0 && !p.isFull && !p.canToilet && p.happyTurns === 0 && p.toiletCount === 0);
+  check("a fresh start rolls the threshold (tummyRandom)", p.fullnessThreshold === 10 && p.state.fullnessThreshold === 10);
+  check("tummyRandom does not shift the main random's sequence", (() => { const a = new Progress(memoryStorage(), seq([0.95, 0.95, 0.95])); a.state.coins = 100; return a.pull().index === 23; })());
+  check("a fresh bunny is not full and not happy (the toilet is always open)", p.fullness === 0 && !p.isFull && p.canToilet && p.happyTurns === 0 && p.nopeTurns === 0 && p.toiletCount === 0 && p.fullnessRatio === 0);
   const first = p.feed({ stars: 2, jelly: jellyOf() });
   p.spit(); p.kick();
-  check("each eat fills the gauge by 1; spit / kick do not", first.fullness === 1 && first.fullnessMax === 20 && !first.full && !first.becameFull && p.fullness === 1);
-  const rest = Array.from({ length: 19 }, () => p.feed({ stars: 3 }));
-  check("the 20th eaten jelly makes the bunny full (becameFull once)", rest[18].full && rest[18].becameFull && rest[18].fullness === 20 && rest.slice(0, 18).every((r) => !r.full && !r.becameFull) && p.isFull && p.canToilet,
+  check("each eat fills the tummy by 1; spit / kick do not", first.fullness === 1 && !first.full && !first.becameFull && p.fullness === 1 && p.fullnessRatio === 0.1);
+  const rest = Array.from({ length: 9 }, () => p.feed({ stars: 3 }));
+  check("hidden full detection: the 10th eaten jelly (threshold 10) makes the bunny full", rest[8].full && rest[8].becameFull && rest[8].fullness === 10 && rest.slice(0, 8).every((r) => !r.full) && p.isFull && p.fullnessRatio === 1,
     rest.map((r) => r.fullness).join(","));
   const more = p.feed({ stars: 2 });
-  check("eating while full keeps the gauge at 20 (no second becameFull)", more.fullness === 20 && more.full && !more.becameFull);
-  const r = new Progress(p.storage);
-  check("fullness is saved", r.fullness === 20 && r.isFull);
+  check("eating while full keeps fullness at the threshold (ratio 1)", more.fullness === 10 && more.full && !more.becameFull && p.fullnessRatio === 1);
+  const r = new Progress(p.storage, Math.random, { tummyRandom: () => 0 });
+  check("fullness and the threshold are saved (not re-rolled on load)", r.fullness === 10 && r.fullnessThreshold === 10 && r.isFull);
+  const low = new Progress(memoryStorage(), rng(1), { tummyRandom: () => 0 });
+  for (let i = 0; i < 5; i++) low.feed({ stars: 3 });
+  check("threshold 5: full after 5 eats", low.isFull && low.fullness === 5);
+  p.reset();
+  check("reset() rolls a new threshold", p.fullness === 0 && p.fullnessThreshold === 10);
 }
 
-// 13) v9 full penalty: −1 star every evaluation, ★1 floor, ★1 still rolls spit / kick
+// 13) v10 star modifiers: full | nope −1, happy +1, total clamped to ±1
 {
-  const p = new Progress(memoryStorage(), rng(15));
-  p.state.fullness = FULLNESS_MAX;
+  const p = new Progress(memoryStorage(), rng(15), { tummyRandom: () => 0.5 });
+  p.state.fullness = p.fullnessThreshold;
   const m = [1, 2, 3, 4].map((s) => p.modifyStars(s, { touched: true }));
-  check("full: ★4→3, ★3→2, ★2→1, ★1 stays ★1 (mod 'full')", m.map((x) => x.stars).join() === "1,1,2,3" && m.every((x) => x.mod === "full" && x.overflowCoins === 0) && m.map((x) => x.from).join() === "1,2,3,4");
+  check("full: ★4→3, ★3→2, ★2→1, ★1 stays ★1 (mod 'full')", m.map((x) => x.stars).join() === "1,1,2,3" && m.every((x) => x.mod === "full" && x.overflowCoins === 0 && x.delta === -1) && m.map((x) => x.from).join() === "1,2,3,4");
   check("the penalty also hits untouched jellies", p.modifyStars(3, { touched: false }).stars === 2);
   check("modifyStars is pure (nothing changes or is consumed)", (() => { const before = JSON.stringify(p.state); for (let i = 0; i < 5; i++) p.modifyStars(4); return JSON.stringify(p.state) === before; })());
+  p.state.nopeTurns = 2;
+  check("full + nope → still −1 (clamp), mod 'full'", p.modifyStars(3).stars === 2 && p.modifyStars(3).mod === "full" && p.modifyStars(3).full && p.modifyStars(3).nope && p.modifyStars(1).stars === 1);
   p.state.happyTurns = 3;
-  check("full wins over happy (and uses no happy turn)", p.modifyStars(3).mod === "full" && p.modifyStars(3).stars === 2 && p.happyTurns === 3);
+  const c = p.modifyStars(3);
+  check("full + nope + happy (touched) → cancel: ±0 (clamped total)", c.stars === 3 && c.mod === "cancel" && c.delta === 0 && c.overflowCoins === 0);
+  check("cancel at ★4: no overflow coins", p.modifyStars(4).stars === 4 && p.modifyStars(4).overflowCoins === 0);
+  check("full + happy but untouched → −1 (mod 'full')", p.modifyStars(3, { touched: false }).stars === 2 && p.modifyStars(3, { touched: false }).mod === "full");
+  p.state.fullness = 0;
+  check("nope + happy → cancel; nope alone (untouched) → −1 'nope'", p.modifyStars(2).mod === "cancel" && p.modifyStars(2).stars === 2 && p.modifyStars(2, { touched: false }).mod === "nope" && p.modifyStars(2, { touched: false }).stars === 1);
+  p.state.nopeTurns = 0;
+  check("happy alone → +1 'happy'", p.modifyStars(2).mod === "happy" && p.modifyStars(2).stars === 3 && p.modifyStars(2).delta === 1);
+  p.state.happyTurns = 0; p.state.fullness = p.fullnessThreshold;
   const pen = p.modifyStars(2);
   const outs = new Set(Array.from({ length: 3000 }, (_, i) => rollOutcome(pen.stars, rng(i))));
   check("a penalised ★1 goes through rollOutcome: spit / kick / eat (hard mode)", pen.stars === 1 && outs.has("spit") && outs.has("kick") && outs.has("eat"));
+  p.state.happyTurns = 3;
   const sp = p.spit();
-  check("a spat / kicked jelly does not touch the tummy", p.fullness === FULLNESS_MAX && p.happyTurns === 3 && sp.lost >= 0);
+  check("a spat / kicked jelly does not touch the tummy or the happy turns", p.fullness === p.fullnessThreshold && p.happyTurns === 3 && sp.lost >= 0 && !sp.nopeUsed);
   const f = p.feed({ stars: pen.stars, starMod: pen });
   check("eating a penalised jelly: plain ★1 coins, starMod 'full', no happy turn used", f.coins === COINS_BY_STARS[1] && f.starMod === "full" && !f.happyUsed && f.happyTurns === 3 && f.breakdown.overflow === 0);
   check("modifyStars clamps odd input to 1..4", p.modifyStars(9).from === 4 && p.modifyStars(0).from === 1 && p.modifyStars(NaN).stars === 1);
+  // cancel consumes both turns
+  p.state.fullness = 0; p.state.nopeTurns = 2; p.state.happyTurns = 3;
+  const cm = p.modifyStars(3), cf = p.feed({ stars: cm.stars, starMod: cm });
+  check("cancel: the eat uses a happy turn AND a nope turn, ★3 coins, no overflow", cm.mod === "cancel" && cf.starMod === "cancel" && cf.happyUsed && cf.nopeUsed && p.happyTurns === 2 && p.nopeTurns === 1 && cf.breakdown.base === COINS_BY_STARS[3] && cf.breakdown.overflow === 0);
 }
 
-// 14) v9 toilet: only when full; empties the tummy, 5 happy turns, badges
+// 14) v10 toilet any time: full → real trip (new threshold, 3 happy turns, badges); not full → nope trip
 {
-  const p = new Progress(memoryStorage(), rng(16));
-  check("no toilet trip unless full", p.toilet() === null && p.toiletCount === 0);
-  p.state.fullness = 19;
-  check("19 is not full yet", !p.canToilet && p.toilet() === null);
-  p.state.fullness = FULLNESS_MAX; p.state.happyTurns = 2;
-  const coins = p.coins, t = p.toilet();
-  check("toilet: gauge → 0, happyTurns = 5 (set, not added), count +1", t && t.happyTurns === HAPPY_TURNS && t.toiletCount === 1 && p.fullness === 0 && p.happyTurns === 5 && !p.isFull && p.toiletCount === 1);
-  check("first trip: '첫 화장실' +15 coins", t.achievements.length === 1 && t.achievements[0].id === "first_toilet" && t.achievements[0].label === "첫 화장실" && t.achievements[0].coins === 15 && p.coins === coins + 15);
-  check("a second trip right away is not possible", p.toilet() === null && p.toiletCount === 1);
+  let t = 0.0;
+  const tummy = () => t;                       // threshold = 5 + floor(t × 11)
+  const p = new Progress(memoryStorage(), rng(16), { tummyRandom: tummy });
+  check("start threshold 5", p.fullnessThreshold === 5);
+  p.state.fullness = 4; p.state.happyTurns = 1;
+  const coins = p.coins, n1 = p.toilet();
+  check("not full → nope trip: {real:false, nopeTurns:2}, fullness / threshold / count / happy unchanged", n1 && n1.real === false && n1.nopeTurns === NOPE_TURNS && p.nopeTurns === 2 && p.fullness === 4 && p.fullnessThreshold === 5 && p.toiletCount === 0 && p.happyTurns === 1 && n1.achievements.length === 0 && p.coins === coins);
+  p.useNopeTurn();
+  const n2 = p.toilet();
+  check("a nope trip sets nopeTurns to 2 (no accumulation)", n2.nopeTurns === 2 && p.nopeTurns === 2 && (p.toilet(), p.nopeTurns === 2));
+  check("no toilet badge for nope trips", !p.state.achievements.first_toilet && p.toiletCount === 0);
+  check("a saved nope count survives a reload", new Progress(p.storage, Math.random, { tummyRandom: tummy }).nopeTurns === 2);
+  p.state.fullness = 5; t = 0.95;               // full; the next threshold rolls 15
+  const t1 = p.toilet();
+  check("full → real trip: fullness 0, new threshold, happyTurns = 3 (set), count +1", t1.real === true && t1.happyTurns === HAPPY_TURNS && t1.toiletCount === 1 && p.fullness === 0 && p.fullnessThreshold === 15 && p.happyTurns === 3 && !p.isFull);
+  check("first real trip: '첫 화장실' +15 coins", t1.achievements.length === 1 && t1.achievements[0].id === "first_toilet" && t1.achievements[0].coins === 15 && p.coins === coins + 15);
+  t = 0.5;
+  const after = p.toilet();
+  check("a trip right after (not full) is a nope trip; the threshold is NOT re-rolled", !after.real && p.fullnessThreshold === 15 && p.toiletCount === 1 && p.happyTurns === 3);
   const trips = [];
-  for (let i = 0; i < 9; i++) { p.state.fullness = FULLNESS_MAX; trips.push(p.toilet()); }
-  check("10th trip: '화장실 10회' +30 coins (once)", trips[8].achievements.some((a) => a.id === "toilet_10" && a.coins === 30 && a.label === "화장실 10회") && trips.slice(0, 8).every((x) => !x.achievements.length) && p.toiletCount === 10);
-  const r = new Progress(p.storage);
-  check("toilet count / happy turns are saved", r.toiletCount === 10 && r.happyTurns === 5 && r.fullness === 0 && r.state.achievements.toilet_10);
+  for (let i = 0; i < 9; i++) { p.state.fullness = p.fullnessThreshold; trips.push(p.toilet()); }
+  check("real trips re-roll the threshold each time", p.fullnessThreshold === 10 && trips.every((x) => x.real));
+  check("10th real trip: '화장실 10회' +30 coins (once)", trips[8].achievements.some((a) => a.id === "toilet_10" && a.coins === 30 && a.label === "화장실 10회") && trips.slice(0, 8).every((x) => !x.achievements.length) && p.toiletCount === 10);
+  const r = new Progress(p.storage, Math.random, { tummyRandom: () => 0 });
+  check("toilet count / happy turns / threshold are saved", r.toiletCount === 10 && r.happyTurns === 3 && r.fullness === 0 && r.fullnessThreshold === 10 && r.state.achievements.toilet_10);
   check("the toilet badges keep the existing ones", ACHIEVEMENTS.length === 32 && ["first_feed", "level_10", "first_toilet", "toilet_10"].every((id) => ACHIEVEMENTS.some((a) => a.id === id)));
 }
 
-// 15) v9 happy buff: +1 on touched jellies, ★4 overflow +10 after multipliers, 5 turns
+// 15) v10 nope turns: used by every outcome (eat / spit / kick, touched or not)
 {
-  const p = new Progress(memoryStorage(), rng(17));
+  const p = new Progress(memoryStorage(), rng(19), { tummyRandom: () => 0.5 });
+  p.state.coins = 1000;
+  p.toilet();
+  const a = p.modifyStars(3, { touched: false });
+  const sp = p.spit();
+  check("a spit uses a nope turn", a.mod === "nope" && sp.nopeUsed && sp.nopeTurns === 1 && p.nopeTurns === 1);
+  const k = p.kick();
+  check("a kick uses the last one", k.nopeUsed && k.nopeTurns === 0 && p.nopeTurns === 0 && p.modifyStars(3).mod === null);
+  check("with none left nothing is used", !p.kick().nopeUsed && p.nopeTurns === 0);
+  p.toilet();
+  const e1 = p.modifyStars(3, { touched: false }), f1 = p.feed({ stars: e1.stars, starMod: e1 });
+  const f2 = p.feed({ stars: 3 });             // no starMod: still an outcome
+  check("untouched / plain eats use nope turns too (2 outcomes → gone)", f1.nopeUsed && f1.nopeTurns === 1 && f1.starMod === "nope" && f1.breakdown.base === COINS_BY_STARS[2] && f2.nopeUsed && f2.nopeTurns === 0 && p.nopeTurns === 0);
+  check("fullness counted the eats (not the spit / kicks)", p.fullness === 2);
+}
+
+// 16) v10 happy buff: +1 on touched jellies, ★4 overflow +10 after multipliers, 3 turns
+{
+  const p = new Progress(memoryStorage(), rng(17), { tummyRandom: () => 0.99 });   // threshold 15
   p.state.xp = 100000; p.state.rewardedLevel = p.level.level;
-  p.state.fullness = FULLNESS_MAX; p.toilet();
+  p.state.fullness = p.fullnessThreshold; p.toilet();
   check("happy: touched ★1→2, ★2→3, ★3→4 (mod 'happy', no overflow)", [1, 2, 3].map((s) => p.modifyStars(s, { touched: true })).every((x, i) => x.stars === i + 2 && x.mod === "happy" && x.overflowCoins === 0));
   const four = p.modifyStars(4, { touched: true });
   check("happy ★4 stays ★4 with 10 overflow coins", four.stars === 4 && four.mod === "happy" && four.overflowCoins === OVERFLOW_COINS);
   const un = p.modifyStars(2, { touched: false });
   check("untouched jelly: no buff, mod null", un.stars === 2 && un.mod === null && un.overflowCoins === 0);
   const plain = p.feed({ stars: un.stars, starMod: un });
-  check("an untouched meal uses no happy turn", p.happyTurns === 5 && !plain.happyUsed && plain.happyTurns === 5 && plain.starMod === null);
+  check("an untouched meal uses no happy turn", p.happyTurns === 3 && !plain.happyUsed && plain.happyTurns === 3 && plain.starMod === null);
   const buff = p.modifyStars(2), b = p.feed({ stars: buff.stars, starMod: buff });
-  check("a buffed meal uses one turn and pays the buffed stars", b.happyUsed && b.happyTurns === 4 && p.happyTurns === 4 && b.starMod === "happy" && b.breakdown.base === COINS_BY_STARS[3]);
+  check("a buffed meal uses one turn and pays the buffed stars", b.happyUsed && b.happyTurns === 2 && p.happyTurns === 2 && b.starMod === "happy" && b.breakdown.base === COINS_BY_STARS[3]);
   p.state.streak = 4;
   const o4 = p.modifyStars(4), big = p.feed({ stars: o4.stars, starMod: o4, order: order("golden"), jelly: jellyOf({ rareCount: 2 }), elapsed: 10 });
-  check("overflow is a flat +10 AFTER combo × kind × time (in coins and breakdown.overflow)", big.breakdown.overflow === 10 && big.coins === Math.round((40 + 10) * 2 * 3 * 1.5) + 10 && big.happyTurns === 3, `${big.coins}`);
-  check("feed without starMod leaves the turns alone (back-compat)", p.feed({ stars: 3 }).happyTurns === 3 && p.happyTurns === 3);
-  check("starMod may also be the mod string ('happy' → turn used, no overflow)", (() => { const r = p.feed({ stars: 4, starMod: "happy" }); return r.happyUsed && r.happyTurns === 2 && r.breakdown.overflow === 0; })());
-  for (let i = 0; i < 2; i++) { const m = p.modifyStars(3); p.feed({ stars: m.stars, starMod: m }); }
-  check("after 5 buffed meals the buff is over", p.happyTurns === 0 && p.modifyStars(3).mod === null && p.modifyStars(3).stars === 3);
+  check("overflow is a flat +10 AFTER combo × kind × time (in coins and breakdown.overflow)", big.breakdown.overflow === 10 && big.coins === Math.round((40 + 10) * 2 * 3 * 1.5) + 10 && big.happyTurns === 1, `${big.coins}`);
+  check("feed without starMod leaves the happy turns alone (back-compat)", p.feed({ stars: 3 }).happyTurns === 1 && p.happyTurns === 1);
+  const sp = (() => { p.state.coins += 100; const hm = p.modifyStars(1); p.spit(); return hm; })();
+  check("a buffed jelly that is spat out keeps its happy turn (only eats use one)", sp.mod === "happy" && p.happyTurns === 1);
+  check("starMod may also be the mod string ('happy' → turn used, no overflow)", (() => { const r = p.feed({ stars: 4, starMod: "happy" }); return r.happyUsed && r.happyTurns === 0 && r.breakdown.overflow === 0; })());
+  check("after 3 buffed meals the buff is over", p.happyTurns === 0 && p.modifyStars(3).mod === null && p.modifyStars(3).stars === 3);
   const stale = p.feed({ stars: 3, starMod: { mod: "happy", overflowCoins: 10 } });
   check("a stale 'happy' starMod with no turns left pays no overflow", !stale.happyUsed && stale.breakdown.overflow === 0 && p.happyTurns === 0);
-  check("fullness counted every meal on the way (8 meals after the trip)", p.fullness === 8);
+  check("fullness counted every meal on the way (6 meals after the trip)", p.fullness === 6);
 }
 
-// 16) v9 outfit cards: 1/30 after the shape card, unowned only, both owned → gem
+// 17) v9 outfit cards: 1/30 after the shape card, unowned only, both owned → gem
 {
   check("witch hat (head) and wand (new 'wand' slot) are card-only outfits", OUTFIT_SLOTS.join() === "head,face,neck,back,wand"
     && CARD_OUTFITS.map((o) => `${o.id}:${o.slot}:${o.emoji}:${o.label}`).join() === "witchhat:head:🧙:마녀 모자,wand:wand:🪄:마법지팡이"
@@ -402,19 +461,25 @@ const sum = (list, key = "coins") => list.reduce((a, x) => a + (x[key] || 0), 0)
   check("≈ 1/30 of pulls are outfit cards (no pity)", Math.abs(outfits / N - 1 / 30) < 0.004, `${outfits}/${N}`);
 }
 
-// 17) v9 migration: a v8 save gets an empty tummy; junk values are cleaned
+// 18) v9 → v10 migration: a v8 save gets an empty tummy; a v9 save rolls a threshold; junk is cleaned
 {
   const v8 = { version: 1, coins: 120, xp: 300, rare: Array(25).fill(-1), rareStock: Array(25).fill(0), outfit: { head: "ribbon", face: null, neck: null, back: null }, achievements: { first_feed: true } };
   const storage = memoryStorage();
   storage.setItem(PROGRESS_KEY, JSON.stringify(v8));
-  const p = new Progress(storage, rng(18));
-  check("a v8 save loads with fullness 0, happyTurns 0, toiletCount 0, no outfit cards, empty wand slot",
-    p.fullness === 0 && p.happyTurns === 0 && p.toiletCount === 0 && p.state.outfitCards.length === 0 && p.outfit.wand === null && p.outfit.head === "ribbon" && p.coins === 120);
-  const junk = { ...v8, fullness: 99, happyTurns: -3, toiletCount: "x", outfitCards: ["wand", "wand", "crown", 7], outfit: { ...v8.outfit, wand: "witchhat" } };
+  const p = new Progress(storage, rng(18), { tummyRandom: () => 0.5 });
+  check("a v8 save loads with fullness 0, happyTurns 0, nopeTurns 0, toiletCount 0, a rolled threshold, no outfit cards, empty wand slot",
+    p.fullness === 0 && p.happyTurns === 0 && p.nopeTurns === 0 && p.toiletCount === 0 && p.fullnessThreshold === 10 && p.state.outfitCards.length === 0 && p.outfit.wand === null && p.outfit.head === "ribbon" && p.coins === 120);
+  const v9 = { ...v8, fullness: 12, happyTurns: 5 };
+  storage.setItem(PROGRESS_KEY, JSON.stringify(v9));
+  const full = new Progress(storage, rng(18), { tummyRandom: () => 0.3 });   // threshold 8 ≤ 12 → full
+  check("a v9 save past its new threshold is full right away (fullness clamped to it); 5 happy turns → 3", full.fullnessThreshold === 8 && full.isFull && full.fullness === 8 && full.happyTurns === 3);
+  const notFull = new Progress(storage, rng(18), { tummyRandom: () => 0.9 });  // threshold 14 > 12
+  check("a v9 save under its new threshold is not full", notFull.fullnessThreshold === 14 && !notFull.isFull && notFull.fullness === 12);
+  const junk = { ...v8, fullness: 99, happyTurns: -3, nopeTurns: 7, toiletCount: "x", fullnessThreshold: 42, outfitCards: ["wand", "wand", "crown", 7], outfit: { ...v8.outfit, wand: "witchhat" } };
   storage.setItem(PROGRESS_KEY, JSON.stringify(junk));
-  const q = new Progress(storage, rng(18));
-  check("junk tummy values are clamped, unknown outfit cards dropped, a wrong-slot wand emptied",
-    q.fullness === FULLNESS_MAX && q.happyTurns === 0 && q.toiletCount === 0 && q.state.outfitCards.join() === "wand" && q.state.outfit.wand === null);
+  const q = new Progress(storage, rng(18), { tummyRandom: () => 0 });
+  check("junk tummy values are clamped (bad threshold re-rolled), unknown outfit cards dropped, a wrong-slot wand emptied",
+    q.fullnessThreshold === 5 && q.fullness === 5 && q.isFull && q.happyTurns === 0 && q.nopeTurns === 2 && q.toiletCount === 0 && q.state.outfitCards.join() === "wand" && q.state.outfit.wand === null);
 }
 
 console.log(failures ? `\n${failures} FAILED` : "\nALL FUN CHECKS PASSED");

@@ -63,8 +63,10 @@ export const BITE = Object.freeze({ radius: 0.014, factor: 0.5, minScale: 0.35, 
 // (the cat's three whiskers of one side) sits on the surface like the face;
 // strawberry (a strawberry half set INSIDE the cat, shapes.js anchor.inside)
 // is a material point deep in the body — drawn opaque under the jelly and
-// seen through it, never a gem, eaten with the bite around it like any decor.
-export const DECOR_KINDS = Object.freeze(["eye", "nose", "mouth", "blush", "muzzle", "earInner", "cherry", "beak", "eyeClosed", "eyeHappy", "mouthOpen", "beakOpen", "whisker", "strawberry"]);
+// seen through it, never a gem, eaten with the bite around it like any decor;
+// tongue (the bear's) is a hidden piece (kind −1 to the renderer) that only
+// a motion shows, rolled about its normal (show's roll) to lick.
+export const DECOR_KINDS = Object.freeze(["eye", "nose", "mouth", "blush", "muzzle", "earInner", "cherry", "beak", "eyeClosed", "eyeHappy", "mouthOpen", "beakOpen", "whisker", "strawberry", "tongue"]);
 // Decorations are drawn on top of the jelly (render/decor.js overlay pass), so
 // they anchor ON the rendered surface; shapes.js projects anchors onto it.
 const DECOR_INSET = 0;
@@ -74,12 +76,15 @@ const DECOR_INSET = 0;
 // moves, soft regions). A move is a script in the shape's model axes
 // (side = +x, up = +y, face = +z toward the face / beak, millimetres):
 //   regions  { region: force limit (N) } — the regions it drives
-//   drive(t, set)  set(region, side, up, face, on = 1): the region centre's
+//   pick()   optional: a random variant v per performance (passed to drive / face)
+//   drive(t, set, v)  set(region, side, up, face, on = 1): the region centre's
 //                  offset from where it was when the move started, at time t,
 //                  and how firmly it is held there (0..1; a region not set
 //                  is free — it never anchors the jelly against another one)
-//   face(t, show)  show(decorName, kind, scale×): expressions at time t
-//                  (anything not shown is its normal self)
+//   face(t, show, v)  show(decorName, kind, scale×, roll = 0): expressions at
+//                  time t, roll (rad) about the piece's normal, + = tip of its
+//                  −Y toward +X (anything not shown is its normal self; a
+//                  hidden piece not shown stays hidden)
 //   cues     [{ t, cue, index, hop?: m/s, plop?: m/s }] → "motionCue"
 //            events for sound sync (+ a hop: an upward push from the
 //            floor; a plop: the top squashes down onto the seat)
@@ -103,6 +108,15 @@ const PUNCH_AT = [0.1, 0.34, 0.58, 0.82];
 const CHIRP_AT = [0.12, 0.56, 1.0];
 const HOP_AT = [0.36, 0.9];
 const PLOP_AT = 1.5;
+const LICK_AT = [0.42, 0.92], LICK_LEN = 0.44, LICK_SIDES = [-1, 0, 1];
+// one lick's sweep (−1..1) at u s into it: a corner (side ±1) is licked out
+// and back; the middle (0) is swept across (left → right, the second lick
+// right → left) and back to the middle
+const lickSweep = (u, side, k) => {
+  if (!(u > 0 && u < LICK_LEN)) return 0;
+  const x = u / LICK_LEN, s = Math.sin(Math.PI * x);
+  return side ? side * s * (0.75 + 0.25 * s) : (k ? -2 : 2) * Math.sin(Math.PI * (x - 0.5)) * s;
+};
 export const MOVES = Object.freeze({
   // 하품: the whole dome (the head with its ears) stretches up and a little
   // back, slowly (eyes shut, the mouth opens wide and closes), then a last
@@ -179,6 +193,32 @@ export const MOVES = Object.freeze({
       for (const t0 of CHIRP_AT) if (t >= t0 && t < t0 + 0.18) show("beak", KIND.beakOpen, 1);
     },
     cues: CHIRP_AT.map((t0, index) => ({ t: t0, cue: "chirp", index })),
+  },
+  // 꿀 핥기 (bear): the head tilts up a little, the mouth opens, happy ^^
+  // eyes; a pink tongue pokes out and licks twice — the left or the right
+  // corner of the mouth, or across the middle (v = side −1 / 0 / 1, random
+  // per lick motion) — leaning a little that way, then it goes back in.
+  lick: {
+    duration: 1.8, regions: { head: 1.4 },
+    pick: () => LICK_SIDES[Math.floor(Math.random() * 3)],
+    drive(t, set, side) {
+      const e = env(t, 0.03, 0.3, 1.35, 0.35);
+      let bob = 0;
+      for (const t0 of LICK_AT) bob += stroke(t, t0, 0.14, 0.3);
+      set("head", 0.9 * side * e, 2.2 * e + 0.6 * bob, 0.6 * e + 0.5 * bob, env(t, 0, 0.12, 1.55, 0.2));
+    },
+    face(t, show, side) {
+      if (t > 0.08 && t < 1.68) show("eye", KIND.eyeHappy, 1);
+      if (t > 0.14 && t < 1.62) show("mouth", KIND.mouthOpen, 0.9 + 0.6 * smooth01((t - 0.14) / 0.16) - 0.6 * smooth01((t - 1.4) / 0.2));
+      // out (0.24 → 0.4 s), two licks, back in (1.36 → 1.52 s)
+      const out = smooth01((t - 0.24) / 0.16) * (1 - smooth01((t - 1.36) / 0.16));
+      if (out > 0.02) {
+        let sweep = 0, reach = 0;
+        LICK_AT.forEach((t0, k) => { sweep += lickSweep(t - t0, side, k); reach += Math.sin(Math.PI * Math.min(1, Math.max(0, (t - t0) / LICK_LEN))); });
+        show("tongue", KIND.tongue, (0.35 + 0.65 * out) * (1 + 0.12 * reach), (side ? 1.05 : 0.8) * sweep);
+      }
+    },
+    cues: LICK_AT.map((t0, index) => ({ t: t0, cue: "lick", index })),
   },
 });
 
@@ -367,7 +407,8 @@ export class JellyWorld {
       const rgb = d.color ? hexToRgb(d.color) : [-1, -1, -1];
       // name: the designed kind; show / mul: an expression swapped in by a motion (−1 = none) and its scale;
       // inner: a piece set inside the body (rest centre, radius m), which gems keep clear of
-      this.decor.push({ kind, name: d.kind, show: -1, mul: 1, tet: e, bary: L.bary.slice(), q0, scale: d.scale || 0.003, rgb, quat: q0.slice(), inner: d.inside ? { u: d.u.slice(), r: d.scale || 0.003 } : null });
+      // hidden: only shown by a motion (kind −1 to the renderer otherwise); roll: rad about +Z
+      this.decor.push({ kind, name: d.kind, hidden: Boolean(d.hidden), show: -1, mul: 1, roll: 0, tet: e, bary: L.bary.slice(), q0, scale: d.scale || 0.003, rgb, quat: q0.slice(), inner: d.inside ? { u: d.u.slice(), r: d.scale || 0.003 } : null });
     }
   }
 
@@ -410,8 +451,10 @@ export class JellyWorld {
       bary[0] = d.bary[0]; bary[1] = d.bary[1]; bary[2] = d.bary[2]; bary[3] = d.bary[3];
       body.pointInTet(d.tet, bary, p);
       tetRotation(body, d.tet, q);
-      slerpInto(d.quat, quatMultiply(q, d.q0, this.scratchDecorQ2 ||= [0, 0, 0, 1]), 0.5);
-      out[o] = d.show >= 0 ? d.show : d.kind; out[o + 1] = p[0]; out[o + 2] = p[1]; out[o + 3] = p[2];
+      let q0 = d.q0;
+      if (d.roll) { const h = d.roll / 2, r = this.scratchDecorQ3 ||= [0, 0, 0, 1]; r[2] = Math.sin(h); r[3] = Math.cos(h); q0 = quatMultiply(d.q0, r, this.scratchDecorQ4 ||= [0, 0, 0, 1]); }
+      slerpInto(d.quat, quatMultiply(q, q0, this.scratchDecorQ2 ||= [0, 0, 0, 1]), 0.5);
+      out[o] = d.show >= 0 ? d.show : d.hidden ? -1 : d.kind; out[o + 1] = p[0]; out[o + 2] = p[1]; out[o + 3] = p[2];
       out[o + 4] = d.quat[0]; out[o + 5] = d.quat[1]; out[o + 6] = d.quat[2]; out[o + 7] = d.quat[3];
       out[o + 8] = d.scale * d.mul; out[o + 9] = d.rgb[0]; out[o + 10] = d.rgb[1]; out[o + 11] = d.rgb[2];
     }
@@ -512,7 +555,7 @@ export class JellyWorld {
       case "nudge": body.nudge(); break;
       case "reset": this.reset(event.base, event.lift || 0, event.plain); break;
       case "motions": this.setMotions(event.enabled); break;
-      case "motionNow": this.startMotion(event.name); break;
+      case "motionNow": this.startMotion(event.name, event.variant); break;
       case "kick": this.kickAway(event); break;
       case "grabNear": this.grabNear(event); break;
       case "carry":
@@ -596,8 +639,9 @@ export class JellyWorld {
     this.driveMotion(h);
   }
 
-  // Start a move now (the timer restarts from here). false: not one of this shape's moves.
-  startMotion(name) {
+  // Start a move now (the timer restarts from here); variant: the move's pick()
+  // (else random). false: not one of this shape's moves.
+  startMotion(name, variant) {
     const spec = this.type.motions, move = MOVES[name];
     if (!spec || !move || !spec.moves.includes(name)) return false;
     this.stopMotion();
@@ -605,7 +649,7 @@ export class JellyWorld {
     const body = this.body, x = body.x;
     body.wake();
     const R = bestRotation(body, this.restCenter), c = massCenter(x, body.mass, body.totalMass);
-    const m = { name, move, t: 0, cue: 0, R, regions: [], grabs: [], active: [], gain: this.texture === "slime" ? MOTION.slime : 1 };
+    const m = { name, move, t: 0, cue: 0, R, regions: [], grabs: [], active: [], gain: this.texture === "slime" ? MOTION.slime : 1, v: !move.pick ? 0 : variant !== undefined && variant !== null ? variant : move.pick() };
     for (const [region, force] of Object.entries(move.regions)) {
       const reg = this.type.regions[region];
       if (!reg || !reg.ids.length) continue;
@@ -633,7 +677,7 @@ export class JellyWorld {
     if (!home || Math.hypot(seat[0] - home[0], seat[1] - home[1]) > MOTION.homeRange) this.motionHome = seat;
     this.motion = m;
     this.syncGrabs();
-    this.events.push({ type: "motion", shape: this.shape, name, duration: move.duration });
+    this.events.push({ type: "motion", shape: this.shape, name, duration: move.duration, ...(move.pick ? { variant: m.v } : null) });
     return true;
   }
 
@@ -670,12 +714,12 @@ export class JellyWorld {
     this.cancelReaction(m);
     if (!this.grabbing) this.recenter(h);
     while (m.cue < move.cues.length && move.cues[m.cue].t <= t) this.motionCue(move.cues[m.cue++]);
-    this.setFace(move.face, t);
+    this.setFace(move.face, t, m.v);
     if (m.regions.length) {
       const R = m.R, ax = this.type.motions.axes, s = 0.001 * m.gain, c = massCenter(body.x, body.mass, body.totalMass);
       for (const r of m.regions) { r.off.fill(0); r.on = 0; }
       // the script at the end of this step
-      move.drive(t + h, m.set);
+      move.drive(t + h, m.set, m.v);
       m.active.length = 0;
       for (const r of m.regions) {
         if (!(r.on > 0.01)) continue;
@@ -737,12 +781,12 @@ export class JellyWorld {
 
   // Expressions: show(decorName, kind, scale×) for the swaps at time t; every
   // other decoration back to its own kind. A change bumps decorVersion.
-  setFace(face, t) {
+  setFace(face, t, v = 0) {
     const list = this.decor;
-    for (const d of list) { d.nextShow = -1; d.nextMul = 1; }
-    if (face) face(t, (name, kind, mul) => { for (const d of list) if (d.name === name) { d.nextShow = kind; d.nextMul = mul; } });
+    for (const d of list) { d.nextShow = -1; d.nextMul = 1; d.nextRoll = 0; }
+    if (face) face(t, (name, kind, mul, roll = 0) => { for (const d of list) if (d.name === name) { d.nextShow = kind; d.nextMul = mul; d.nextRoll = roll; } }, v);
     let changed = false;
-    for (const d of list) if (d.show !== d.nextShow || d.mul !== d.nextMul) { d.show = d.nextShow; d.mul = d.nextMul; changed = true; }
+    for (const d of list) if (d.show !== d.nextShow || d.mul !== d.nextMul || d.roll !== d.nextRoll) { d.show = d.nextShow; d.mul = d.nextMul; d.roll = d.nextRoll; changed = true; }
     if (changed) this.decorVersion++;
   }
 

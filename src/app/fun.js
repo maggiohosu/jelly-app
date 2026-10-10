@@ -50,7 +50,7 @@ export const ACHIEVEMENTS = Object.freeze([
   A("secret_first", "비밀 레시피", "처음으로 숨은 레시피를 찾았어요", 20, (f) => f.secrets >= 1, { unlock: Object.freeze({ outfit: "flowerband" }) }),
   A("secret_all", "레시피 탐정", "숨은 레시피 8개를 모두 찾았어요", 50, (f) => f.secrets >= f.secretTotal, { title: "레시피 탐정" }),
   A("level_10", "토끼의 단짝", "토끼와 친구 레벨 10이 되었어요", 40, (f) => f.level >= 10, { title: "토끼의 단짝" }),
-  // v9: the bunny's toilet trips (progress.toilet()); `toilets` is absent in
+  // v9: the bunny's toilet trips (progress.toilet(); v10: real trips only, not nope trips); `toilets` is absent in
   // facts built before v9 → never earned by accident
   A("first_toilet", "첫 화장실", "배부른 토끼를 처음으로 화장실에 보내 줬어요", 15, (f) => (f.toilets || 0) >= 1),
   A("toilet_10", "화장실 10회", "토끼를 화장실에 10번 보내 줬어요", 30, (f) => (f.toilets || 0) >= 10),

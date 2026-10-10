@@ -290,10 +290,10 @@ for (const sh of SHAPES.filter((x) => x.id !== "flower")) {
   const inverted = (b) => { let n = 0; for (let e = 0; e < b.elementCount; e++) if (det6(b.x, b.ids[e * 4], b.ids[e * 4 + 1], b.ids[e * 4 + 2], b.ids[e * 4 + 3]) <= 0) n++; return n; };
   const starts = (w, seconds) => { const out = []; run(w, seconds, () => { for (const e of drain(w)) if (e.type === "motion") out.push({ t: w.time, ...e }); }); return out; };
   const kinds = (w) => { const n = w.decorCount(), d = w.decorStates(new Float32Array(n * 12)); return Array.from({ length: n }, (_, i) => ({ kind: DECOR_KINDS[d[i * 12]], scale: d[i * 12 + 8], name: w.decor[i].name, p: [d[i * 12 + 1], d[i * 12 + 2], d[i * 12 + 3]] })); };
-  check("DECOR_KINDS: the 8 kinds, the 4 expressions, then whisker / strawberry (append only)", DECOR_KINDS.join() === "eye,nose,mouth,blush,muzzle,earInner,cherry,beak,eyeClosed,eyeHappy,mouthOpen,beakOpen,whisker,strawberry");
+  check("DECOR_KINDS: the 8 kinds, the 4 expressions, then whisker / strawberry / tongue (append only)", DECOR_KINDS.join() === "eye,nose,mouth,blush,muzzle,earInner,cherry,beak,eyeClosed,eyeHappy,mouthOpen,beakOpen,whisker,strawberry,tongue");
 
   // the timer: start to start, in sim time, never for the flower or while disabled
-  for (const [shape, interval, moves] of [["cat", 5, ["yawn", "punch"]], ["bird", 7, ["flap", "chirp"]]]) {
+  for (const [shape, interval, moves] of [["bear", 5, ["lick"]], ["cat", 5, ["yawn", "punch"]], ["bird", 7, ["flap", "chirp"]]]) {
     const w = new JellyWorld({ shape }); const t0 = w.time || 0; drain(w);
     const s = starts(w, interval * 4 + 1.5);
     const gaps = s.slice(1).map((e, i) => e.t - s[i].t);
@@ -323,6 +323,7 @@ for (const sh of SHAPES.filter((x) => x.id !== "flower")) {
 
   // cues for sound sync, and expressions swapped on the face, then back
   for (const [shape, name, want, swaps] of [
+    ["bear", "lick", { lick: 2 }, { at: 0.7, eye: "eyeHappy", mouth: "mouthOpen", tongue: "tongue" }],
     ["cat", "yawn", { open: 1, stretch: 1 }, { at: 0.7, eye: "eyeClosed", mouth: "mouthOpen" }],
     ["cat", "punch", { punch: 4 }, { at: 0.5, eye: "eyeHappy", mouth: "mouthOpen" }],
     ["bird", "flap", { flap: 1, hop: 2, plop: 1 }, { at: 1.8, eye: "eyeHappy" }],
@@ -352,6 +353,32 @@ for (const sh of SHAPES.filter((x) => x.id !== "flower")) {
     let widest = 0; run(w, 1.8, () => { const m = kinds(w).find((d) => d.name === "mouth"); if (m.kind === "mouthOpen") widest = Math.max(widest, m.scale / base); });
     check("cat yawn: the mouth opens wide (scaled up) then closes", widest > 1.4, `× ${widest.toFixed(2)}`);
   }
+  {
+    // bear lick: the tongue is hidden at rest (kind −1 to the renderer), pokes
+    // out and sweeps (rolls) toward the side the motion picked, then hides
+    const w = new JellyWorld({ shape: "bear" }); w.handle({ type: "motions", enabled: false }); run(w, 1); drain(w);
+    const raw = (name) => { const n = w.decorCount(), d = w.decorStates(new Float32Array(n * 12)), i = w.decor.findIndex((x) => x.name === name); return d[i * 12]; };
+    const hidden0 = raw("tongue") === -1;
+    const seen = { "-1": 0, "0": 0, "1": 0 }, cueAt = [];
+    let ok = hidden0;
+    for (let k = 0; k < 9; k++) {
+      w.handle({ type: "motionNow", name: "lick" });
+      const side = drain(w).find((e) => e.type === "motion").variant;
+      seen[side]++;
+      let lo = 0, hi = 0, shown = 0, t = 0;
+      run(w, 1.75, () => {
+        t += 1 / 60;
+        for (const e of drain(w)) if (e.type === "motionCue" && k === 0) cueAt.push(t);
+        const d = w.decor.find((x) => x.name === "tongue");
+        if (d.show === DECOR_KINDS.indexOf("tongue")) { shown++; lo = Math.min(lo, d.roll); hi = Math.max(hi, d.roll); }
+      });
+      run(w, 0.3);
+      // a corner lick rolls ≥ 35° that way only; the middle sweeps ≥ 25° both ways
+      ok &&= shown > 30 && (side ? side * (side > 0 ? hi : lo) > 0.6 && side * (side > 0 ? lo : hi) > -0.02 : hi > 0.45 && lo < -0.45) && raw("tongue") === -1 && !w.motion;
+    }
+    check("bear lick: the tongue is hidden at rest, pokes out and licks toward the picked side (left / middle / right), then hides", ok && seen["-1"] + seen["0"] + seen["1"] === 9, JSON.stringify(seen));
+    check("bear lick: two lick cues ≈ 0.42 / 0.92 s", cueAt.length === 2 && Math.abs(cueAt[0] - 0.42) < 0.05 && Math.abs(cueAt[1] - 0.92) < 0.05, cueAt.map((v) => v.toFixed(2)).join(" "));
+  }
 
   // the jelly visibly acts: the head rises in a yawn, the paws jab forward, the bird hops
   {
@@ -364,16 +391,17 @@ for (const sh of SHAPES.filter((x) => x.id !== "flower")) {
       let best = 0; run(w, seconds, () => { const p = regionAt(w, region); best = Math.max(best, (p[axis] - p0[axis]) - (w.body.center[axis] - c0[axis])); });
       return best;
     };
-    const head = peak("cat", "yawn", "head", 1, 1.2), paw = peak("cat", "punch", "pawL", 2, 0.5), hop = peak("bird", "flap", "wingR", 1, 1.4);
+    const head = peak("cat", "yawn", "head", 1, 1.2), paw = peak("cat", "punch", "pawL", 2, 0.5), hop = peak("bird", "flap", "wingR", 1, 1.4), lick = peak("bear", "lick", "head", 1, 1.2);
     check("motions read: a yawn lifts the head ≥ 4 mm, a punch jabs a paw ≥ 4 mm forward, the bird's wing flaps ≥ 4 mm up", head > 0.004 && paw > 0.004 && hop > 0.004, `${(head * 1000).toFixed(1)} / ${(paw * 1000).toFixed(1)} / ${(hop * 1000).toFixed(1)} mm`);
+    check("bear lick: the head tilts up gently (1–4 mm)", lick > 0.001 && lick < 0.004, `${(lick * 1000).toFixed(1)} mm`);
   }
 
   // 60 s with the motions on (a move every 5 / 7 s): stable, sane volume, no
   // inside-out mess (a plain bounce turns ~165 tets inside out for a moment),
   // and the jelly stays where it was
-  for (const [shape, texture] of [["cat", "jelly"], ["bird", "jelly"], ["cat", "slime"], ["bird", "slime"]]) {
+  for (const [shape, texture] of [["bear", "jelly"], ["cat", "jelly"], ["bird", "jelly"], ["bear", "slime"], ["cat", "slime"], ["bird", "slime"]]) {
     const w = new JellyWorld({ shape, texture }); w.handle({ type: "motions", enabled: false }); run(w, texture === "slime" ? 5 : 2);
-    const b = w.body, inv0 = inverted(b), c0 = b.center.slice(), slime = texture === "slime";
+    const b = w.body, inv0 = inverted(b), c0 = b.center.slice(), s0 = w.seatCenter(), slime = texture === "slime";
     let n = 0, worst = 0, lo = Infinity, hi = 0, finite = true, k = 0;
     w.handle({ type: "motions", enabled: true });
     run(w, 60, () => {
@@ -381,11 +409,17 @@ for (const sh of SHAPES.filter((x) => x.id !== "flower")) {
       if (++k % 30 === 0) { worst = Math.max(worst, inverted(b)); const v = b.volumeRatio(); lo = Math.min(lo, v); hi = Math.max(hi, v); finite &&= b.isFinite(); }
     });
     w.handle({ type: "motions", enabled: false }); run(w, 3);
-    const drift = Math.hypot(b.center[0] - c0[0], b.center[2] - c0[2]), invEnd = inverted(b);
-    const endLimit = slime ? Math.round(0.01 * b.elementCount) : inv0 + 2;
-    check(`${shape} (${texture}): 60 s of idle motions (${n}) — finite, volume 0.88–1.06, ≤ ${slime ? 120 : 60} tets inside out at worst, ≤ ${endLimit} once settled`, n === (shape === "cat" ? 12 : 8) && finite && b.isFinite() && lo > 0.88 && hi < 1.06 && worst <= (slime ? 120 : 60) && invEnd <= endLimit,
+    const drift = Math.hypot(b.center[0] - c0[0], b.center[2] - c0[2]), invEnd = inverted(b), s1 = w.seatCenter(), slide = Math.hypot(s1[0] - s0[0], s1[1] - s0[1]);
+    // (the slime bear's heavy head already presses ~1.6 % of its tets through
+    // the tray at rest — shapes.test.mjs — so its own count is the baseline)
+    const endLimit = slime ? Math.max(Math.round(0.01 * b.elementCount), inv0 + 4) : inv0 + 2;
+    // the mass centre: < 4 mm; the slime bear's head sags back by itself
+    // (≈ 6 mm in 60 s with no motion at all; awake it flows a little longer),
+    // so there only the seat counts (< 1 mm) and the lean stays < 12 mm
+    const lean = shape === "bear" && slime ? 0.012 : 0.004;
+    check(`${shape} (${texture}): 60 s of idle motions (${n}) — finite, volume 0.88–1.06, ≤ ${slime ? 120 : 60} tets inside out at worst, ≤ ${endLimit} once settled`, n === (shape === "bird" ? 8 : 12) && finite && b.isFinite() && lo > 0.88 && hi < 1.06 && worst <= (slime ? 120 : 60) && invEnd <= endLimit,
       `volume ${lo.toFixed(3)}–${hi.toFixed(3)}, inverted ${inv0} → worst ${worst} → ${invEnd}`);
-    check(`${shape} (${texture}): …and it stays where it was (< 4 mm), on the tray`, drift < 0.004 && b.bounds[1] > -0.001 && b.bounds[1] < 0.002, `drift ${(drift * 1000).toFixed(2)} mm`);
+    check(`${shape} (${texture}): …and it stays where it was (centre < ${lean * 1000} mm, seat < 1 mm), on the tray`, drift < lean && slide < 0.001 && b.bounds[1] > -0.001 && b.bounds[1] < 0.002, `drift ${(drift * 1000).toFixed(2)} mm, seat ${(slide * 1000).toFixed(2)} mm`);
   }
 
   // cancelled cleanly by a new jelly, a new shape, or switching motions off
@@ -547,6 +581,22 @@ for (const sh of SHAPES.filter((x) => x.id !== "flower")) {
     w.handle({ type: "reset", base: "berry" });
     const r = drain(w).find((e) => e.type === "reset");
     check("cat: after 4 bites the jelly is stable, the gems left are inside, reset {rare} lists exactly the rare ones left", w.body.isFinite() && r && r.rare.map((g) => `${g.index}:${g.tier}`).sort().join() === rare, `${rare.split(",").filter(Boolean).length} rare left`);
+  }
+}
+
+// 9) v10: the bear's 꿀 핥기 with gems in it: 30 s of licks (6), every gem stays inside
+{
+  const inside = (w, g) => w.type.locator.locate(g.u[0], g.u[1], g.u[2]) >= 0;
+  for (const texture of ["jelly", "slime"]) {
+    const w = new JellyWorld({ shape: "bear", texture }); w.handle({ type: "motions", enabled: false }); run(w, 1.5); drain(w);
+    w.handle({ type: "gemScatter", count: 16 }); w.handle({ type: "gemScatter", count: 2, rare: { index: 4, tier: 1 }, radius: 0.0048 }); run(w, 2.5);
+    const n0 = w.gems.length;
+    w.handle({ type: "motions", enabled: true });
+    let moves = 0, ok = true;
+    run(w, 30, () => { for (const e of drain(w)) if (e.type === "motion") moves++; if (Math.random() < 0.05) ok &&= w.gems.every((g) => inside(w, g)); });
+    w.handle({ type: "motions", enabled: false }); run(w, 2);
+    const b = w.body.bounds, worldIn = w.gems.every((g) => g.wpos.every(Number.isFinite) && g.wpos[1] > b[1] - 0.001 && g.wpos[1] < b[4] + 0.001);
+    check(`bear (${texture}): through 30 s of licks the gems stay inside (material and world)`, moves === 6 && ok && worldIn && w.gems.length === n0 && n0 >= 14 && w.body.isFinite(), `${moves} moves, ${n0} gems`);
   }
 }
 

@@ -48,7 +48,7 @@
     <span class="order-head">
       <small>🐰 토끼 주문</small>
       <i class="order-kind" id="order-kind" hidden></i>
-      <span class="order-chips"><i class="order-time" id="order-time" hidden></i><i class="combo-chip" id="combo-chip" hidden></i><i class="happy-chip" id="happy-chip" hidden></i></span>
+      <span class="order-chips"><i class="order-time" id="order-time" hidden></i><i class="combo-chip" id="combo-chip" hidden></i><i class="happy-chip" id="happy-chip" hidden></i><i class="nope-chip" id="nope-chip" hidden></i></span>
     </span>
     <b class="order-text" id="order-text" role="button" tabindex="0">…</b>
     <span class="order-foot">
@@ -124,9 +124,6 @@
   </section>
 
   <nav class="toolbar" id="toolbar" hidden>
-    <div class="tummy" id="tummy" role="meter" aria-label="토끼 배부름" aria-valuemin="0" aria-valuemax="20" aria-valuenow="0">
-      <span class="tummy-icon" aria-hidden="true">🍮</span><span class="tummy-bar" aria-hidden="true"><i id="tummy-fill"></i></span><b id="tummy-count">0/20</b><span class="tummy-full">너무 배불러요!</span>
-    </div>
     <div class="paints" id="paints" role="toolbar" aria-label="스포이드 물감"></div>
     <div class="actions">
       <button class="round toggle" id="gems" aria-label="보석함" aria-pressed="false">💎</button>
@@ -134,7 +131,7 @@
       <button class="round toggle" id="shape-button" aria-label="모양 고르기" aria-pressed="false"></button>
       <button class="round" id="nudge" aria-label="통통 튀기기">통통</button>
       <button class="round carrot" id="feed" aria-label="토끼에게 먹이기">🥕</button>
-      <button class="round potty" id="toilet" aria-label="토끼 화장실 보내기 (배가 꽉 차면 열려요)" disabled>🚽</button>
+      <button class="round potty" id="toilet" aria-label="토끼 화장실 보내기" disabled>🚽</button>
     </div>
   </nav>
 

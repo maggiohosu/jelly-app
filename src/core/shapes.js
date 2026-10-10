@@ -225,6 +225,18 @@ function makeBear() {
   return {
     sdf,
     mesh: { h: 6.6, bounds: [-38, 8, -32, 38, 70, 36], origin: [0, 10, 0], ...BUDGET },
+    // idle motion (world.js MOVES): every 5 s a 꿀 핥기 (lick). Region: the
+    // big round head with its ears (the belly, arms, feet and seat stay).
+    motions: {
+      interval: 5, moves: ["lick"],
+      regions: {
+        head: [
+          { c: [0, 46, 4], r: [30, 16.5, 25.5], inner: 0.45 },
+          { c: [-20.5, 57.5, 0.6], r: [11, 11, 11], inner: 0.5 },
+          { c: [20.5, 57.5, 0.6], r: [11, 11, 11], inner: 0.5 },
+        ],
+      },
+    },
     look: (anchor) => ({
       dye: () => [16, 34, 4],
       fx: null, glitter: 0, pearls: 0,
@@ -233,6 +245,8 @@ function makeBear() {
         anchor({ kind: "eye", ...face(10.8, 47.5, [0.12, 0, 1]), scale: 0.003 }),
         anchor({ kind: "nose", ...face(0, 43.2), scale: 0.002, color: "#3a2440" }),
         anchor({ kind: "mouth", ...face(0, 40.2), scale: 0.0028 }),
+        // the tongue (hidden: only the lick shows it), pivot in the open mouth
+        anchor({ kind: "tongue", ...face(0, 37.5), scale: 0.0032, hidden: true }),
         anchor({ kind: "blush", ...face(-16, 42.5, [-0.2, -0.05, 1]), scale: 0.0046 }),
         anchor({ kind: "blush", ...face(16, 42.5, [0.2, -0.05, 1]), scale: 0.0046 }),
         // the round ears' inner circles (2.jpg: ring ears)
@@ -512,7 +526,8 @@ function makeAnchor(id) {
     for (let i = 0; i < 50; i++) { const m = (t0 + t1) / 2; if (at(m) < 0) t0 = m; else t1 = m; }
     return [from[0] + d[0] * t0, from[1] + d[1] * t0, from[2] + d[2] * t0];
   };
-  const anchor = ({ kind, from, dir, up, upHint, scale, color }) => {
+  // hidden: drawn only while an idle motion shows it (the bear's tongue)
+  const anchor = ({ kind, from, dir, up, upHint, scale, color, hidden }) => {
     const d = norm(dir), s = surfacePoint(from, d);
     // the rendered surface along the same ray (metres)
     const q = [s[0] * 0.001, (s[1] - bottom) * 0.001 + 0.010, s[2] * 0.001];
@@ -523,6 +538,7 @@ function makeAnchor(id) {
     const n = norm([0, 1, 2].map((k) => N[ia + k] * hit.u + N[ib + k] * hit.v + N[ic + k] * hit.w));
     const out = { kind, u, n, up: orient(n, up || upHint || [0, 1, 0]), scale };
     if (color) out.color = color;
+    if (hidden) out.hidden = true;
     return out;
   };
   // A piece set INSIDE the jelly (the cat's strawberries): `depth` mm under

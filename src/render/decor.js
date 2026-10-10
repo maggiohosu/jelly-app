@@ -1,9 +1,10 @@
 // Face decorations and toppers for the shaped jellies: bead eyes, noses,
 // mouths, blush, cat muzzles / inner ears / whiskers, the cake's cherry, the
-// bird's beak, and the strawberry halves set inside the cat. Positions come
+// bird's beak, the strawberry halves set inside the cat, and the bear's
+// licking tongue. Positions come
 // from the app (tray space) every frame.
 //
-// One InstancedMesh per kind (14 kinds × ≤ 24 instances; hidden kinds cost
+// One InstancedMesh per kind (15 kinds × ≤ 24 instances; hidden kinds cost
 // no draw call, so a face is still ≤ 8 draw calls). The
 // look of each kind is carried by per-vertex attributes of its geometry and a
 // colour per instance, so all kinds share one node graph (three material
@@ -76,6 +77,13 @@
 //             in overlay mode also a depth-biased copy after the jelly, so a
 //             piece just under the front surface reads crisply (see
 //             INNER_BIAS); a soft self-glow keeps it juicy, half-clear fruit.
+//   tongue    the bear's licking tongue (only while it licks; the world rolls
+//             it about +Z to sweep and scales it to poke it out): a rounded
+//             glossy pink tongue hanging along −Y from the anchor (its root
+//             pivot, the open mouth's middle): 1.2 s wide, root at +0.3 s, tip
+//             at −1.45 s, rising off the surface toward the tip (+0.45 s), a
+//             darker centre groove; instance colour = the pink. Drawn like a
+//             topper (never pushed under the surface).
 // Flat pieces are bent to hug a ~32 mm-radius surface at their nominal size.
 import * as THREE from "three/webgpu";
 import {
@@ -105,7 +113,7 @@ import {
 } from "three/tsl";
 
 // Append only (world.js DECOR_KINDS has the same order).
-export const DECOR_KINDS = Object.freeze(["eye", "nose", "mouth", "blush", "muzzle", "earInner", "cherry", "beak", "eyeClosed", "eyeHappy", "mouthOpen", "beakOpen", "whisker", "strawberry"]);
+export const DECOR_KINDS = Object.freeze(["eye", "nose", "mouth", "blush", "muzzle", "earInner", "cherry", "beak", "eyeClosed", "eyeHappy", "mouthOpen", "beakOpen", "whisker", "strawberry", "tongue"]);
 export const DECOR_STRIDE = 12;
 export const DECOR_MAX_PER_KIND = 24;
 // Default colours (sRGB) used when a state's r < 0.
@@ -113,13 +121,13 @@ export const DECOR_DEFAULT_COLORS = Object.freeze({
   eye: "#0e0a12", nose: "#33222a", mouth: "#3b2129", blush: "#ff8fb0",
   muzzle: "#fffafd", earInner: "#ffa9c4", cherry: "#d80c28", beak: "#86aaff",
   eyeClosed: "#0e0a12", eyeHappy: "#0e0a12", mouthOpen: "#c25a74", beakOpen: "#86aaff",
-  whisker: "#1a1216", strawberry: "#e8233f",
+  whisker: "#1a1216", strawberry: "#e8233f", tongue: "#ff7d9c",
 });
 // Suggested sizes (m) for the contract's reference faces.
-export const DECOR_SIZES = Object.freeze({ eye: 0.0028, nose: 0.0016, mouth: 0.003, blush: 0.0045, muzzle: 0.005, earInner: 0.004, cherry: 0.0075, beak: 0.005, eyeClosed: 0.0028, eyeHappy: 0.0028, mouthOpen: 0.0036, beakOpen: 0.005, whisker: 0.0048, strawberry: 0.0046 });
+export const DECOR_SIZES = Object.freeze({ eye: 0.0028, nose: 0.0016, mouth: 0.003, blush: 0.0045, muzzle: 0.005, earInner: 0.004, cherry: 0.0075, beak: 0.005, eyeClosed: 0.0028, eyeHappy: 0.0028, mouthOpen: 0.0036, beakOpen: 0.005, whisker: 0.0048, strawberry: 0.0046, tongue: 0.0032 });
 
 const PATCH = new Set(["blush", "muzzle", "earInner"]);
-const TOPPER = new Set(["cherry", "beak", "beakOpen"]);
+const TOPPER = new Set(["cherry", "beak", "beakOpen", "tongue"]);
 // Inside the jelly, not on it: opaque in both modes, never offset or flattened.
 const INNER = new Set(["strawberry"]);
 const SURFACE_RADIUS = 0.032;      // jelly curvature the flat pieces are bent to
@@ -534,10 +542,28 @@ function buildStrawberry() {
   return B.build();
 }
 
+// The bear's tongue (see the header): a puffy rounded blade from the root
+// (+0.3) to the tip (−1.45), a little wider toward the tip, bent to the
+// surface and rising off it toward the tip, plus a darker centre groove.
+function buildTongue() {
+  const B = new Builder();
+  const k = sagOf("tongue"), groove = lin("#d9466c");
+  const lift = (y) => 0.1 + 0.35 * smooth(0, 1.45, -y);
+  const outline = outlineFromSDF((x, y) => Math.hypot(x / (0.5 + 0.12 * smooth(0.5, -0.8, y)), y / 0.875) - 1, 44, 0.6, 0.875);
+  const from = B.p.length / 3;
+  puff(B, { outline, front: 0.2, back: 0.06, rings: 12, look: () => ({ a: A_(0.62, 0.14), b: B_() }) });
+  shiftFrom(B, from, 0, -0.575, 0);
+  for (let i = from * 3; i < B.p.length; i += 3) { const x = B.p[i], y = B.p[i + 1]; B.p[i + 2] += lift(y) - k * (x * x + y * y); }
+  const pts = [];
+  for (let i = 0; i <= 10; i += 1) { const y = -0.2 - 0.85 * (i / 10); pts.push([0, y, lift(y) + 0.19 * Math.pow(Math.max(0, 1 - Math.pow(Math.abs(y + 0.575) / 0.875, 2.4)), 0.42) - k * y * y]); }
+  tube(B, { pts, radius: (t) => 0.055 * (1 - 0.6 * t), squash: 0.5, seg: 8, look: () => ({ a: A_(0.4, 0.05, 0, 1), b: B_(groove, 1) }) });
+  return B.build();
+}
+
 const BUILDERS = {
   eye: buildEye, nose: buildNose, mouth: buildMouth, blush: buildBlush, muzzle: buildMuzzle, earInner: buildEarInner, cherry: buildCherry, beak: buildBeak,
   eyeClosed: buildEyeClosed, eyeHappy: buildEyeHappy, mouthOpen: buildMouthOpen, beakOpen: buildBeakOpen,
-  whisker: buildWhisker, strawberry: buildStrawberry,
+  whisker: buildWhisker, strawberry: buildStrawberry, tongue: buildTongue,
 };
 
 // ---- material -----------------------------------------------------------------

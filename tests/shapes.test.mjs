@@ -180,7 +180,7 @@ for (const id of NEW) {
   evaluateSurface(stencils, pos, surf);
   computeVertexNormals(surf, stencils.indices, normals);
   const bTris = boundary.flat();
-  const kinds = new Set(["eye", "nose", "mouth", "blush", "muzzle", "earInner", "cherry", "beak", "whisker", "strawberry"]);
+  const kinds = new Set(["eye", "nose", "mouth", "blush", "muzzle", "earInner", "cherry", "beak", "whisker", "strawberry", "tongue"]);
   const decorProblems = [], innerProblems = [];
   let worstCage = 0, worstSurf = 0, shallowest = Infinity;
   for (const d of look.decor) {
@@ -191,6 +191,7 @@ for (const id of NEW) {
     const nl = Math.hypot(...d.n), ul = Math.hypot(...d.up), nu = d.n[0] * d.up[0] + d.n[1] * d.up[1] + d.n[2] * d.up[2];
     if (Math.abs(nl - 1) > 1e-6 || Math.abs(ul - 1) > 1e-6 || Math.abs(nu) > 1e-6) decorProblems.push(`${tag} n/up not orthonormal`);
     if ((d.kind === "strawberry") !== Boolean(d.inside)) decorProblems.push(`${tag} inside flag ${d.inside}`);
+    if ((d.kind === "tongue") !== Boolean(d.hidden)) decorProblems.push(`${tag} hidden flag ${d.hidden}`);
     if (d.inside) {
       // pieces set inside the body: located in a tet, a few mm under the
       // cage surface (deep enough for their relief, shallow enough to show)
@@ -213,7 +214,7 @@ for (const id of NEW) {
     if (locator.locate(...out) >= 0) decorProblems.push(`${tag} n points inward`);
     if (locator.locate(...inn) < 0) decorProblems.push(`${tag} not embedded under the surface`);
   }
-  const need = { pudding: [], cake: ["cherry"], bear: ["eye", "eye", "nose", "mouth", "blush", "blush", "blush", "blush"], cat: ["eye", "eye", "mouth", "whisker", "whisker", "strawberry", "strawberry", "strawberry", "strawberry", "strawberry"], bird: ["eye", "eye", "beak"] }[id];
+  const need = { pudding: [], cake: ["cherry"], bear: ["eye", "eye", "nose", "mouth", "tongue", "blush", "blush", "blush", "blush"], cat: ["eye", "eye", "mouth", "whisker", "whisker", "strawberry", "strawberry", "strawberry", "strawberry", "strawberry"], bird: ["eye", "eye", "beak"] }[id];
   const have = look.decor.map((d) => d.kind).sort().join(","), wanted = need.slice().sort().join(",");
   check(`${id}: decorations ${need.length ? need.join(" ") : "(none)"}`, have === wanted, have);
   check(`${id}: decorations sit on the rendered surface, unit outward normals`, decorProblems.length === 0,
@@ -223,8 +224,8 @@ for (const id of NEW) {
 
 // ---------------------------------------------------------------- idle motions (data)
 {
-  check("idle motions only for the cat and the bird", ["flower", "pudding", "cake", "bear"].every((id) => shapeMotions(id) === null) && shapeMotions("cat") && shapeMotions("bird"));
-  for (const [id, interval, moves, need] of [["cat", 5, ["yawn", "punch"], ["head", "pawL", "pawR"]], ["bird", 7, ["flap", "chirp"], ["head", "wingL", "wingR", "tail"]]]) {
+  check("idle motions only for the bear, the cat and the bird", ["flower", "pudding", "cake"].every((id) => shapeMotions(id) === null) && shapeMotions("bear") && shapeMotions("cat") && shapeMotions("bird"));
+  for (const [id, interval, moves, need] of [["bear", 5, ["lick"], ["head"]], ["cat", 5, ["yawn", "punch"], ["head", "pawL", "pawR"]], ["bird", 7, ["flap", "chirp"], ["head", "wingL", "wingR", "tail"]]]) {
     const M = shapeMotions(id), cage = makeShapeCage(id), P = cage.pos, n = P.length / 3;
     const unit = (v) => Math.abs(Math.hypot(...v) - 1) < 1e-9;
     check(`${id}: motions every ${interval} s (${moves.join(" / ")}), frozen and cached`, M === shapeMotions(id) && Object.isFrozen(M) && M.interval === interval && M.moves.join() === moves.join() && Object.isFrozen(M.regions));
@@ -247,7 +248,8 @@ for (const id of NEW) {
     const centre = (r) => { const parts = M.regions[r], c = [0, 0, 0]; let s = 0; for (let i = 0; i < n; i++) { const w = motionWeight(parts, P[i * 3], P[i * 3 + 1], P[i * 3 + 2]); s += w; for (let k = 0; k < 3; k++) c[k] += w * P[i * 3 + k]; } return c.map((v) => v / s); };
     const dotA = (v, a) => v[0] * a[0] + v[1] * a[1] + v[2] * a[2];
     const all = centre("head").map((_, k) => P.filter((_, i) => i % 3 === k).reduce((a, b) => a + b, 0) / n);
-    if (id === "cat") ok &&= dotA(centre("pawL"), M.axes.face) > dotA(all, M.axes.face) + 0.01 && centre("head")[1] > all[1] + 0.005;
+    if (id === "bear") ok &&= centre("head")[1] > all[1] + 0.008;
+    else if (id === "cat") ok &&= dotA(centre("pawL"), M.axes.face) > dotA(all, M.axes.face) + 0.01 && centre("head")[1] > all[1] + 0.005;
     else ok &&= dotA(centre("wingL"), M.axes.side) < dotA(all, M.axes.side) - 0.01 && dotA(centre("wingR"), M.axes.side) > dotA(all, M.axes.side) + 0.01;
     check(`${id}: motion regions are soft weights in 0..1 on real parts of the cage (nodes / full-weight)`, ok, report.join(", "));
   }

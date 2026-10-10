@@ -118,7 +118,9 @@ async function boot() {
   audio.setTexture(settings.texture);
   audio.onNote((pulse) => { view.pulse(0.08 + 0.22 * pulse.velocity); needsRender = true; });
   rabbit.setOutfit?.(progress.outfit);
-  rabbit.setFullness?.(progress.fullness / progress.fullnessMax);
+  // ?tummy=full (testing): fill the bunny's secret tummy up to its threshold
+  if (params.get("tummy") === "full" && !progress.isFull) { progress.state.fullness = progress.fullnessThreshold; progress.save(); }
+  rabbit.setFullness?.(progress.fullnessRatio);
   rabbit.setHappy?.(progress.happyTurns > 0);
 
   // GPU errors only affect the caustic passes: drop those. A lost device leaves
@@ -303,9 +305,10 @@ async function boot() {
     return { index, tier: Math.max(0, progress.state.rare[index]) };
   }
 
-  // ---- idle motions of the cat / bird jellies: their sounds ----
-  // yawn / flap at the start of the move; punches, chirps and the plop on
-  // their own cues (world.js MOVES … cues), so each sound meets its pose.
+  // ---- idle motions of the cat / bird / bear jellies: their sounds ----
+  // yawn / flap at the start of the move; punches, chirps, the plop and the
+  // bear's honey licks (날름, one per "lick" cue) on their own cues
+  // (world.js MOVES … cues), so each sound meets its pose.
   function onMotion(e) {
     needsRender = true;
     if (e.name === "yawn") audio.catYawn?.();
@@ -316,6 +319,7 @@ async function boot() {
     if (e.cue === "punch") audio.catPunch?.((e.index | 0) % 2);
     else if (e.cue === "chirp") audio.birdChirp?.(1);
     else if (e.cue === "plop" || e.cue === "land") audio.birdPlop?.();
+    else if (e.cue === "lick") audio.bearLick?.();
   }
 
   // ---- optics worker ----
@@ -561,18 +565,20 @@ async function boot() {
     $("order-new").disabled = on;
     refreshToilet();
   }
-  // 🚽 only when full and nothing else is going on (a visit, a card pull, a
-  // gift box); it pulses while the bunny waits for it.
+  // 🚽 v10: any time, unless something else is going on (a visit, the card
+  // pull overlay / a pull in progress, a gift box; reward cards and notices
+  // just queue up after the trip). Fullness is a secret, so the
+  // button never shows whether the bunny needs to go (no "ready" pulse).
+  // Popups open and close outside progress changes: a light poll keeps it in step.
   const popupOpen = () => !$("gacha").hidden || !$("gift").hidden || gameUI.busy;
   function refreshToilet() {
-    const button = $("toilet"), full = progress.canToilet;
-    button.disabled = !full || eating;   // eating covers every bunny visit (rabbit.busy is still true inside its "done")
-    button.classList.toggle("ready", full && !eating);
-    button.setAttribute("aria-label", full ? "토끼 화장실 보내기" : "토끼 화장실 보내기 (배가 꽉 차면 열려요)");
+    const button = $("toilet"), off = eating || popupOpen();   // eating covers every bunny visit (rabbit.busy is still true inside its "done")
+    if (button.disabled !== off) button.disabled = off;
   }
-  // the bunny's belly / smile and the gauge follow every progress change
+  setInterval(refreshToilet, 250);
+  // the bunny's belly / smile and the order card's chips follow every progress change
   function syncTummy() {
-    rabbit.setFullness?.(progress.fullness / progress.fullnessMax);
+    rabbit.setFullness?.(progress.fullnessRatio);
     rabbit.setHappy?.(progress.happyTurns > 0);
     gameUI.renderTummy();
     refreshToilet();
@@ -708,7 +714,7 @@ async function boot() {
   }
 
   async function feed() {
-    if (params.get("outcome") === "toilet") { goToilet({ force: true }); return; }
+    if (params.get("outcome") === "toilet") { goToilet(); return; }
     if (eating || rabbit.busy || coinShower.busy || view.hidden || !lastFrame) return;
     setEating(true);
     input.cancel();
@@ -719,15 +725,17 @@ async function boot() {
     const elapsed = orderElapsed(), peeks = orderPeeks;
     const jelly = jellyDescriptor(), sigma = jelly.sigma;
     // Stars: scoreOrder (base → unmet conditions cap ★2 → rare +1) → the
-    // tummy (full −1 | happy +1 on a touched jelly) → the outcome roll on the
-    // final stars. The reward card and the bunny's reaction show the final
-    // stars; feed() uses up the happy turn / pays the overflow.
+    // tummy (full | nope −1, happy +1 on a touched jelly, total ±1) → the
+    // outcome roll on the final stars. The reward card and the bunny's
+    // reaction show the final stars; feed() uses up the happy turn / pays the
+    // overflow, and feed / spit / kick each use up a nope turn.
     const base = scoreOrder(order, jelly);
     const mod = progress.modifyStars(base.stars, { touched });
     const result = { ...base, stars: mod.stars, mood: moodFor(mod.stars) };
     // ★1 only: 1/3 퉤 (one bite), 1/5 a sniff, a head shake and a kick (no bite)
     // (?outcome=eat|spit|kick forces an outcome — for testing the animations;
-    // ?outcome=toilet makes 🥕 start a toilet trip, full or not)
+    // ?outcome=toilet makes 🥕 start a toilet trip — a real one when full, add
+    // ?tummy=full to fill the tummy first)
     const forced = params.get("outcome");
     const outcome = ["eat", "spit", "kick"].includes(forced) ? forced : rollOutcome(mod.stars);
     // a secret recipe about to be found: the bunny's special reaction
@@ -778,7 +786,7 @@ async function boot() {
             if (data.dir) pendingEvents.push({ type: "kick", dir: data.dir, strength: data.strength ?? 0.8 });
             audio.kick?.();
             const lost = progress.kick();
-            gameUI.enqueue(() => gameUI.showReward({ kind: "kick", coins: lost.lost, starMod: mod.mod }));
+            gameUI.enqueue(() => gameUI.showReward({ kind: "kick", coins: lost.lost, starMod: mod, nopeTurns: lost.nopeTurns }));
             if (lost.lost > 0) gameUI.loseCoins(lost.lost);
             gameUI.showAchievements(lost.achievements);
             gameUI.renderHud({ animateCoins: true });
@@ -801,7 +809,7 @@ async function boot() {
               audio.spit(0.8, land);
             }
             const lost = progress.spit();
-            gameUI.enqueue(() => gameUI.showReward({ kind: "spit", coins: lost.lost, starMod: mod.mod }));
+            gameUI.enqueue(() => gameUI.showReward({ kind: "spit", coins: lost.lost, starMod: mod, nopeTurns: lost.nopeTurns }));
             if (lost.lost > 0) gameUI.loseCoins(lost.lost);
             gameUI.showAchievements(lost.achievements);
             gameUI.renderHud({ animateCoins: true });
@@ -812,7 +820,7 @@ async function boot() {
             audio.squeak?.(result.mood === "special" || secretAhead ? "happy" : result.mood);
             if (result.stars === 4) audio.special?.();
             reward = progress.feed({ stars: mod.stars, starMod: mod, order, result, jelly, card, elapsed, peeks });
-            queueFollowUps(reward, result, order);
+            queueFollowUps(reward, result, order, mod);
             const per = Math.max(1, Math.round(reward.coins / 14)), n = Math.ceil(reward.coins / per);
             let collected = 0;
             coinShower.pour({
@@ -847,15 +855,19 @@ async function boot() {
       },
     });
   }
-  // 🚽 The toilet trip (v9, only when full; force = the ?outcome=toilet test):
-  // a winged potty pops in beside the tray, the bunny hops on, strains,
-  // flushes (→ progress.toilet(): tummy empty, 5 happy meals, badges), beams
-  // and hops off. The jelly is never touched. Meanwhile feeding / new jellies
-  // are blocked, the time bonus and the memory order's 5 s stand still and
-  // the cat / bird hold their idle motions.
+  // 🚽 The toilet trip (v10: any time). Whether the bunny really needs to go
+  // is decided when the button is pressed (progress.isFull, a secret):
+  //  • full → the real trip: a winged potty pops in beside the tray, the bunny
+  //    hops on, strains, flushes (→ progress.toilet(): tummy empty, a new
+  //    hidden threshold, 3 happy meals, badges), beams and hops off;
+  //  • not full → a nope trip (rabbit full:false): it hops on, sits, shakes
+  //    its head 절레절레 (→ progress.toilet(): nopeTurns = 2) and hops off.
+  // The jelly is never touched. Meanwhile feeding / new jellies are blocked,
+  // the time bonus and the memory order's 5 s stand still and the cat / bird
+  // / bear hold their idle motions.
   let strainTimer = 0;
-  function goToilet({ force = false } = {}) {
-    if (!(progress.canToilet || force) || eating || rabbit.busy || coinShower.busy || view.hidden || !lastFrame || popupOpen()) return false;
+  function goToilet() {
+    if (eating || rabbit.busy || coinShower.busy || view.hidden || !lastFrame || popupOpen()) return false;
     setEating(true);
     input.cancel();
     dismissHint();
@@ -864,11 +876,15 @@ async function boot() {
     holdOrderClock(true);
     gameUI.holdMemo(true);
     pendingEvents.push({ type: "motions", enabled: false });
-    let trip = null, flushed = false;
-    const flush = () => { if (!flushed) { flushed = true; trip = progress.toilet(); } };
+    const full = progress.isFull;
+    let trip = null;
+    // progress.toilet() once: at the flush (full) / the head shake (nope),
+    // or at "done" if that event never came (skipped)
+    const settle = () => { if (!trip) trip = progress.toilet(); };
     const stopStrain = () => { clearInterval(strainTimer); strainTimer = 0; };
     rabbit.toilet({
       ...visitPlace(),
+      full,
       onEvent: (type, data = {}) => {
         needsRender = true;
         switch (type) {
@@ -882,23 +898,26 @@ async function boot() {
             strainTimer = setInterval(() => { if (performance.now() > until) stopStrain(); else audio.strain?.(); }, 600);
             break;
           }
-          case "flush": stopStrain(); audio.flush?.(); flush(); break;
+          case "flush": stopStrain(); audio.flush?.(); if (full) settle(); break;
+          case "shake": audio.squeak?.("no"); if (!full) settle(); break;   // 절레절레: not needed after all
           case "smile": audio.happyChime?.(); break;
           case "wand": audio.wandTwinkle?.(); break;
           case "toiletOut": audio.pop(0.45); break;
           case "done": {
             stopStrain();
-            flush();                                       // never left full by a skipped event
+            settle();                                      // never left full by a skipped event
             pendingEvents.push({ type: "motions", enabled: true });
             holdOrderClock(false);
             gameUI.holdMemo(false);
             setEating(false);
-            if (trip) {
+            if (trip?.real) {
               gameUI.enqueue(() => {
                 gameUI.confetti.burst({ x: innerWidth / 2, y: innerHeight * 0.24, kind: "hearts", count: 50 });
                 return gameUI.notice({ icon: `<span class="big-emoji">😊</span>`, title: "기분 최고!", text: `다음 ${trip.happyTurns}번은 꾸민 젤리에 별 ★+1`, tone: "happy" });
               });
               gameUI.showAchievements(trip.achievements);
+            } else if (trip) {
+              gameUI.enqueue(() => gameUI.notice({ icon: `<span class="big-emoji">🚽</span>`, title: "아직 안 마려웠대요…", text: `다음 ${trip.nopeTurns}번은 별 −1`, tone: "nope" }));
             }
             gameUI.renderHud();
             break;
@@ -913,12 +932,13 @@ async function boot() {
   // After a meal, one after another: the reward card (with its breakdown),
   // a new colour, colour-book milestones, a secret recipe, the golden free
   // card, achievements, then a gift box per level-up.
-  function queueFollowUps(r, result, order) {
+  // (tummy = the modifyStars() result behind the stars, for the badges; the
+  // tummy filling up is a secret: no toast — the burp and the badge tell.)
+  function queueFollowUps(r, result, order, tummy = null) {
     gameUI.enqueue(() => gameUI.showReward({
-      kind: "eat", ...result, coins: r.coins, xp: r.xp, levelUps: r.levelUps, breakdown: r.breakdown, orderKind: order.kind, streak: r.streak, starMod: r.starMod,
+      kind: "eat", ...result, coins: r.coins, xp: r.xp, levelUps: r.levelUps, breakdown: r.breakdown, orderKind: order.kind, streak: r.streak,
+      starMod: tummy || r.starMod, nopeTurns: r.nopeTurns, happyTurns: r.happyTurns,
     }));
-    // the tummy just filled up: say what the 🚽 is for (once, right after the card)
-    if (r.becameFull) gameUI.enqueue(async () => { toast("🍮 토끼 배가 꽉 찼어요! 🚽 화장실에 보내 주세요! (그동안 별 −1)", 3600); await new Promise((ok) => setTimeout(ok, 2400)); });
     if (r.newColor) {
       const found = progress.state.colorBook.length;
       gameUI.enqueue(() => { audio.discovery?.(); return gameUI.notice({ icon: colorSwatch(r.newColor), title: `새 색 발견! ${r.newColor}`, text: `색 도감 ${found} / ${COLOR_NAMES.length}`, tone: "color" }); });

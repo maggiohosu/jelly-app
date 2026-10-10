@@ -9,6 +9,7 @@
 // the tray, bumps into the rim and stays there. "toilet" never touches it.
 //
 // Query: ?lite=1 (WebGL2)  ?quality=high|medium|low  ?outcome=eat|spit|kick|refuse|toilet
+//        ?full=0 (toilet: "nope" trip — sits, shakes its head, leaves; no flush)
 //        ?fullness=0..1 (belly; 1 = full: tummy hold + burp)  ?happy=1 (smiling buff face)
 //        ?wand=wand (wand on the back, flourish on arrival / at the toilet smile)
 //        ?mood=happy|ok|sad|special  ?bites=4  ?shape=flower|bear|cat|bird|cake|pudding
@@ -34,6 +35,7 @@ let bites = num("bites", 4);
 let picky = q.get("picky") === "1";
 let fullness = num("fullness", 0);
 let happy = q.get("happy") === "1";
+let full = q.get("full") !== "0"; // toilet only: false = "nope" trip
 const outfit = q.get("outfit") === "all"
   ? { head: "ribbon", face: "glasses", neck: "scarf", back: "wings", wand: q.get("wand") }
   : { head: q.get("head"), face: q.get("face"), neck: q.get("neck"), back: q.get("back"), wand: q.get("wand") };
@@ -259,13 +261,13 @@ function play(m = mood) {
   mood = m;
   resetJelly();
   R.events.length = 0;
-  log(`— play ${outcome} · ${mood} · ${shape} ×${bites} (${quality})${picky ? " · picky" : ""}${happy ? " · happy" : ""}${fullness ? ` · full ${fullness}` : ""}`);
+  log(`— play ${outcome}${outcome === "toilet" && !full ? " (nope)" : ""} · ${mood} · ${shape} ×${bites} (${quality})${picky ? " · picky" : ""}${happy ? " · happy" : ""}${fullness ? ` · full ${fullness}` : ""}`);
   playStart = clock;
   const sp = spec();
   placeSeat();
   placeCamera();
   rabbit.play({
-    position: seat, faceTo, outcome, mood, bites, jellyColor, picky,
+    position: seat, faceTo, outcome, mood, bites, jellyColor, picky, full,
     jelly: { center: [J.c.x, J.c.y, J.c.z], width: Math.max(sp.w, sp.d), height: sp.h },
     onEvent(type, data) {
       const t = clock - playStart;
@@ -277,7 +279,8 @@ function play(m = mood) {
               : type === "spit" ? ` v ${fmt(data.velocity)}`
                 : type === "kick" ? ` dir ${fmt(data.dir)} ×${data.strength} @${fmt(data.point)}`
                   : type === "react" || type === "refuse" ? ` ${data.mood}` : type === "hop" ? ` ${data.phase}#${data.index}`
-                    : type === "hopOn" || type === "hopOff" ? ` → ${fmt(data.to)}` : type === "strain" || type === "wand" || type === "burp" ? ` ${data.duration}s` : "";
+                    : type === "hopOn" || type === "hopOff" ? ` → ${fmt(data.to)}` : type === "strain" || type === "wand" || type === "burp" ? ` ${data.duration}s`
+                      : type === "shake" ? ` ${data.duration}s ×${data.swings}` : "";
       log(`${t.toFixed(2).padStart(5)}s ${type}${extra}`);
       if (type === "bite") J.sizeGoal *= 0.87;
       if (type === "finish") J.gone = true;
@@ -356,7 +359,8 @@ function button(label, on, fn) {
 const sep = () => hud.appendChild(Object.assign(document.createElement("span"), { className: "sep" }));
 function updateHud() {
   hud.innerHTML = "";
-  for (const [k, label] of [["eat", "🥄 eat"], ["spit", "💦 spit"], ["kick", "🦶 kick"], ["refuse", "🙅 refuse"], ["toilet", "🚽 toilet"]]) button(label, outcome === k, () => { outcome = k; play(mood); });
+  for (const [k, label] of [["eat", "🥄 eat"], ["spit", "💦 spit"], ["kick", "🦶 kick"], ["refuse", "🙅 refuse"], ["toilet", "🚽 toilet"]]) button(label, outcome === k && (k !== "toilet" || full), () => { outcome = k; full = true; play(mood); });
+  button("🙅🚽 nope", outcome === "toilet" && !full, () => { outcome = "toilet"; full = false; play(mood); });
   button("🧐 picky", picky, () => { picky = !picky; play(mood); });
   button("😊 happy", happy, () => { happy = !happy; rabbit.setHappy(happy); play(mood); });
   for (const f of [0, 0.5, 1]) button(`배 ${f}`, fullness === f, () => { fullness = f; rabbit.setFullness(f); updateHud(); if (paused) render(); });
@@ -400,6 +404,7 @@ R.seek = (t, opts = {}) => {
   if (opts.outfit) rabbit.setOutfit(opts.outfit);
   if (opts.fullness !== undefined) { fullness = opts.fullness; rabbit.setFullness(fullness); }
   if (opts.happy !== undefined) { happy = Boolean(opts.happy); rabbit.setHappy(happy); }
+  if (opts.full !== undefined) full = opts.full !== false;
   clock = 0;
   play(opts.mood ?? mood);
   const n = Math.round(t * 60);

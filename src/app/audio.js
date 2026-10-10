@@ -20,6 +20,7 @@
 //                    the bunny's toilet trip: 뿅 onto the potty, 끄응, the
 //                    water swirl, the happy 방긋 chime, a full tummy's 끄억 and
 //                    the magic wand's star dust
+//   • bearLick()                     the bear jelly's honey lick 날름
 //
 // iOS rules: the AudioContext must be created/resumed synchronously inside a
 // user gesture (unlock()); the 'ambient' audio session mixes with the user's
@@ -119,6 +120,7 @@ const FLUSH_LEVEL = 0.16, FLUSH_DUR = 1.5, BUBBLE_LEVEL = 0.05;
 const BURP_LEVEL = 0.13;
 const HAPPY_CHIME = [91, 96, 100, 103];                                     // G6 C7 E7 G7
 const WAND_SPARKLE = [108, 105, 103, 100, 98, 96, 98, 100, 103, 105, 108];  // C8 ↘ C7 ↗ C8
+const LICK_LEVEL = 0.11, LICK_WET = 0.07;                                   // bear 날름 (soft, under the squeak)
 
 const mtof = (m) => 440 * Math.pow(2, (m - 69) / 12);
 const clamp = (x, lo, hi) => (x < lo ? lo : x > hi ? hi : x);
@@ -1454,6 +1456,51 @@ export class JellyAudio {
     this._schedule(t0, tag, (t) => this._riser(t, 0.25, 0.012, tag));
     this._schedule(t0 + 0.08, tag, (t) => this._shimmer(t, 0.55, 0.022, tag, 10500));
     this._flushFx(now);
+    return true;
+  }
+
+  // ------------------------------------------------- the bear jelly (v10)
+  //
+  // Same conventions: true when it sounded, rate-limited (_gate), calls
+  // inside the gap dropped. main.js plays one per "lick" motion cue (the
+  // bear licks its honey twice per motion).
+
+  /**
+   * The bear jelly licking honey '날름' (~0.3 s): a tiny nasal '날' (a soft
+   * voiced blip ~520 → 700 Hz through a low-pass opening ~900 → 2.2 kHz), a
+   * wet slurp as the tongue sweeps (band-passed noise gliding ~1.2 → 3.4 kHz,
+   * a short upward 'sip' chirp) and a closed-mouth '름' (~640 → 480 Hz,
+   * low-pass closing to ~700 Hz) with a tiny smack. Cute and soft.
+   * ≥ 0.12 s apart.
+   */
+  bearLick() {
+    if (!this._ready()) return false;
+    const now = this._now();
+    if (!this._gate("lick", 0.12, now)) return false;
+    const ctx = this.ctx, rnd = this._random, t = now + 0.003, L = LICK_LEVEL, p = 0.94 + 0.12 * rnd();
+    const v = this._openVoice(this._fx, FX_VOICES, t, (rnd() - 0.5) * 0.3, "lick");
+    this._syllable(v, t, 0.08, [520 * p, 700 * p, 660 * p], L * 0.7, 900, 2200, 0, 0);          // 날
+    // the wet slurp: noise through a band-pass sweeping up as the tongue sweeps
+    const ts = t + 0.05, D = 0.16;
+    const src = this._noiseSource(v, ts, ts + D + 0.01);
+    const bp = this._filter(v, "bandpass", 1200, 2.4);
+    this._contour(bp.frequency, ts, D, [[0, 1200 * p], [0.6, 2600 * p], [1, 3400 * p]], true);
+    const g = this._gain(v, 0);
+    this._contour(g.gain, ts, D, [[0, 0], [0.2, LICK_WET], [0.7, LICK_WET * 0.6], [1, 0]], false);
+    src.connect(bp); bp.connect(g); g.connect(v.gain);
+    // sip: a short rising sine (the tongue's tip leaving the honey)
+    const tc = t + 0.11;
+    const o = this._source(v, ctx.createOscillator(), tc, tc + 0.06);
+    o.frequency.setValueAtTime(900 * p, tc);
+    o.frequency.exponentialRampToValueAtTime(1700 * p, tc + 0.045);
+    const og = this._gain(v, 0);
+    og.gain.setValueAtTime(0, tc);
+    og.gain.linearRampToValueAtTime(L * 0.25, tc + 0.006);
+    og.gain.setTargetAtTime(0, tc + 0.008, 0.014);
+    o.connect(og); og.connect(v.gain);
+    this._syllable(v, t + 0.17, 0.12, [640 * p, 600 * p, 480 * p], L * 0.55, 1500, 700, 0, 0);  // 름
+    this._partial(v, t + 0.29, 1500 * p, L * 0.12, 0.01, 0.0006, 5.75);                       // smack
+    this._closeVoice(this._fx, v);
     return true;
   }
 

@@ -11,15 +11,23 @@
 // every owned rare gem gets a stock of 10, old-format orders are dropped,
 // the colour book is seeded from the album, no retroactive gift boxes).
 //
-// v9 (the bunny's tummy): `fullness` 0..FULLNESS_MAX counts eaten jellies
-// (eat outcomes only); a full bunny takes one star off every evaluation until
-// it goes to the toilet (toilet()), which empties the tummy and makes it happy
-// for HAPPY_TURNS buffed meals (+1 star on touched jellies). Star pipeline:
+// v9 (the bunny's tummy): `fullness` counts eaten jellies (eat outcomes
+// only); a full bunny takes one star off every evaluation until it goes to
+// the toilet (toilet()), which empties the tummy and makes it happy for
+// HAPPY_TURNS buffed meals (+1 star on touched jellies).
+// v10: the tummy is a secret. Each cycle rolls a hidden threshold
+// `fullnessThreshold` (integer FULLNESS_MIN..FULLNESS_MAX, uniform; rolled on
+// a fresh start / an old save and after every REAL toilet trip; saved);
+// full = fullness ≥ threshold. The toilet can be tried any time: not full →
+// a "nope" trip (헛걸음) that sets nopeTurns = NOPE_TURNS (never added up),
+// −1 star on the next NOPE_TURNS outcomes. Star pipeline:
 //   orders.scoreOrder (base score → unmet conditions cap ★2 → rare +1)
-//   → progress.modifyStars (full −1 | happy +1, clamp 1..4, ★4 overflow coins)
+//   → progress.modifyStars (full | nope −1, happy +1, total clamped to ±1,
+//     stars clamped 1..4, ★4 overflow coins)
 //   → orders.rollOutcome (★1: spit / kick / eat) → feed / spit / kick.
 // Card-only outfits (witch hat, wand) are owned via `outfitCards`. Old saves
-// load with fullness 0, happyTurns 0, toiletCount 0, no outfit cards.
+// load with fullness 0, happyTurns 0, toiletCount 0, no outfit cards; saves
+// without a threshold roll one (and are full right away if they are past it).
 import { makeOrder, nameColor, familyOf, colorInfo, COLOR_NAMES, ORDER_KINDS } from "./orders.js";
 import {
   OUTFITS, OUTFIT_SLOTS, CARD_OUTFITS, THEMES, SECRET_RECIPES, COLOR_BOOK_REWARDS, ACHIEVEMENTS, SECRET_COINS,
@@ -48,11 +56,18 @@ export const KIND_LEVEL = Object.freeze({ golden: 3, memory: 4, picky: 5 });
 export const KIND_ODDS = Object.freeze({ golden: 1 / 7, memory: 1 / 5, picky: 1 / 10 });
 export const KIND_COINS = Object.freeze({ normal: 1, memory: 1, golden: 3, picky: 2 });
 const ALBUM_MAX = 60;
-// v9 tummy: eaten jellies until full, buffed meals after a toilet trip, and
-// the flat bonus for a happy +1 that would go past ★4.
-export const FULLNESS_MAX = 20;
-export const HAPPY_TURNS = 5;
+// v9/v10 tummy: the hidden threshold's range (eaten jellies until full),
+// buffed meals after a real toilet trip, penalised outcomes after a nope trip
+// and the flat bonus for a happy +1 that would go past ★4.
+export const FULLNESS_MIN = 5;
+export const FULLNESS_MAX = 15;
+export const HAPPY_TURNS = 3;
+export const NOPE_TURNS = 2;
 export const OVERFLOW_COINS = 10;
+/** A hidden fullness threshold: integer FULLNESS_MIN..FULLNESS_MAX (uniform). */
+export const rollFullnessThreshold = (random = Math.random) =>
+  Math.min(FULLNESS_MAX, FULLNESS_MIN + Math.floor(random() * (FULLNESS_MAX - FULLNESS_MIN + 1)));
+const validThreshold = (v) => Number.isInteger(v) && v >= FULLNESS_MIN && v <= FULLNESS_MAX;
 
 /** Coin multiplier of a ★3/★4 feed by the streak after counting it. */
 export const comboMultiplier = (streak) => (streak >= 5 ? 2 : streak >= 3 ? 1.5 : streak >= 2 ? 1.2 : 1);
@@ -113,14 +128,18 @@ export function freshProgress() {
     streak: 0, bestStreak: 0, freeCards: 0, recentNames: [], orderSerial: 0, lastKind: "normal", peeks: 0,
     stats: freshStats(), achievements: {}, colorBook: [], colorRewards: [], secrets: [], outfit: emptyOutfit(), title: null,
     fullness: 0, happyTurns: 0, toiletCount: 0, outfitCards: [],
+    fullnessThreshold: null, nopeTurns: 0,   // threshold: rolled by Progress (see rollFullnessThreshold)
   };
 }
 
 const count = (v, fallback = 0) => (Number.isFinite(v) ? Math.max(0, Math.floor(v)) : fallback);
 const isObj = (v) => v && typeof v === "object" && !Array.isArray(v);
 
-/** A saved v1 state (v7 or v8) → a complete v8 state (additive migration). */
-function migrate(saved) {
+/**
+ * A saved v1 state (v7 / v8 / v9) → a complete v10 state (additive
+ * migration). `random` rolls a missing hidden fullness threshold.
+ */
+function migrate(saved, random = Math.random) {
   const s = { ...freshProgress(), ...saved };
   s.coins = count(saved.coins, WELCOME_COINS);
   s.xp = count(saved.xp);
@@ -133,7 +152,11 @@ function migrate(saved) {
   if (!Array.isArray(s.album)) s.album = [];
   s.order = saved.order && saved.order.version === 2 ? saved.order : null;
   for (const key of ["feeds", "pulls", "streak", "bestStreak", "freeCards", "orderSerial", "peeks", "happyTurns", "toiletCount"]) s[key] = count(saved[key]);
-  s.fullness = Math.min(FULLNESS_MAX, count(saved.fullness));
+  s.happyTurns = Math.min(HAPPY_TURNS, s.happyTurns);   // a v9 save may still have 5
+  s.nopeTurns = Math.min(NOPE_TURNS, count(saved.nopeTurns));
+  // v9 saves (and junk) roll a hidden threshold; past it → full right away
+  s.fullnessThreshold = validThreshold(saved.fullnessThreshold) ? saved.fullnessThreshold : rollFullnessThreshold(random);
+  s.fullness = Math.min(s.fullnessThreshold, count(saved.fullness));
   s.outfitCards = (Array.isArray(saved.outfitCards) ? saved.outfitCards : []).filter((id, i, a) => CARD_OUTFITS.some((o) => o.id === id) && a.indexOf(id) === i);
   s.seenLevel = count(saved.seenLevel, 1) || 1;
   s.recentNames = (Array.isArray(saved.recentNames) ? saved.recentNames : []).filter((n) => typeof n === "string").slice(-RECENT_NAMES);
@@ -159,16 +182,23 @@ function migrate(saved) {
 }
 
 export class Progress {
-  constructor(storage = globalThis.localStorage, random = Math.random) {
+  /**
+   * storage: localStorage-like; random: card pulls, orders, coin losses,
+   * gifts; options.tummyRandom: the hidden fullness threshold's rolls
+   * (separate so tests can pin it without shifting the other sequences).
+   */
+  constructor(storage = globalThis.localStorage, random = Math.random, { tummyRandom = Math.random } = {}) {
     this.storage = storage;
     this.random = random;
-    this.state = freshProgress();
+    this.tummyRandom = tummyRandom;
+    this.state = this.fresh();
     this.listeners = [];
     try {
       const saved = JSON.parse(storage?.getItem(PROGRESS_KEY) || "null");
-      if (saved && saved.version === 1) this.state = migrate(saved);
+      if (saved && saved.version === 1) this.state = migrate(saved, tummyRandom);
     } catch { /* corrupted / private mode: start fresh */ }
   }
+  fresh() { return { ...freshProgress(), fullnessThreshold: rollFullnessThreshold(this.tummyRandom) }; }
 
   onChange(fn) { this.listeners.push(fn); }
   emit() { for (const fn of this.listeners) fn(this); }
@@ -304,59 +334,81 @@ export class Progress {
     return true;
   }
 
-  // ------------------------------------------------------------ the tummy (v9)
-  /** Jellies eaten since the last toilet trip, 0..FULLNESS_MAX. */
+  // ------------------------------------------------------------ the tummy (v9 / v10)
+  /** Jellies eaten since the last real toilet trip (0..threshold; secret in the UI). */
   get fullness() { return this.state.fullness; }
-  get fullnessMax() { return FULLNESS_MAX; }
+  /** The hidden threshold of this cycle (FULLNESS_MIN..FULLNESS_MAX). */
+  get fullnessThreshold() { return this.state.fullnessThreshold; }
+  /** The bunny's belly roundness 0..1 = min(1, fullness / threshold) (rabbit.setFullness). */
+  get fullnessRatio() { return Math.min(1, this.state.fullness / this.state.fullnessThreshold); }
   /** Full: every evaluation loses a star until the bunny goes to the toilet. */
-  get isFull() { return this.state.fullness >= FULLNESS_MAX; }
-  /** The toilet button may be used (the UI also waits for no bunny visit in progress). */
-  get canToilet() { return this.isFull; }
-  /** Buffed meals left after the last toilet trip (+1 star on touched jellies). */
+  get isFull() { return this.state.fullness >= this.state.fullnessThreshold; }
+  /** v10: the toilet may be tried any time (the UI still waits for no visit / popup). */
+  get canToilet() { return true; }
+  /** Buffed meals left after the last real toilet trip (+1 star on touched jellies). */
   get happyTurns() { return this.state.happyTurns; }
+  /** Penalised outcomes left after a nope trip (−1 star on every outcome). */
+  get nopeTurns() { return this.state.nopeTurns; }
   get toiletCount() { return this.state.toiletCount; }
 
   /**
    * The tummy's star modifier: a pure step between orders.scoreOrder and
    * orders.rollOutcome (nothing is changed or consumed here).
-   *   full                          → stars − 1, at least ★1 (mod "full"; a
-   *                                   penalised ★1 then rolls spit / kick like
-   *                                   any ★1 — the hard mode)
-   *   else happyTurns > 0 & touched → stars + 1 (mod "happy"); past ★4 it stays
-   *                                   ★4 and pays OVERFLOW_COINS instead
-   *   else (or an untouched jelly)  → unchanged (mod null; no turn is used)
-   * Full wins over happy: both can be active together only when untouched
-   * jellies (which never use a happy turn) fill the tummy again.
-   * → { stars (1..4), mod: "full"|"happy"|null, overflowCoins (0 | 10), from (input stars) }
-   * Pass the whole result on to feed({ stars: r.stars, starMod: r }): feed
-   * uses up the happy turn and pays the overflow only then, so a jelly that is
-   * not eaten after all (spit / kick: impossible for a buffed ★2+, but also a
-   * visit that never happens) costs no turn.
+   *   penalty −1: full, or nopeTurns > 0 (both together: still −1)
+   *   bonus  +1: happyTurns > 0 and a touched jelly
+   *   the total is clamped to [−1, +1]: a penalty and the bonus cancel (±0)
+   *   stars are then clamped to 1..4; a lone +1 past ★4 stays ★4 and pays
+   *   OVERFLOW_COINS instead. A penalised ★1 still rolls spit / kick (hard mode).
+   * → { stars (1..4), mod: "full"|"nope"|"happy"|"cancel"|null, overflowCoins
+   *     (0 | 10), from (input stars), delta (−1|0|+1), full, nope, happy }
+   * (full / nope / happy: which modifiers were active; mod "full" wins over
+   * "nope" when both are.) Pass the whole result on to feed({ stars: r.stars,
+   * starMod: r }) — or spit({ starMod: r }) / kick({ starMod: r }).
+   * Turns are used up there: a nope turn by every outcome (eat / spit / kick,
+   * touched or not), a happy turn only by an eaten touched jelly (also when
+   * cancelled by a penalty).
    */
   modifyStars(stars, { touched = true } = {}) {
-    const from = Math.max(1, Math.min(4, Math.round(stars) || 1));
-    if (this.isFull) return { stars: Math.max(1, from - 1), mod: "full", overflowCoins: 0, from };
-    if (this.state.happyTurns > 0 && touched) {
-      return from >= 4 ? { stars: 4, mod: "happy", overflowCoins: OVERFLOW_COINS, from } : { stars: from + 1, mod: "happy", overflowCoins: 0, from };
-    }
-    return { stars: from, mod: null, overflowCoins: 0, from };
+    const st = this.state, from = Math.max(1, Math.min(4, Math.round(stars) || 1));
+    const full = this.isFull, nope = st.nopeTurns > 0, happy = st.happyTurns > 0 && !!touched;
+    const penalty = full || nope;
+    const delta = (happy ? 1 : 0) - (penalty ? 1 : 0);
+    const mod = penalty && happy ? "cancel" : full ? "full" : nope ? "nope" : happy ? "happy" : null;
+    const overflowCoins = delta > 0 && from >= 4 ? OVERFLOW_COINS : 0;
+    return { stars: Math.max(1, Math.min(4, from + delta)), mod, overflowCoins, from, delta, full, nope, happy };
   }
 
   /**
-   * The bunny goes to the toilet (only when full; null otherwise): the tummy
-   * empties, the bunny is happy for HAPPY_TURNS buffed meals (set, not added),
-   * the trip is counted (badges "첫 화장실" / "화장실 10회"). Saves once.
-   * → null | { happyTurns, toiletCount, achievements }
+   * 🚽 The bunny tries the toilet (any time).
+   * Full → a real trip: the tummy empties, a new hidden threshold is rolled,
+   *   the bunny is happy for HAPPY_TURNS buffed meals (set, not added), the
+   *   trip is counted (badges "첫 화장실" / "화장실 10회").
+   *   → { real: true, happyTurns, toiletCount, achievements, nopeTurns }
+   * Not full → a nope trip (헛걸음): nopeTurns = NOPE_TURNS (reset, never
+   *   added up); fullness, threshold, count and badges unchanged.
+   *   → { real: false, nopeTurns, happyTurns, toiletCount, achievements: [] }
+   * Saves once.
    */
   toilet() {
-    if (!this.isFull) return null;
     const st = this.state;
+    if (!this.isFull) {
+      st.nopeTurns = NOPE_TURNS;
+      this.commit();
+      return { real: false, nopeTurns: st.nopeTurns, happyTurns: st.happyTurns, toiletCount: st.toiletCount, achievements: [] };
+    }
     st.fullness = 0;
+    st.fullnessThreshold = rollFullnessThreshold(this.tummyRandom);
     st.happyTurns = HAPPY_TURNS;
     st.toiletCount++;
     const achievements = this.awardAchievements();
     this.commit();
-    return { happyTurns: st.happyTurns, toiletCount: st.toiletCount, achievements };
+    return { real: true, happyTurns: st.happyTurns, toiletCount: st.toiletCount, achievements, nopeTurns: st.nopeTurns };
+  }
+  // One feed outcome happened: a nope turn is used up if any is left.
+  useNopeTurn() {
+    if (!(this.state.nopeTurns > 0)) return false;
+    this.state.nopeTurns--;
+    return true;
   }
 
   // ------------------------------------------------------------ the bunny eats
@@ -369,15 +421,18 @@ export class Progress {
    * Applies coins (combo × kind × time bonus), XP, album card, golden free
    * card, colour book (+ milestones), secret recipe, level-ups (+ gift boxes)
    * and achievements; saves once.
-   * v9: every feed is an eaten jelly → fullness +1 (up to FULLNESS_MAX).
+   * v9: every feed is an eaten jelly → fullness +1 (up to the threshold).
    * starMod = the modifyStars() result these stars came from (stars must
-   * already be its .stars): mod "happy" uses up one happy turn and pays its
-   * overflowCoins as a flat bonus AFTER the multipliers (breakdown.overflow;
-   * included in coins). "full" / null change nothing here.
+   * already be its .stars): a happy bonus (mod "happy", or "cancel" with
+   * happy) uses up one happy turn; a lone "happy" pays its overflowCoins as a
+   * flat bonus AFTER the multipliers (breakdown.overflow; included in coins).
+   * v10: every feed (like every spit / kick) also uses up a nope turn if one
+   * is left, whatever starMod says.
    * → { coins, xp, levelUps, breakdown: {base, rare, combo, kind, time,
    *     overflow}, streak, comboMult, freeCardsGained, newColor, colorRewards,
-   *     achievements, secret, coinsTotal, starMod: "full"|"happy"|null,
-   *     happyUsed, happyTurns, fullness, fullnessMax, full, becameFull }
+   *     achievements, secret, coinsTotal, starMod: "full"|"nope"|"happy"|
+   *     "cancel"|null, happyUsed, happyTurns, nopeUsed, nopeTurns, fullness,
+   *     full, becameFull }
    * breakdown: base / rare = coins before multipliers, combo / kind =
    * multipliers, time = bonus fraction (0.5 / 0.25 / 0), overflow = flat
    * coins of a happy +1 past ★4 (0 / 10).
@@ -385,13 +440,16 @@ export class Progress {
   feed({ stars, order = this.order, result = null, jelly = null, card = null, elapsed = Infinity, peeks = 0, rareCount = 0, starMod = null } = {}) {
     const st = this.state, stats = st.stats, before = this.level.level;
     const s = Math.max(1, Math.min(4, Math.round(stars ?? result?.stars ?? 1)));
-    // the tummy: a buffed meal uses up its happy turn (only if one is left)
+    // the tummy: a buffed meal uses up its happy turn (only if one is left),
+    // every outcome a nope turn
     const mod = typeof starMod === "string" ? starMod : starMod?.mod ?? null;
-    const happyUsed = mod === "happy" && st.happyTurns > 0;
+    const buffed = mod === "happy" || (mod === "cancel" && (typeof starMod === "string" || starMod?.happy !== false));
+    const happyUsed = buffed && st.happyTurns > 0;
     if (happyUsed) st.happyTurns--;
-    const overflow = happyUsed ? count(starMod?.overflowCoins) : 0;
-    const wasFull = st.fullness >= FULLNESS_MAX;
-    st.fullness = Math.min(FULLNESS_MAX, st.fullness + 1);
+    const overflow = happyUsed && mod === "happy" ? count(starMod?.overflowCoins) : 0;
+    const nopeUsed = this.useNopeTurn();
+    const wasFull = this.isFull;
+    st.fullness = Math.min(st.fullnessThreshold, st.fullness + 1);
     const kind = order?.kind || "normal";
     const rares = jelly ? (jelly.rareCount ?? jelly.rare?.length ?? 0) : rareCount;
     // combo streak: ★3/★4 count up, ★2 keeps it, ★1 breaks it
@@ -458,26 +516,32 @@ export class Progress {
     const achievements = this.awardAchievements();
     coinsTotal += achievements.reduce((a, x) => a + x.coins, 0);
     this.commit();
-    const full = st.fullness >= FULLNESS_MAX;
+    const full = this.isFull;
     return {
       coins, xp, levelUps: ups.list, breakdown, streak: st.streak, comboMult, freeCardsGained, newColor, colorRewards, achievements, secret, coinsTotal,
-      starMod: mod === "full" || mod === "happy" ? mod : null, happyUsed, happyTurns: st.happyTurns,
-      fullness: st.fullness, fullnessMax: FULLNESS_MAX, full, becameFull: full && !wasFull,
+      starMod: ["full", "nope", "happy", "cancel"].includes(mod) ? mod : null, happyUsed, happyTurns: st.happyTurns, nopeUsed, nopeTurns: st.nopeTurns,
+      fullness: st.fullness, full, becameFull: full && !wasFull,
     };
   }
 
-  /** ★1 and the bunny spits it out (퉤): 1–50 coins are taken away (never below 0). */
+  /**
+   * ★1 and the bunny spits it out (퉤): 1–50 coins are taken away (never
+   * below 0). Like every outcome it uses up a nope turn if one is left (the
+   * tummy is not touched: no fullness, no happy turn).
+   * → { lost, rolled, achievements, nopeUsed, nopeTurns }
+   */
   spit() { return this.loseCoins(SPIT_COINS, "spits"); }
-  /** ★1 and the bunny kicks the jelly away: 1–50 coins are taken away (never below 0). */
+  /** ★1 and the bunny kicks the jelly away: as spit(). */
   kick() { return this.loseCoins(KICK_COINS, "kicks"); }
   loseCoins(range, stat) {
     const rolled = this.randInt(range), lost = Math.min(this.state.coins, rolled);
     this.state.coins -= lost;
     this.state.streak = 0;
     this.state.stats[stat]++;
+    const nopeUsed = this.useNopeTurn();
     const achievements = this.awardAchievements();
     this.commit();
-    return { lost, rolled, achievements };
+    return { lost, rolled, achievements, nopeUsed, nopeTurns: this.state.nopeTurns };
   }
 
   // ------------------------------------------------------------ levels & gifts
@@ -631,5 +695,5 @@ export class Progress {
   /** The worn title {id, label} or null. */
   get title() { return this.titles().find((t) => t.id === this.state.title) || null; }
 
-  reset() { this.state = freshProgress(); this.commit(); }
+  reset() { this.state = this.fresh(); this.commit(); }
 }
