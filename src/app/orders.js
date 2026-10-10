@@ -165,11 +165,14 @@ export function colorInfo(name) {
   return c ? { name: c.name, family: c.family, hex: sigmaToHex(c.sigma), sigma: c.sigma.slice(), base: c.base, drops: { ...c.drops } } : null;
 }
 
-/** Colour tolerance factor k by friendship level (1 = the v7 scale). v9.2
- * doubled the whole v8 curve (1.6 … 0.7 → 3.2 … 1.4): twice the colour
- * distance still counts as a perfect / passing colour at every level. */
+/** The v8 level curve of the colour tolerance (1 = the v7 scale). */
+const v8Tolerance = (level) => (level <= 2 ? 1.6 : level <= 4 ? 1.4 : level <= 6 ? 1.2 : level <= 8 ? 1.0 : level <= 10 ? 0.9 : level <= 12 ? 0.8 : 0.7);
+/** Overall scale on the v8 curve: v9.2 doubled it, v9.3 took that to 2/3
+ * (2 × 2/3 = 4/3 of v8 — Lv1–2 ≈ 2.13 … Lv13+ ≈ 0.93). */
+export const TOLERANCE_SCALE = 4 / 3;
+/** Colour tolerance factor k by friendship level. */
 export function toleranceFor(level = 1) {
-  return level <= 2 ? 3.2 : level <= 4 ? 2.8 : level <= 6 ? 2.4 : level <= 8 ? 2.0 : level <= 10 ? 1.8 : level <= 12 ? 1.6 : 1.4;
+  return v8Tolerance(level) * TOLERANCE_SCALE;
 }
 /** colorScore of a ΔE under tolerance k: 1 up to 5k, 0 from 33k. */
 export const colorScoreFor = (dE, k = 1) => Math.max(0, Math.min(1, 1 - (dE - 5 * k) / (28 * k)));
@@ -209,11 +212,11 @@ export function makeOrder({ paints, additives = [], level = 1, shapes = [], shap
   const pick = (list) => list[Math.floor(random() * list.length)];
   const kLevel = toleranceFor(level), k = kLevel * KIND_TOLERANCE[kind];
   // The order colour must look clearly different from its starting colour:
-  // ≥ 10 ΔE and the v8 distance (12 × the v8 k = 6 × today's doubled k), kept
-  // so the order colours stay as varied as before. With the doubled
-  // tolerance the untouched jelly could now pass the colour, so scoreOrder
+  // ≥ 10 ΔE and the v8 distance (12 × the v8 k), kept whatever the
+  // TOLERANCE_SCALE so the order colours stay as varied as before. With the
+  // wider tolerance the untouched jelly could pass the colour, so scoreOrder
   // caps an untouched jelly (jelly.touched === false) at ★2 instead.
-  const minDiff = Math.max(10, 6 * kLevel);
+  const minDiff = Math.max(10, 12 * v8Tolerance(level));
   const cap = 4 + Math.floor(level / 2);
   const recent = new Set(recentNames);
   const others = (shapes || []).map(shapeInfo).filter((s) => s && s.id !== "flower" && shapeBase(s.id));
