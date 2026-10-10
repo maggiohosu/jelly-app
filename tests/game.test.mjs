@@ -61,7 +61,8 @@ const extrasOf = (o) => [o.gems, o.additive, o.texture, o.shape].filter(Boolean)
   const orders = Array.from({ length: 240 }, (_, i) => orderAt(1 + (i % 12), random, i, { kind: kinds[i % 4] }));
   check("orders are v2 with a target colour, name and text", orders.every((o) => o.version === 2 && /^#[0-9a-f]{6}$/.test(o.hex) && o.name && o.text.endsWith("!") && o.text.includes(`${o.name}색`)));
   check("making the hidden recipe scores ⭐3", orders.every((o) => scoreOrder(o, perfect(o)).stars === 3));
-  check("the untouched starting colour never scores ⭐3 (even with every extra done)", orders.every((o) => scoreOrder(o, perfect(o, { sigma: mixSigma(o.base, {}) })).stars < 3));
+  check("the untouched starting jelly never scores ⭐3 (even with every extra done)", orders.every((o) => scoreOrder(o, perfect(o, { sigma: mixSigma(o.base, {}), touched: false })).stars < 3));
+  check("an untouched jelly is capped at ⭐2 even on the exact colour", orders.every((o) => scoreOrder(o, perfect(o, { touched: false })).stars <= 2 && scoreOrder(o, perfect(o, { touched: true })).stars === 3));
   check("orders vary", new Set(orders.map((o) => o.hex)).size > 150, `${new Set(orders.map((o) => o.hex)).size} distinct colours, ${new Set(orders.map((o) => o.name)).size} names`);
   check("only unlocked paints are used", orders.every((o, i) => Object.keys(o.drops).every((k) => paintsAt(1 + (i % 12)).includes(k))));
   check("total drops stay within the level's cap", orders.every((o, i) => Object.entries(o.drops).filter(([k]) => k !== "water").reduce((a, [, n]) => a + n, 0) <= 4 + Math.floor((1 + (i % 12)) / 2)));
@@ -83,12 +84,12 @@ const extrasOf = (o) => [o.gems, o.additive, o.texture, o.shape].filter(Boolean)
 
 // 4) difficulty: k by level, golden / picky stricter
 {
-  const want = { 1: 1.6, 2: 1.6, 3: 1.4, 4: 1.4, 5: 1.2, 6: 1.2, 7: 1.0, 8: 1.0, 9: 0.9, 10: 0.9, 11: 0.8, 12: 0.8, 13: 0.7, 20: 0.7 };
+  const want = { 1: 3.2, 2: 3.2, 3: 2.8, 4: 2.8, 5: 2.4, 6: 2.4, 7: 2.0, 8: 2.0, 9: 1.8, 10: 1.8, 11: 1.6, 12: 1.6, 13: 1.4, 20: 1.4 };
   check("colour tolerance k follows the level curve", Object.entries(want).every(([l, k]) => toleranceFor(Number(l)) === k));
   check("colorScore = clamp01(1 − (ΔE − 5k)/(28k))", colorScoreFor(5, 1) === 1 && Math.abs(colorScoreFor(19, 1) - 0.5) < 1e-12 && Math.abs(colorScoreFor(8, 1.6) - 1) < 1e-12 && colorScoreFor(60, 1.6) === 0 && Math.abs(colorScoreFor(19, 0.7) - (1 - (19 - 3.5) / 19.6)) < 1e-12);
   const r = rng(21);
   const ks = ["normal", "golden", "memory", "picky"].map((kind) => orderAt(9, r, 1, { kind }).k);
-  check("order.k = toleranceFor(level) × (golden 0.85 | picky 0.7 | 1)", Math.abs(ks[0] - 0.9) < 1e-12 && Math.abs(ks[1] - 0.9 * 0.85) < 1e-12 && Math.abs(ks[2] - 0.9) < 1e-12 && Math.abs(ks[3] - 0.9 * 0.7) < 1e-12, ks.map((k) => k.toFixed(3)).join(" "));
+  check("order.k = toleranceFor(level) × (golden 0.85 | picky 0.7 | 1)", Math.abs(ks[0] - 1.8) < 1e-12 && Math.abs(ks[1] - 1.8 * 0.85) < 1e-12 && Math.abs(ks[2] - 1.8) < 1e-12 && Math.abs(ks[3] - 1.8 * 0.7) < 1e-12, ks.map((k) => k.toFixed(3)).join(" "));
   const easy = orderAt(1, rng(3), 1), hard = { ...easy, k: 0.7 };
   const off = perfect(easy, { sigma: mixSigma(easy.base, { ...easy.drops, water: 2 }) });
   check("the same miss scores lower at a stricter k", scoreOrder(hard, off).colorScore <= scoreOrder(easy, off).colorScore && scoreOrder({ ...easy, k: undefined }, off).k === 1);

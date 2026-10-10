@@ -671,7 +671,7 @@ async function boot() {
     return {
       sigma: view.state.meanDye.slice(), shape: settings.shape, texture: settings.texture,
       gems: jellyGems.shapes.slice(), rare: jellyGems.rare.map((r) => ({ ...r })), rareCount: jellyGems.rareCount,
-      additives: { ...jellyExtras.additives }, fx: jellyExtras.fx.slice(),
+      additives: { ...jellyExtras.additives }, fx: jellyExtras.fx.slice(), touched,
     };
   }
   const colorSwatch = (name) => `<i class="color-dot" style="--c:${colorInfo(name)?.hex || "#ddd"}"></i>`;
