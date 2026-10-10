@@ -580,8 +580,8 @@ async function boot() {
       // a free card first when there is one
       const r = progress.pull({ free: progress.freeCards > 0 });
       if (r?.type === "shape") ui.setShapes(progress.shapes(), [r.id]);
-      // an outfit card: owned now — the bunny wears it on its next visit
-      if (r?.type === "outfit") { progress.setOutfit(r.slot, r.id); rabbit.setOutfit?.(progress.outfit); }
+      // an outfit card: owned now, but not worn — the player puts it on in
+      // ⚙ 설정 → 토끼 꾸미기 (refreshDressUp below unlocks the chip there)
       if (r) refreshDressUp();
       return r;
     },

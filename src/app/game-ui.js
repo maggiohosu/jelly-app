@@ -397,7 +397,7 @@ export function createGameUI({ progress, rareInfo, rareIcon, rareThumb, onPull, 
       $("gacha-sub").textContent = "100장에 1장 나오는 모양 카드! 친밀도를 기다리지 않고 지금 바로 쓸 수 있어요";
     } else if (isOutfit) {
       $("gacha-title").textContent = `꾸미기 카드! ${result.emoji} ${result.label}`;
-      $("gacha-sub").textContent = "카드에서만 나오는 옷이에요! 토끼가 바로 입고 와요 · ⚙ 설정 → 토끼 꾸미기";
+      $("gacha-sub").textContent = "카드에서만 나오는 옷이에요! ⚙ 설정 → 토끼 꾸미기에서 입혀 주세요";
     } else {
       const info = rareInfo(result.index), more = `+${result.added}개 (이제 ${result.count}개)`;
       $("gacha-title").textContent = result.kind === "new" ? `새 보석! ${info.label}` : result.kind === "more" ? `${info.label} +${result.added}개` : `${info.label} 업그레이드!`;
